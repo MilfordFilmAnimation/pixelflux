@@ -554,8 +554,8 @@ impl H264EncoderWrapper {
 ///   `h264_burst_frames_remaining` tracks a post-repaint or recovery streaming burst.
 /// - **Content-hash damage** (only for sources without external damage, i.e. X11): `last_hash` is
 ///   the previous frame's content hash, `consecutive_changes` counts changed frames toward the
-///   damage-block threshold, and `in_damage_block` / `damage_block_frames_remaining` /
-///   `hash_at_block_start` drive the sustained-motion damage block managed by `content_dirty`.
+///   damage-block threshold, and `in_damage_block` / `damage_block_frames_remaining` drive the
+///   sustained-motion damage block managed by `content_dirty`.
 #[derive(Default)]
 pub struct StripeState {
     pub no_motion_frame_count: u32,
@@ -576,7 +576,6 @@ pub struct StripeState {
     pub consecutive_changes: u32,
     pub in_damage_block: bool,
     pub damage_block_frames_remaining: i32,
-    pub hash_at_block_start: u64,
 }
 
 /// Fast, non-cryptographic 64-bit content hash used only for in-memory change detection.
@@ -598,15 +597,16 @@ impl StripeState {
     /// The hash is not free, and a region that changes every frame would otherwise be re-hashed
     /// forever while always reporting dirty anyway. So after `threshold` consecutive changes the
     /// stripe enters a damage block that just reports dirty for `duration` frames and re-hashes only
-    /// once, at the end, to decide whether to extend the block or let it lapse — trading a little
-    /// extra sending for far fewer hashes on exactly the regions that need them least:
+    /// on its last two frames, to decide whether to extend the block or let it lapse — trading a
+    /// little extra sending for far fewer hashes on exactly the regions that need them least:
     ///
     /// 1. **Inside a damage block**: the stripe is treated as dirty without re-hashing, and the
-    ///    block's remaining-frame counter is decremented. Only when the counter reaches zero is the
-    ///    stripe re-hashed — if it differs from the hash captured at block start the block is renewed
-    ///    for another `duration` frames, otherwise the block exits and the change counter resets.
-    ///    This keeps a continuously-moving region streaming for `duration` frames per re-check rather
-    ///    than hashing every frame.
+    ///    block's remaining-frame counter is decremented. The stripe is hashed on the block's last
+    ///    two frames: if they differ the region is still moving and the block is renewed for
+    ///    another `duration` frames, otherwise the block exits and the change counter resets, so
+    ///    motion that stopped inside a block is read as stopped when that block ends, not a block
+    ///    later. This keeps a continuously-moving region streaming for `duration` frames per
+    ///    re-check rather than hashing every frame.
     /// 2. **Outside a block**: the stripe is hashed and compared to the previous frame. A change
     ///    increments `consecutive_changes`, and reaching `threshold` consecutive changes opens a new
     ///    damage block; an unchanged frame resets the counter to zero.
@@ -615,11 +615,12 @@ impl StripeState {
     pub fn content_dirty(&mut self, bytes: &[u8], threshold: u32, duration: i32) -> bool {
         if self.in_damage_block {
             self.damage_block_frames_remaining -= 1;
-            if self.damage_block_frames_remaining <= 0 {
+            if self.damage_block_frames_remaining == 1 {
+                self.last_hash = fast_hash(bytes);
+            } else if self.damage_block_frames_remaining <= 0 {
                 let h = fast_hash(bytes);
-                if h != self.hash_at_block_start {
+                if h != self.last_hash {
                     self.damage_block_frames_remaining = duration;
-                    self.hash_at_block_start = h;
                 } else {
                     self.in_damage_block = false;
                     self.consecutive_changes = 0;
@@ -636,7 +637,6 @@ impl StripeState {
             if self.consecutive_changes >= threshold {
                 self.in_damage_block = true;
                 self.damage_block_frames_remaining = duration;
-                self.hash_at_block_start = h;
             }
         } else {
             self.consecutive_changes = 0;
@@ -1545,6 +1545,17 @@ mod tests {
         assert!(st.content_dirty(&a, 2, 3));
         assert!(!st.in_damage_block);
         assert!(!st.content_dirty(&a, 2, 3));
+
+        // Motion through a whole block renews it; motion that stops inside one ends with it.
+        let frames: Vec<Vec<u8>> = (0..12u8).map(|i| vec![i; 256]).collect();
+        let mut st = StripeState::default();
+        for f in &frames {
+            assert!(st.content_dirty(f, 2, 3));
+        }
+        assert!(st.in_damage_block, "a region moving every frame stays in its block");
+        let still = frames.last().unwrap();
+        let dirty: Vec<bool> = (0..6).map(|_| st.content_dirty(still, 2, 3)).collect();
+        assert_eq!(dirty, [true, true, false, false, false, false], "clean once the block that saw it stop ends");
     }
 
     /// With compositor damage as the authority (Wayland), a clean frame must still advance the
