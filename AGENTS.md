@@ -134,7 +134,11 @@ driver that refuses the kernel.
 encoder to it; the sequence headers travel with every IDR so a client joining or resynchronizing on any key
 frame can decode, which `encoders/v4l2m2m.rs` keeps true itself for the devices whose drivers will not
 (`REPEAT_SEQ_HEADER` is asked for and the parameter sets are put back where it is refused), since neither
-FFmpeg's nor GStreamer's M2M encoder guarantees it. Encoder settings are chosen by measured latency first, frame rate second, quality third, and
+FFmpeg's nor GStreamer's M2M encoder guarantees it. Every H.264 stream bounds reordering at zero in its SPS, since
+Chromium's hardware decoders hold a whole decoded picture buffer back where a stream declares no bound: the software
+encoders and NVENC write the restriction, and the sessions whose device or driver writes its own SPS (VA-API, V4L2
+M2M, Tegra) write it back where it is missing (`sps::bound_reorder`), each only where it proves its pictures leave
+in display order; the unit tests hold each encoder to it. Encoder settings are chosen by measured latency first, frame rate second, quality third, and
 bitrate last: every software encoder runs at the fastest setting its library offers in real time (x264
 ultrafast, VP8 speed 16, VP9 speed 8 with screen tuning, SVT-AV1 preset 11 in its real-time mode, x265
 ultrafast with wavefront threads), NVENC at preset P3 with two-pass quarter-resolution rate control

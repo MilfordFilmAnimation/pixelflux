@@ -5,7 +5,8 @@
 use super::mock::{self, Driver};
 use super::*;
 use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY};
-use crate::encoders::sps::{h264_frame_num_range, h264_max_num_ref_frames, read_color, ColorSignal};
+use crate::encoders::sps::fixtures::{assert_no_reorder, VCE_SPS};
+use crate::encoders::sps::{h264_frame_num_range, h264_max_num_ref_frames, h264_reorder, read_color, ColorSignal};
 
 const W: i32 = 320;
 const H: i32 = 240;
@@ -275,6 +276,7 @@ fn h264_names_the_newest_surviving_frame_in_its_slice_header() {
     let stream = &first[VIDEO_HEADER_LEN..];
     assert_eq!(h264_max_num_ref_frames(stream), Some(REFERENCE_FRAMES));
     assert_eq!(h264_frame_num_range(stream), Some(65536));
+    assert_no_reorder(stream, "the session's own SPS");
     assert_eq!(read_color(crate::encoders::codec::annexb_nals(stream).find(|n| n[0] & 0x1f == 7).unwrap()), Some(ColorSignal::BT709_LIMITED));
     assert_eq!(enc.last_reference(), Reference::None);
     for t in 1..8u64 {
@@ -932,6 +934,27 @@ fn a_loss_across_the_wrap_of_the_drivers_frame_num_costs_a_key_frame() {
     assert!(enc.invalidate_reference(127));
     let out = encode(&mut enc, 130, false);
     assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)), "frame 128 carried frame_num 0");
+}
+
+/// A driver that writes its own SPS in place of the session's, as radeonsi's VCE firmware did
+/// before Mesa 25.0, drops the reorder bound; the session writes it back, whatever picture order
+/// count the driver chose, and passes every other unit of the frame as the driver coded it.
+#[test]
+fn a_bound_the_driver_drops_is_written_back() {
+    mock::reset(Driver::generous());
+    let mut enc = session(Codec::H264, false);
+    let rest = [&[0, 0, 0, 1, 0x68, 0xee, 0x38, 0x30][..], &[0, 0, 0, 1, 0x65, 0x88, 0x80, 0x43]].concat();
+    let driver_key = [&[0, 0, 0, 1][..], VCE_SPS, &rest].concat();
+    assert_eq!(h264_reorder(&driver_key), None, "the driver's SPS declares no bound");
+    mock::with(|d| d.coded = Some(driver_key));
+    let key = encode(&mut enc, 0, true);
+    assert_no_reorder(&key[VIDEO_HEADER_LEN..], "the driver's SPS, bounded");
+    assert!(key.ends_with(&rest), "the PPS and the slice changed");
+    assert_eq!(h264_frame_num_range(&key[VIDEO_HEADER_LEN..]), Some(128), "the driver's frame_num range");
+    let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x02, 0x04];
+    mock::with(|d| d.coded = Some(delta.to_vec()));
+    assert_eq!(encode(&mut enc, 1, false)[VIDEO_HEADER_LEN..], delta, "a delta came back changed");
+    mock::with(|d| d.coded = None);
 }
 
 /// A driver taking fewer slices than a session asks for gets as many as it takes, rather than

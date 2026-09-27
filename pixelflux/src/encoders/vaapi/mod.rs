@@ -52,7 +52,7 @@ use super::codec::{
 };
 use super::reference::{Reference, ReferenceSlots, ReferenceWindow, SlotPlan, REFERENCE_FRAMES};
 use super::session::{check_host_frame, RateSettings};
-use super::sps::h264_frame_num_range;
+use super::sps::{h264_frame_num_range, NoReorder};
 use crate::RustCaptureSettings;
 
 /// The slices an H.264 or HEVC picture is cut into.
@@ -533,6 +533,11 @@ pub struct VaapiEncoder {
     sequence_start: bool,
     omit_headers: bool,
     fresh: bool,
+    /// The reorder bound the H.264 stream is held to. A driver may write its own sequence
+    /// parameter set in place of the session's (radeonsi's VCE did before Mesa 25.0, declaring no
+    /// restriction or a depth of three), and the session submits every picture in the order it
+    /// is shown, so the bound is written whatever the driver's picture order count.
+    reorder: NoReorder,
 }
 
 unsafe impl Send for VaapiEncoder {}
@@ -735,6 +740,7 @@ impl VaapiEncoder {
             sequence_start: true,
             omit_headers: settings.omit_stripe_headers,
             fresh: true,
+            reorder: NoReorder::new("The VA-API driver", true),
         };
         let (align_w, align_h) = {
             let (aw, ah) = arm.alignment();
@@ -1247,6 +1253,13 @@ impl VaapiEncoder {
         let header_len = if self.omit_headers { 0 } else { VIDEO_HEADER_LEN };
         let mut output = vec![0; header_len];
         self.issue(&out, &mut output)?;
+        if key
+            && self.codec == Codec::H264
+            && let Some(bounded) = self.reorder.apply(&output[header_len..])
+        {
+            output.truncate(header_len);
+            output.extend_from_slice(&bounded);
+        }
         self.fresh = false;
         self.sequence_start = false;
         self.surfaces_of.insert(pts, recon);
@@ -1497,5 +1510,30 @@ mod tests {
             Err(e) => assert!(!e.is_empty(), "refusal must carry a reason"),
         }
         assert!(VaapiEncoder::new(&settings, Codec::Jpeg, Input::Host { rgba: false }).is_err());
+    }
+
+    /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): whichever sequence
+    /// parameter set the driver writes, the key frame bounds reordering at zero and decodes.
+    #[test]
+    #[ignore]
+    fn vaapi_h264_bounds_reordering_at_zero() {
+        use crate::encoders::sps::fixtures::assert_no_reorder;
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h) = (1280usize, 720usize);
+        let settings = RustCaptureSettings {
+            width: w as i32,
+            height: h as i32,
+            codec: Codec::H264,
+            video_cbr_mode: true,
+            video_bitrate_kbps: 4000,
+            omit_stripe_headers: true,
+            ..Default::default()
+        };
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false }).expect("a VA-API H.264 session");
+        let frame: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff]).collect();
+        let key = enc.encode_host(&frame, w * 4, false, 0, 25, true).expect("encode");
+        assert_no_reorder(&key, enc.vendor());
+        let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
+        assert!(dec.decode(&key).expect("the bounded key frame decodes"), "no picture");
     }
 }

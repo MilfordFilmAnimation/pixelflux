@@ -1863,6 +1863,24 @@ mod qp_bound_sweep {
         assert!(worst <= 12.0, "the software H.264 path paints {worst:.1} off the chart");
     }
 
+    /// Every x264 session bounds reordering at zero, 4:2:0 and 4:4:4, at a constant quantizer
+    /// and a constant rate: the full-frame session is one stripe of the same machinery.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_bounds_reordering_at_zero() {
+        use crate::encoders::sps::fixtures::assert_no_reorder;
+        for (fullcolor, cbr) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut enc = H264EncoderWrapper::new(W as i32, H as i32, 20, fullcolor, 60.0, 4, cbr, 8000, 0, 0, 0)
+                .expect("x264 init");
+            let chroma = if fullcolor { W * H } else { W * H / 4 };
+            let (u, v) = (vec![128u8; chroma], vec![128u8; chroma]);
+            let stride = if fullcolor { W } else { W / 2 } as i32;
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(&text_luma(0), &u, &v, W as i32, stride, stride, 0, 0, true, true, &mut out));
+            assert_no_reorder(&out, &format!("x264 fullcolor {fullcolor} cbr {cbr}"));
+        }
+    }
+
     /// A frame a client lost is left out of the predictions: the next frame predicts from the
     /// newest frame before it and names it, a decoder that never saw the lost frames decodes it
     /// as one that saw everything does, and a loss the window no longer covers becomes a key

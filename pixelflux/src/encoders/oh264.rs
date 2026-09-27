@@ -611,6 +611,32 @@ mod tests {
         assert_eq!(dec.color_tags(), Some(ColorTags::BT709_LIMITED));
     }
 
+    /// The stream bounds reordering at zero at a constant quantizer and a constant rate, whole
+    /// and striped.
+    #[test]
+    fn bounds_reordering_at_zero() {
+        use crate::encoders::sps::fixtures::assert_no_reorder;
+        for (cbr, whole) in [(false, true), (true, true), (true, false)] {
+            let s = RustCaptureSettings {
+                width: 320,
+                height: 192,
+                target_fps: 30.0,
+                video_cbr_mode: cbr,
+                video_bitrate_kbps: 2000,
+                ..Default::default()
+            };
+            let mut enc = if whole {
+                Openh264Encoder::new(&s)
+            } else {
+                Openh264Encoder::new_stripe(&s, 320, 64, s.video_crf, s.video_bitrate_kbps, false)
+            }
+            .expect("openh264 init");
+            let height = if whole { 192 } else { 64 };
+            let idr = enc.encode_host_argb(&busy_frame(320, height, 0), 320 * 4, 0, true, false).expect("encode");
+            assert_no_reorder(&idr[VIDEO_HEADER_LEN..], &format!("OpenH264 cbr {cbr} whole {whole}"));
+        }
+    }
+
     /// The color chart, handed to the encoder as host ARGB, decodes back to the color that was
     /// painted when the BT.709 the stream declares is inverted — the check a client's
     /// presentation path performs on every frame, here with no browser in the way.

@@ -3848,6 +3848,34 @@ mod gpu_tests {
         assert_eq!(wire_dims(&pkt), (1920, 1080));
     }
 
+    /// Every H.264 session bounds reordering at zero, 4:2:0 and 4:4:4, and so does the IDR an
+    /// in-place resize forces, which re-declares the stream. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_h264_bounds_reordering_at_zero() {
+        use crate::encoders::sps::fixtures::assert_no_reorder;
+        for fullcolor in [false, true] {
+            let mut s = settings(1920, 1080, 60.0);
+            s.video_fullcolor = fullcolor;
+            s.omit_stripe_headers = true;
+            let mut enc = match host_session(&s) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("fullcolor {fullcolor}: {e}");
+                    continue;
+                }
+            };
+            let key = enc.encode_cpu_argb(&frame(1920, 1080, 10), 1920 * 4, 0, 25, true).expect("encode 1080p");
+            assert_no_reorder(&key, &format!("NVENC fullcolor {fullcolor} 1080p"));
+            s.width = 1280;
+            s.height = 720;
+            if enc.reconfigure_resolution(&s).expect("in-place resize") {
+                let key = enc.encode_cpu_argb(&frame(1280, 720, 20), 1280 * 4, 1, 25, false).expect("encode 720p");
+                assert_no_reorder(&key, &format!("NVENC fullcolor {fullcolor} 720p after the resize"));
+            }
+        }
+    }
+
     /// On a real GPU, a resize the driver refuses ends in the rebuild its callers already do:
     /// the ladder the session came from opens a new one at the new size, declaring the buffer
     /// its own level admits. Forced by asking to raise the buffer a 1080p session declared,

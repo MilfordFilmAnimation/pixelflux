@@ -444,35 +444,6 @@ fn node() -> Option<&'static NodeInfo> {
     .as_ref()
 }
 
-/// Where each sequence parameter set sits in an access unit, as `(start, end)` of the NAL unit
-/// itself, the start code excluded. A set repeats with every key frame when the encoder is asked
-/// for headers on each one, and a stream whose first set alone is written shows one color to the
-/// client that connected first and another to the one that joined later.
-fn sequence_parameter_sets(unit: &[u8]) -> Vec<(usize, usize)> {
-    let mut starts = Vec::new();
-    let mut index = 0;
-    while index + 3 < unit.len() {
-        if unit[index] == 0 && unit[index + 1] == 0 && unit[index + 2] == 1 {
-            starts.push(index + 3);
-            index += 3;
-        } else {
-            index += 1;
-        }
-    }
-    let mut sets = Vec::new();
-    for (position, &start) in starts.iter().enumerate() {
-        if unit[start] & 0x1f != 7 {
-            continue;
-        }
-        let mut end = starts.get(position + 1).map_or(unit.len(), |next| next - 3);
-        if end > start && unit[end - 1] == 0 {
-            end -= 1;
-        }
-        sets.push((start, end));
-    }
-    sets
-}
-
 /// The rates to try, in order: what the session asked for, then the ones a device that refuses
 /// it is likely to take. A device is asked at its own rate first, so one that can do it is never
 /// slowed, and the steps below are the rates video hardware is built around rather than a search.
@@ -562,6 +533,10 @@ pub struct V4l2M2mEncoder {
     written_sps: Option<(Vec<u8>, Vec<u8>)>,
     /// Whether the first access unit has settled what the stream says.
     decided: bool,
+    /// The reorder bound every H.264 set is held to. The session queues one frame and waits for
+    /// its unit before the next, so pictures leave in the order they are shown whatever the
+    /// device's picture order count: a device that reordered would wait for a frame never queued.
+    reorder: sps::NoReorder,
 }
 
 unsafe impl Send for V4l2M2mEncoder {}
@@ -611,6 +586,7 @@ impl V4l2M2mEncoder {
             fallback: known_conversion(&info.driver),
             written_sps: None,
             decided: false,
+            reorder: sps::NoReorder::new("The M2M encoder", true),
         };
         // A device answers "not at that rate" only by refusing, and only once the port is
         // enabled: the frame rate reaches the firmware at `STREAMON`, not at the ioctl that
@@ -892,9 +868,14 @@ impl V4l2M2mEncoder {
     }
 
     /// Learn what the first sequence parameter set says, and write one into every later set when
-    /// the device said nothing and its conversion is on record.
-    fn tag_color(&mut self, unit: &[u8]) -> Option<Vec<u8>> {
-        let sets = sequence_parameter_sets(unit);
+    /// the device said nothing and its conversion is on record; then hold every set to a reorder
+    /// bound of zero. Only H.264 carries either here: an H.265 set names its own reordering, and
+    /// VP8 and VP9 carry no parameter sets.
+    fn tag_sequence(&mut self, unit: &[u8]) -> Option<Vec<u8>> {
+        if self.codec != Codec::H264 {
+            return None;
+        }
+        let sets = sps::sequence_parameter_sets(unit);
         if sets.is_empty() {
             return None;
         }
@@ -928,36 +909,49 @@ impl V4l2M2mEncoder {
                 },
             };
         }
-        let Color::Writing(signal) = self.color else { return None };
 
-        let mut out = Vec::with_capacity(unit.len() + 8 * sets.len());
+        let mut out: Option<Vec<u8>> = None;
         let mut copied = 0;
         for (start, end) in sets {
             let original = &unit[start..end];
-            let written = match &self.written_sps {
-                Some((was, now)) if was == original => now.clone(),
-                _ => match sps::write_color(original, signal) {
-                    Ok(written) => {
-                        self.written_sps = Some((original.to_vec(), written.clone()));
-                        written
-                    }
-                    Err(e) => {
-                        // A set this code cannot write is left as it came: a stream that carries
-                        // no color is watchable, and one carrying a set built wrong is not.
-                        if self.written_sps.is_none() {
-                            eprintln!("[pixelflux] The sequence parameter set was left as it came: {e}");
-                            self.color = Color::Untagged;
-                        }
-                        return None;
-                    }
-                },
+            let colored = match self.color {
+                Color::Writing(signal) => self.write_color(original, signal),
+                _ => None,
             };
+            let set = colored.as_deref().unwrap_or(original);
+            let Some(replacement) = self.reorder.set(set).or(colored) else { continue };
+            let out = out.get_or_insert_with(|| Vec::with_capacity(unit.len() + 16 * 4));
             out.extend_from_slice(&unit[copied..start]);
-            out.extend_from_slice(&written);
+            out.extend_from_slice(&replacement);
             copied = end;
         }
+        let mut out = out?;
         out.extend_from_slice(&unit[copied..]);
         Some(out)
+    }
+
+    /// `original` declaring `signal`, or None where the set cannot be written, in which case it
+    /// is left as it came: a stream that carries no color is watchable, and one carrying a set
+    /// built wrong is not.
+    fn write_color(&mut self, original: &[u8], signal: ColorSignal) -> Option<Vec<u8>> {
+        if let Some((was, now)) = &self.written_sps
+            && was == original
+        {
+            return Some(now.clone());
+        }
+        match sps::write_color(original, signal) {
+            Ok(written) => {
+                self.written_sps = Some((original.to_vec(), written.clone()));
+                Some(written)
+            }
+            Err(e) => {
+                if self.written_sps.is_none() {
+                    eprintln!("[pixelflux] The sequence parameter set was left as it came: {e}");
+                    self.color = Color::Untagged;
+                }
+                None
+            }
+        }
     }
 
     /// Apply a live bitrate or frame rate change. Both are writable while streaming on this path,
@@ -998,7 +992,7 @@ impl V4l2M2mEncoder {
         }
         let (data, _) = self.capture[slot];
         let unit = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
-        let tagged = self.tag_color(unit);
+        let tagged = self.tag_sequence(unit);
         let bytes = tagged.as_deref().unwrap_or(unit);
         let mut out = Vec::with_capacity(VIDEO_HEADER_LEN + bytes.len());
         if self.omit_headers {
@@ -1043,6 +1037,86 @@ impl Drop for V4l2M2mEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoders::sps::fixtures::{reorder_of, without, PI4_SPS, VCE_SPS};
+
+    /// A session of `codec` on a device of `driver` that never opened a node, for what a session
+    /// does with the units a device hands back.
+    fn stand_in(codec: Codec, driver: &str) -> V4l2M2mEncoder {
+        V4l2M2mEncoder {
+            fd: -1,
+            codec,
+            coded: coded_fourcc(codec).unwrap_or(0),
+            width: 1280,
+            height: 720,
+            row_bytes: 1280 * 4,
+            bytesperline: 0,
+            output_size: 0,
+            output_map: libc::MAP_FAILED,
+            capture: [(libc::MAP_FAILED, 0); CAPTURE_BUFFERS],
+            bitrate_bps: 8_000_000,
+            fps: 30.0,
+            omit_headers: true,
+            color: match known_conversion(driver) {
+                Some(signal) => Color::Writing(signal),
+                None => Color::Unknown,
+            },
+            fallback: known_conversion(driver),
+            written_sps: None,
+            decided: false,
+            reorder: sps::NoReorder::new("The M2M encoder", true),
+        }
+    }
+
+    /// An access unit as a device hands it back: the set, a PPS, and an IDR slice.
+    fn unit(sps: &[u8]) -> Vec<u8> {
+        [&[0, 0, 0, 1][..], sps, &[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80], &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x21]].concat()
+    }
+
+    /// The first set of an access unit.
+    fn first_set(unit: &[u8]) -> Vec<u8> {
+        let (start, end) = sps::sequence_parameter_sets(unit)[0];
+        unit[start..end].to_vec()
+    }
+
+    /// Every H.264 set a device hands back leaves bounded at zero: the session queues a frame
+    /// and waits for its unit, so nothing it encodes can reorder whatever picture order count
+    /// the device writes. A device that declares its own color keeps it.
+    #[test]
+    fn a_device_set_leaves_bounded_at_zero() {
+        let mut session = stand_in(Codec::H264, "unknown-codec");
+        let tagged = session.tag_sequence(&unit(VCE_SPS)).expect("a set to bound");
+        assert_eq!(reorder_of(&first_set(&tagged)), Some((0, 2)));
+        assert_eq!(sps::read_color(&first_set(&tagged)), sps::read_color(VCE_SPS), "the device's own color moved");
+        assert!(tagged.ends_with(&unit(VCE_SPS)[4 + VCE_SPS.len()..]), "the units after the set changed");
+        assert_eq!(session.tag_sequence(&unit(VCE_SPS)), Some(tagged), "the next key frame's set differs");
+        assert_eq!(session.tag_sequence(&[0, 0, 0, 1, 0x41, 0x9a, 0x02]), None, "a delta without a set was touched");
+    }
+
+    /// A Raspberry Pi 4 on an old firmware declares no color and bounds its own stream: the
+    /// color on record is written and the bound it declared survives the write; without its own
+    /// bound it is given one next to the color.
+    #[test]
+    fn the_pi_color_and_the_bound_are_written_together() {
+        let mut session = stand_in(Codec::H264, "bcm2835-codec");
+        let tagged = first_set(&session.tag_sequence(&unit(PI4_SPS)).expect("a color to write"));
+        assert_eq!(sps::read_color(&tagged), Some(ColorSignal::BT601_FULL));
+        assert_eq!(reorder_of(&tagged), Some((0, 1)));
+        let mut session = stand_in(Codec::H264, "bcm2835-codec");
+        let bare = without(PI4_SPS, false);
+        let tagged = first_set(&session.tag_sequence(&unit(&bare)).expect("a set to write"));
+        assert_eq!(sps::read_color(&tagged), Some(ColorSignal::BT601_FULL));
+        assert_eq!(reorder_of(&tagged), Some((0, 1)));
+    }
+
+    /// Only H.264 carries these sets: bytes of another codec that happen to look like one are
+    /// passed through untouched.
+    #[test]
+    fn other_codecs_are_passed_through() {
+        for codec in [Codec::H265, Codec::Vp8, Codec::Vp9] {
+            let mut session = stand_in(codec, "bcm2835-codec");
+            assert_eq!(session.tag_sequence(&unit(VCE_SPS)), None, "{codec:?}");
+        }
+    }
 
     /// The structures are laid out for the sizes the ioctl numbers encode, so a layout that
     /// drifted is caught here rather than by a device scribbling through a field.

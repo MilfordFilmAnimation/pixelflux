@@ -775,6 +775,10 @@ pub struct TegraEncoder {
     /// Set when the encoder coded a key frame nobody asked for: its references and the window's
     /// no longer agree, and the next frame is a key frame to make them agree again.
     resync: bool,
+    /// The reorder bound the H.264 sets are held to where the stream rules reordering out: the
+    /// session asks for picture order count type 2, which a driver may refuse, and hands units
+    /// back one or two frames late, so the session alone does not prove the order.
+    reorder: super::sps::NoReorder,
 }
 
 impl TegraEncoder {
@@ -846,6 +850,7 @@ impl TegraEncoder {
             keyframe_every: 0,
             since_key: 0,
             resync: false,
+            reorder: super::sps::NoReorder::new("The Tegra encoder", false),
         };
         if let Err(e) = me.setup(settings, fps, bitrate_bps, rgba, coded) {
             return Err(format!("{opened}: {e}"));
@@ -1607,20 +1612,24 @@ impl TegraEncoder {
             }
             if length > 0 {
                 let (data, _) = self.capture[index];
-                let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
+                let unit = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
                 let number = buffer.timestamp[0] as u64;
                 let reference = self.reference_of(number);
-                let frame_type = self.frame_type(bytes);
+                let frame_type = self.frame_type(unit);
                 if frame_type == FRAME_KEY {
                     self.note_key_frame(reference);
                 }
+                let bounded = (frame_type == FRAME_KEY && self.codec == Codec::H264)
+                    .then(|| self.reorder.apply(unit))
+                    .flatten();
+                let bytes = bounded.as_deref().unwrap_or(unit);
                 if self.units.is_empty() {
                     self.last_reference = reference;
                 }
                 if self.omit_headers {
                     out.extend_from_slice(bytes);
                 } else {
-                    out.reserve(VIDEO_HEADER_LEN + length);
+                    out.reserve(VIDEO_HEADER_LEN + bytes.len());
                     push_video_header(
                         &mut out,
                         self.codec,
