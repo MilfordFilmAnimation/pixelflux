@@ -17,6 +17,7 @@
 use super::codec::{h264_dpb_frames, h264_level, push_video_header, FRAME_DELTA, FRAME_INTRA, FRAME_KEY};
 use super::codec::{push_jpeg_header, Codec};
 use super::reference::Reference;
+use crate::pipeline::{Cleanup, Damage};
 #[cfg(feature = "gpl")]
 use super::reference::{Invalidation, ReferenceWindow};
 #[cfg(feature = "gpl")]
@@ -652,9 +653,12 @@ impl H264EncoderWrapper {
 ///   the encoded output, grown in place rather than reallocated per frame.
 /// - **Encoder**: `h264_encoder` is the stripe's software H.264 instance — libx264 in a `gpl`
 ///   build, OpenH264 otherwise — reused until its geometry (or, for x264, chroma format) changes.
-/// - **Paint-over / recovery**: `no_motion_frame_count` counts consecutive static frames,
-///   `paint_over_sent` guards against re-sending a high-quality repaint of a still region, and
-///   `h264_burst_frames_remaining` tracks a post-repaint or recovery streaming burst.
+/// - **Cleanup / recovery**: `no_motion_frame_count` counts consecutive static frames,
+///   `paint_over_sent` records that the region was cleaned up since it last changed,
+///   `h264_burst_frames_remaining` tracks a post-cleanup or recovery streaming burst (held at the
+///   paint-over quantizer where `burst_held`), and `dirty_run`, `change_mass`, `unclean_frames`,
+///   and `motion` (the share of recent frames in motion) are what `pipeline::cleanup_due` weighs
+///   to pick the cleanup's moment and kind.
 /// - **Content-hash damage** (only for sources without external damage, i.e. X11): `last_hash` is
 ///   the previous frame's content hash, `consecutive_changes` counts changed frames toward the
 ///   damage-block threshold, and `in_damage_block` / `damage_block_frames_remaining` drive the
@@ -663,6 +667,11 @@ impl H264EncoderWrapper {
 pub struct StripeState {
     pub no_motion_frame_count: u32,
     pub paint_over_sent: bool,
+    pub dirty_run: u32,
+    pub change_mass: f32,
+    pub unclean_frames: u32,
+    pub motion: f32,
+    pub burst_held: bool,
     #[cfg(feature = "gpl")]
     pub h264_encoder: Option<H264EncoderWrapper>,
     #[cfg(not(feature = "gpl"))]
@@ -801,9 +810,19 @@ impl FrameTiming {
 
 /// No stripe is shorter than a macroblock row.
 const MIN_STRIPE_HEIGHT: i32 = 64;
+/// The frames the stripes' cleanups of one still screen are spread over (`encode_cpu`).
+const CLEANUP_STAGGER_FRAMES: usize = 4;
 /// How fast the smoothed count of budget-carrying stripes follows the frame's.
 const CARRY_RISE: f32 = 0.3;
 const CARRY_FALL: f32 = 0.05;
+
+/// Whether the striped software path holds a stripe's cleanup at the quantizer asked for:
+/// libx264 does under either rate control, and OpenH264 moves its quantizer only at a constant
+/// quality (`Openh264Encoder::update_qp`), so a stripe that holds none is cleaned up by a refresh
+/// and burst at its rate control's own quality, never a key frame, which that would starve.
+pub fn stripes_hold_quantizer(settings: &RustCaptureSettings) -> bool {
+    cfg!(feature = "gpl") || !settings.video_cbr_mode
+}
 
 /// The software encoder's per-frame entry point: split the frame into horizontal stripes,
 /// decide per stripe whether it needs sending, and encode only those as JPEG or H.264 (libx264
@@ -846,28 +865,29 @@ const CARRY_FALL: f32 = 0.05;
 ///    H.264 slices compress poorly. The persistent `stripes` vector is resized to match, preserving
 ///    per-stripe state across frames.
 /// 2. **Idle fast path**: a frame on which no stripe can emit anything (no damage / clean
-///    hashes, no paint-over due, no burst, no recovery IDR, not streaming) only advances the
-///    per-stripe no-motion bookkeeping inline and returns without dispatching the stripe
+///    hashes, no cleanup due, no burst, no recovery IDR, not streaming) only advances the
+///    per-stripe cleanup bookkeeping inline and returns without dispatching the stripe
 ///    fan-out, so a static capture never wakes the rayon pool.
 /// 3. **Dirty map**: with external compositor damage (`hash_damage == false`) each `damage_rects`
 ///    rectangle marks every stripe whose row range it overlaps. With `hash_damage == true` (X11,
-///    which has no compositor damage) per-stripe content hashing drives dirtiness instead — except
-///    in streaming H.264, where every stripe is sent unconditionally so the hash is skipped.
-/// 4. **Per-stripe decision** (in `stripe_body`): a stripe is sent when it is dirty, when a
-///    paint-over / recovery burst is in flight, when streaming mode is on, or when `force_idr_all`
-///    is set. Quality is chosen per case — base JPEG quality / base CRF for live content, the
-///    paint-over quality/CRF after `paint_over_trigger_frames` static frames (once per still region,
-///    guarded by `paint_over_sent`), and `burst_crf` during a burst (the paint-over CRF when it is
-///    enabled and actually lower, else the base CRF, since a recovery burst still needs to stream so
-///    CBR can refine it). A newly dirty frame cancels any pending burst or paint-over and reverts to
-///    base quality.
+///    which has no compositor damage) per-stripe content hashing drives dirtiness instead, in
+///    streaming H.264 too, since the cleanup reads a still stripe from its content.
+/// 4. **Per-stripe cleanup** (`pipeline::cleanup_due`, one region per stripe): a stripe that
+///    changed is cleaned up once it has held still for `paint_over_trigger_frames`, or has kept
+///    changing only a little for four times that, at the paint-over JPEG quality or, for H.264,
+///    at the paint-over quantizer held for the frame (`H264EncoderWrapper::hold_quantizer`,
+///    under CBR where the stripe's last quantizer is coarser), as a key frame after a run of
+///    changes and a refresh otherwise, then a burst. The stripes whose cleanups fall due on one
+///    frame are spread over `CLEANUP_STAGGER_FRAMES` frames, so a screen going still costs no
+///    one frame the whole screen's cleanup. A stripe is otherwise sent when it is dirty, while
+///    its burst runs, or when streaming mode is on, at the base quality; a newly dirty frame
+///    cancels its burst.
 /// 5. **Recovery IDR** (`force_idr_all`): forces a send on every stripe even when static so a
-///    reconnecting client can resume. For H.264 it forces an IDR and arms a short streaming burst
-///    (unless one is already pending, so it cannot preempt an in-flight burst) because the keyframe
-///    is base-quality — worsened further by CBR — and a damage-gated static stream would otherwise
-///    never refine it; for JPEG, where every stripe is already intra, it resends a
-///    previously-painted-over stripe at the paint-over quality already on screen so a joining viewer
-///    does not see a downgrade.
+///    reconnecting client can resume. For H.264 it forces an IDR at the stripe's own quality and
+///    arms the burst (held at the paint-over quantizer at a constant quality, as in
+///    `pipeline::decide_hw_fullframe`); for JPEG, where every stripe is already intra, it resends
+///    a painted-over stripe at the paint-over quality already on screen so a joining viewer does
+///    not see a downgrade.
 /// 6. **Encoding**:
 ///    - **JPEG**: source byte order is RGBA on the GPU readback path and BGRA on
 ///      X11; each worker thread reuses its thread-local TurboJPEG compressor. Header-less output
@@ -924,22 +944,32 @@ pub fn encode_cpu(
     // after a single stripe hash. A clean scan performs exactly the state transitions
     // `content_dirty` would (hash unchanged, change streak reset), so the damage-block
     // machinery observes no difference.
+    let coded_quality = |st: &StripeState| -> Option<u32> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "gpl")] {
+                st.h264_encoder.as_ref().and_then(H264EncoderWrapper::last_qp)
+            } else {
+                let _ = st;
+                None
+            }
+        }
+    };
+    let holds = stripes_hold_quantizer(settings);
+    let keys = codec.is_video() && holds;
+    let paint_over_armed = |st: &StripeState| {
+        if !codec.is_video() {
+            return settings.use_paint_over_quality && settings.paint_over_jpeg_quality > settings.jpeg_quality;
+        }
+        crate::pipeline::paint_over_improves(settings, crate::pipeline::EncoderQuality { last: coded_quality(st), holds })
+    };
+    let trigger_frames = settings.paint_over_trigger_frames;
     let idle_candidate = damage_rects.is_empty()
         && !force_idr_all
         && !(codec.is_video() && settings.video_streaming_mode);
     if idle_candidate {
-        let paint_over_armed = settings.use_paint_over_quality
-            && if !codec.is_video() {
-                settings.paint_over_jpeg_quality > settings.jpeg_quality
-            } else {
-                settings.video_paintover_crf < settings.video_crf
-            };
         let no_pending_send = |st: &StripeState| {
             (!codec.is_video() || st.h264_burst_frames_remaining <= 0)
-                && (!paint_over_armed
-                    || st.paint_over_sent
-                    || st.no_motion_frame_count.saturating_add(1)
-                        < settings.paint_over_trigger_frames)
+                && !crate::pipeline::cleanup_pending(st, trigger_frames, paint_over_armed(st), keys)
         };
         let quiescent = if !hash_damage {
             stripes.iter().all(no_pending_send)
@@ -964,7 +994,8 @@ pub fn encode_cpu(
         };
         if quiescent {
             for st in stripes.iter_mut() {
-                st.no_motion_frame_count = st.no_motion_frame_count.saturating_add(1);
+                let armed = paint_over_armed(st);
+                crate::pipeline::cleanup_due(st, trigger_frames, armed, keys, Damage::None);
                 st.consecutive_changes = 0;
             }
             return Vec::new();
@@ -995,9 +1026,6 @@ pub fn encode_cpu(
     let video_streaming = settings.video_streaming_mode;
     let jpeg_q = settings.jpeg_quality;
     let paint_q = settings.paint_over_jpeg_quality;
-    let trigger_frames = settings.paint_over_trigger_frames;
-    let use_paint_over = settings.use_paint_over_quality;
-    let burst_crf = if use_paint_over && video_po_crf < video_crf { video_po_crf } else { video_crf };
     let target_fps = settings.target_fps;
     let omit_headers = settings.omit_stripe_headers;
     let damage_block_threshold = settings.damage_block_threshold;
@@ -1033,6 +1061,21 @@ pub fn encode_cpu(
         }
     }
 
+    // A still screen reaches every stripe's cleanup on the same frame; spread them over
+    // `CLEANUP_STAGGER_FRAMES` frames so no one frame carries the whole screen's.
+    let per_frame = stripes.len().div_ceil(CLEANUP_STAGGER_FRAMES).max(1);
+    let mut granted = 0;
+    let cleanup_allowed: Vec<bool> = stripes
+        .iter()
+        .map(|st| {
+            if !crate::pipeline::cleanup_pending(st, trigger_frames, paint_over_armed(st), keys) {
+                return true;
+            }
+            granted += 1;
+            granted <= per_frame
+        })
+        .collect();
+
     let stripe_body = |(i, stripe_state): (usize, &mut StripeState)| -> Option<EncodedStripe> {
             if i >= stripe_geometries.len() {
                 return None;
@@ -1042,71 +1085,50 @@ pub fn encode_cpu(
             let end_idx = start_idx + (actual_height * width_usize * 4);
             let stripe_bytes = &raw_pixels[start_idx..end_idx];
 
-            let mut send_this_stripe = false;
-            let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
-            let mut force_idr = false;
             let is_dirty = if !hash_damage {
                 stripe_is_dirty[i]
-            } else if video && video_streaming {
-                false
             } else {
                 stripe_state.content_dirty(stripe_bytes, damage_block_threshold, damage_block_duration)
             };
-
-            if video && stripe_state.h264_burst_frames_remaining > 0 {
-                send_this_stripe = true;
-                quality_or_crf = burst_crf;
-                stripe_state.h264_burst_frames_remaining -= 1;
-
-                if is_dirty {
-                    stripe_state.h264_burst_frames_remaining = 0;
-                    stripe_state.paint_over_sent = false;
-                    quality_or_crf = video_crf;
-                }
-            }
-
-            if !send_this_stripe && video && video_streaming {
-                send_this_stripe = true;
-            }
-
-            if is_dirty {
-                send_this_stripe = true;
-                stripe_state.no_motion_frame_count = 0;
-                stripe_state.paint_over_sent = false;
-                stripe_state.h264_burst_frames_remaining = 0;
-                quality_or_crf = if !video { jpeg_q } else { video_crf };
-            } else if !send_this_stripe {
-                stripe_state.no_motion_frame_count += 1;
-
-                if use_paint_over
-                    && stripe_state.no_motion_frame_count >= trigger_frames
-                    && !stripe_state.paint_over_sent
-                {
-                    if !video && paint_q > jpeg_q {
-                        send_this_stripe = true;
-                        quality_or_crf = paint_q;
-                        stripe_state.paint_over_sent = true;
-                    } else if video && video_po_crf < video_crf {
-                        send_this_stripe = true;
-                        stripe_state.paint_over_sent = true;
-                        quality_or_crf = video_po_crf;
-                        force_idr = true;
-                        stripe_state.h264_burst_frames_remaining = video_burst - 1;
-                    }
-                }
-            }
-
-            if force_idr_all {
-                send_this_stripe = true;
-                if video {
-                    force_idr = true;
-                    if stripe_state.h264_burst_frames_remaining <= 0 && video_burst > 0 {
-                        stripe_state.paint_over_sent = true;
-                        stripe_state.h264_burst_frames_remaining = video_burst;
-                    }
-                } else if stripe_state.paint_over_sent && use_paint_over && paint_q > jpeg_q {
+            let armed = paint_over_armed(stripe_state);
+            let cleanup = crate::pipeline::cleanup_due(
+                stripe_state,
+                trigger_frames,
+                armed && cleanup_allowed[i],
+                keys,
+                if is_dirty { Damage::Unknown } else { Damage::None },
+            );
+            let mut send_this_stripe = is_dirty || cleanup != Cleanup::None || force_idr_all;
+            let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
+            let mut force_idr = video && (force_idr_all || cleanup == Cleanup::Key);
+            let mut hold = None;
+            let quality = crate::pipeline::EncoderQuality { last: coded_quality(stripe_state), holds };
+            let refresh_crf = crate::pipeline::held_refresh_quality(settings, quality) as i32;
+            if cleanup != Cleanup::None {
+                if !video {
                     quality_or_crf = paint_q;
+                } else if cleanup == Cleanup::Key {
+                    hold = Some(video_po_crf);
+                } else if holds {
+                    hold = Some(refresh_crf);
                 }
+            } else if force_idr_all && !is_dirty && !video && armed && stripe_state.paint_over_sent {
+                quality_or_crf = paint_q;
+            }
+            if is_dirty {
+                stripe_state.h264_burst_frames_remaining = 0;
+            } else if video && (force_idr || cleanup != Cleanup::None) && video_burst > 0 {
+                stripe_state.h264_burst_frames_remaining = video_burst;
+                stripe_state.burst_held = holds && (cleanup != Cleanup::None || (armed && !settings.video_cbr_mode));
+            } else if video && stripe_state.h264_burst_frames_remaining > 0 {
+                stripe_state.h264_burst_frames_remaining -= 1;
+                send_this_stripe = true;
+                if stripe_state.burst_held && armed {
+                    hold = Some(refresh_crf);
+                }
+            }
+            if video && video_streaming {
+                send_this_stripe = true;
             }
 
             if send_this_stripe {
@@ -1181,6 +1203,9 @@ pub fn encode_cpu(
                     }
 
                     if let Some(ref mut enc) = stripe_state.h264_encoder {
+                        if let Some(q) = hold {
+                            enc.hold_quantizer(q);
+                        }
                         let y_size = width_usize * actual_height;
                         let uv_size = if video_fullcolor { y_size } else { y_size / 4 };
                         if stripe_state.y_buf.len() != y_size {
@@ -1276,7 +1301,17 @@ pub fn encode_cpu(
                         }
                         force_idr = true;
                     } else if let Some(ref mut enc) = stripe_state.h264_encoder {
-                        enc.update_qp(quality_or_crf.max(0) as u32);
+                        // OpenH264 moves its quantizer only by a rebuild, which opens on a key
+                        // frame, so a held quantizer is that key frame, and the stripe's key-frame
+                        // cleanup with it; a still stripe keeps the quantizer it was cleaned at,
+                        // since moving it back would rebuild a picture nothing changed in.
+                        if let Some(q) = hold {
+                            if enc.update_qp(q.max(0) as u32) {
+                                stripe_state.change_mass = 0.0;
+                            }
+                        } else if is_dirty {
+                            enc.update_qp(quality_or_crf.max(0) as u32);
+                        }
                         enc.reconfigure_rate(video_bitrate, target_fps);
                     }
 
@@ -1691,17 +1726,19 @@ mod tests {
         );
         assert!(!dirty.is_empty(), "damaged frame must encode");
 
-        let mut fired_at = None;
+        let mut painted = Vec::new();
         for frame in 1..=20u16 {
             let out = super::encode_cpu(
                 &mut stripes, &mut carrying, &pixels, w, h, &[], &settings, frame, false, false, false,
             );
-            if !out.is_empty() {
-                assert!(fired_at.is_none(), "paint-over must fire exactly once");
-                fired_at = Some(frame);
-            }
+            painted.extend(out.iter().map(|s| (frame, s.stripe_y_start)));
         }
-        assert_eq!(fired_at, Some(settings.paint_over_trigger_frames as u16));
+        let per_frame = stripes.len().div_ceil(super::CLEANUP_STAGGER_FRAMES).max(1);
+        assert_eq!(painted.len(), stripes.len(), "each stripe is painted over exactly once: {painted:?}");
+        assert_eq!(painted[0].0, settings.paint_over_trigger_frames as u16, "starting at the trigger");
+        for (n, (frame, _)) in painted.iter().enumerate() {
+            assert_eq!(*frame as usize, settings.paint_over_trigger_frames as usize + n / per_frame, "{per_frame} a frame");
+        }
         assert!(
             stripes.iter().all(|st| st.paint_over_sent),
             "all stripes latched after the repaint"
@@ -1737,22 +1774,74 @@ mod tests {
         );
         assert!(!first.is_empty(), "first frame hashes as changed and encodes");
 
-        let mut fired_at = None;
+        let mut painted = Vec::new();
         for frame in 1..=20u16 {
             let out = super::encode_cpu(
                 &mut stripes, &mut carrying, &static_px, w, h, &[], &settings, frame, false, true, false,
             );
-            if !out.is_empty() {
-                assert!(fired_at.is_none(), "paint-over must fire exactly once while static");
-                fired_at = Some(frame);
-            }
+            painted.extend(out.iter().map(|s| (frame, s.stripe_y_start)));
         }
-        assert_eq!(fired_at, Some(settings.paint_over_trigger_frames as u16));
+        assert_eq!(painted.len(), stripes.len(), "each stripe is painted over exactly once while static: {painted:?}");
+        assert_eq!(painted[0].0, settings.paint_over_trigger_frames as u16);
 
         let woke = super::encode_cpu(
             &mut stripes, &mut carrying, &changed_px, w, h, &[], &settings, 21, false, true, false,
         );
         assert!(!woke.is_empty(), "content change after idle must encode");
+    }
+
+    /// A caret changing one stripe every fourth frame keeps it from ever holding still for the
+    /// trigger, yet that stripe is cleaned up once the low-motion window passes, and the stripes
+    /// around it are cleaned up at the trigger as if it were not there.
+    #[test]
+    fn a_blinking_caret_starves_no_stripe_of_its_cleanup() {
+        use crate::RustCaptureSettings;
+        let (w, h) = (64i32, 256i32);
+        let settings = RustCaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::Jpeg,
+            jpeg_quality: 40,
+            paint_over_jpeg_quality: 90,
+            use_paint_over_quality: true,
+            paint_over_trigger_frames: 5,
+            damage_block_threshold: 10,
+            damage_block_duration: 10,
+            ..Default::default()
+        };
+        let mut stripes = Vec::new();
+        let mut carrying = 1.0f32;
+        let frame = |caret: bool| {
+            let mut px = vec![128u8; (w * h * 4) as usize];
+            if caret {
+                px[(w * 4 * 3) as usize..(w * 4 * 3) as usize + 8].fill(0);
+            }
+            px
+        };
+        // The luma DC quantizer of a stripe's JPEG: 3 at the paint-over quality, 20 at the base one.
+        let dc_quant = |data: &[u8]| {
+            let at = data.windows(2).position(|m| m == [0xFF, 0xDB]).expect("a quantization table");
+            data[at + 5]
+        };
+        let mut cleaned = std::collections::HashMap::new();
+        for n in 0..60u16 {
+            let out = super::encode_cpu(
+                &mut stripes, &mut carrying, &frame((n / 4) % 2 == 0), w, h, &[], &settings, n, false, true, false,
+            );
+            for s in &out {
+                if dc_quant(&s.data) < 8 {
+                    cleaned.entry(s.stripe_y_start).or_insert(n);
+                }
+            }
+        }
+        let rows = stripes.len();
+        assert!(rows > 1, "the frame is striped");
+        let caret_stripe = 0;
+        let others: Vec<u16> = cleaned.iter().filter(|(y, _)| **y != caret_stripe).map(|(_, n)| *n).collect();
+        assert_eq!(others.len(), rows - 1, "every still stripe is cleaned up: {cleaned:?}");
+        assert!(others.iter().all(|&n| n <= 5 + super::CLEANUP_STAGGER_FRAMES as u16), "at the trigger: {cleaned:?}");
+        let at = *cleaned.get(&caret_stripe).expect("the caret's stripe is cleaned up too");
+        assert!((19..=23).contains(&at), "once the low-motion window passes: {at}");
     }
 
     /// Total rows covered by a geometry — the sum of all stripe heights.

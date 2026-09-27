@@ -356,14 +356,16 @@ pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String 
     }
 }
 
-/// The paint-over field of a stream's log line, or `None` where paint-over changes nothing.
-/// JPEG resends a still stripe at the paint-over quality when it is above the stream's, Turbo
-/// or not. Video acts only at a CRF below the stream's. A session at constant quality re-encodes
-/// a still picture, and the burst after a recovery key frame, at that CRF. A session held to a
-/// rate takes no per-frame quantizer on any backend, so paint-over is its burst of frames for
-/// the rate control to refine, which a still screen gets only outside Turbo: Turbo sends every
-/// frame anyway.
-pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> Option<String> {
+/// The paint-over field of a stream's log line, or `None` where paint-over changes nothing. The
+/// cleanup reads a still screen from its content, so it acts with Turbo as without. JPEG resends
+/// a still stripe at the paint-over quality when it is above the stream's. Video holds its
+/// cleanup, and the burst after it, at the paint-over CRF where the session holds a frame at a
+/// quantizer (`holds`, `FrameEncoder::holds_quantizer`): at a constant quality where that CRF is
+/// below the stream's, and at a constant rate wherever the rate control codes coarser than it.
+/// A session held to a rate that holds no quantizer is cleaned up by a refresh and its burst at
+/// the rate control's own quality, and one at a constant quality that holds none is not cleaned
+/// up at all.
+pub fn paint_over_desc(settings: &RustCaptureSettings, holds: bool) -> Option<String> {
     if !settings.use_paint_over_quality {
         return None;
     }
@@ -375,13 +377,10 @@ pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> O
             )
         });
     }
-    if settings.video_paintover_crf >= settings.video_crf {
-        return None;
-    }
     let burst = settings.video_paintover_burst_frames;
-    if fixed.is_none() && !settings.video_cbr_mode {
+    if holds && (settings.video_cbr_mode || settings.video_paintover_crf < settings.video_crf) {
         Some(format!("PaintOver CRF: {} (Burst: {burst}f)", settings.video_paintover_crf))
-    } else if !settings.video_streaming_mode {
+    } else if settings.video_cbr_mode {
         Some(format!("PaintOver Burst: {burst}f"))
     } else {
         None
@@ -406,9 +405,10 @@ mod tests {
         }
     }
 
-    /// Paint-over is named only where it changes a frame: its CRF at constant quality, its burst
-    /// under a rate target outside Turbo, JPEG's higher quality with or without Turbo, and nothing
-    /// where it cannot fire.
+    /// Paint-over is named where the cleanup acts, Turbo or not: its CRF where the session holds
+    /// a quantizer, at a constant quality below the stream's and at a constant rate whatever the
+    /// stream's CRF, its burst at a constant rate where the session holds none, JPEG's higher
+    /// quality, and nothing where it cannot fire.
     #[test]
     fn the_paint_over_field_names_what_paint_over_does() {
         let crf = RustCaptureSettings {
@@ -422,14 +422,20 @@ mod tests {
         };
         let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
         let turbo = |s: &RustCaptureSettings| RustCaptureSettings { video_streaming_mode: true, ..s.clone() };
-        assert_eq!(paint_over_desc(&crf, None).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
-        assert_eq!(paint_over_desc(&turbo(&crf), None).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
-        assert_eq!(paint_over_desc(&cbr, None).as_deref(), Some("PaintOver Burst: 5f"));
-        assert_eq!(paint_over_desc(&crf, Some("VBR")).as_deref(), Some("PaintOver Burst: 5f"));
-        assert_eq!(paint_over_desc(&turbo(&cbr), None), None);
-        assert_eq!(paint_over_desc(&turbo(&crf), Some("CBR")), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, None), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, None), None);
+        for settings in [&crf, &cbr, &turbo(&crf), &turbo(&cbr)] {
+            assert_eq!(paint_over_desc(settings, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+        }
+        assert_eq!(paint_over_desc(&cbr, false).as_deref(), Some("PaintOver Burst: 5f"));
+        assert_eq!(paint_over_desc(&turbo(&cbr), false).as_deref(), Some("PaintOver Burst: 5f"));
+        assert_eq!(paint_over_desc(&crf, false), None);
+        assert_eq!(paint_over_desc(&turbo(&crf), false), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, true), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..cbr.clone() }, false), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, true), None);
+        assert_eq!(
+            paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..cbr.clone() }, true).as_deref(),
+            Some("PaintOver CRF: 25 (Burst: 5f)")
+        );
         let jpeg = RustCaptureSettings {
             codec: Codec::Jpeg,
             jpeg_quality: 40,
@@ -437,10 +443,10 @@ mod tests {
             paint_over_trigger_frames: 15,
             ..crf.clone()
         };
-        assert_eq!(paint_over_desc(&jpeg, None).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&turbo(&jpeg), None).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, None), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, None), None);
+        assert_eq!(paint_over_desc(&jpeg, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&turbo(&jpeg), false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, false), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, false), None);
     }
 
     /// A held key frame past its budget is coded again six quantizer steps coarser for each

@@ -58,7 +58,7 @@ use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
 use super::Controls;
 use crate::encoders::nvenc::NvencEncoder;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
-use crate::pipeline::decide_hw_fullframe;
+use crate::pipeline::{decide_hw_fullframe, Damage, EncoderQuality};
 use crate::recording_sink::RecordingSink;
 use crate::RustCaptureSettings;
 use nvcodec_sys::cuda::CUdeviceptr;
@@ -763,7 +763,7 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
     );
     crate::report::capture("NvFBC", true);
     crate::report::hardware_encoder(encoder.device_name(), crate::encoders::driver_name(&driver), node);
-    crate::log_stream_settings_of("X11", &settings, 1, Some(("NVENC", true)), None, encoder.is_fullcolor(), false);
+    crate::log_stream_settings_of("X11", &settings, 1, Some(("NVENC", true)), None, true, encoder.is_fullcolor(), false);
     Some(GpuCapture { nvfbc, encoder, settings, request, screen })
 }
 
@@ -951,14 +951,18 @@ where
             &mut state,
             &gpu.settings,
             frame_counter,
-            !gpu.settings.video_streaming_mode && frame.is_new,
+            if frame.is_new { Damage::Unknown } else { Damage::None },
             false,
             pending_force_idr,
+            EncoderQuality { last: gpu.encoder.last_quality(), holds: true },
         );
         let mut delivered = false;
         if decision.send {
             let pitch = frame_pitch(frame.byte_size, frame.width, frame.height);
             let encode_start_ns = crate::wayland::host::now_ns();
+            if let Some(q) = decision.hold_qp {
+                gpu.encoder.hold_quantizer(q);
+            }
             match gpu.encoder.encode_cuda_pitch(
                 frame.device_ptr,
                 pitch,

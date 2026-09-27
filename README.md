@@ -238,8 +238,8 @@ settings.paint_over_jpeg_quality = 90   # Quality for static "paint-over" stripe
 
 # --- Video Settings ---
 settings.video_crf = 25                            # Quality index on the H.264 QP scale (0-51, lower is better quality); mapped onto each codec's own quantizer range
-settings.video_paintover_crf = 18                  # Quality index for the paintover on static content. Must be lower than video_crf to activate.
-settings.video_paintover_burst_frames = 5          # Number of high-quality frames to send in a burst when a paintover is triggered.
+settings.video_paintover_crf = 18                  # Quality index a still screen is cleaned up at, held whatever the rate control. Acts under CRF when lower than video_crf, under CBR when finer than what the rate control reached.
+settings.video_paintover_burst_frames = 5          # Frames sent after a cleanup or a key frame on a still screen, so rate control settles.
 settings.video_fullcolor = False                   # Use 4:4:4 chroma instead of 4:2:0 where the codec carries it (H.264 and H.265): software x264/x265 and NVENC take it, VA-API negotiates it per device.
 settings.video_fullframe = True                    # H.264 only: encode full frames instead of changed stripes (every other video codec is full-frame)
 settings.video_streaming_mode = False              # Bypass all VNC logic and work like a normal video encoder, higher constant CPU usage for fullscreen gaming/videos
@@ -271,8 +271,8 @@ settings.omit_stripe_headers = False
 # --- Change Detection & Optimization ---
 settings.video_min_qp = 0                          # CBR QP clamps: 0 = encoder default; max bounds the quality floor, min bounds bit waste on easy content
 settings.video_max_qp = 0
-settings.use_paint_over_quality = True  # Enable paint-over/IDR requests for static regions
-settings.paint_over_trigger_frames = 15 # Frames of no motion to trigger paint-over
+settings.use_paint_over_quality = True  # Clean up a still screen at the paint-over quality, whatever video_streaming_mode sends
+settings.paint_over_trigger_frames = 15 # Frames without change before the cleanup (a screen changing only in small places gets it after four times this)
 settings.damage_block_threshold = 10    # Consecutive changes to trigger "damaged" state
 settings.damage_block_duration = 30     # Frames a stripe stays "damaged"
 
@@ -746,7 +746,12 @@ asked for.
 *   **Zero-Copy Frames (X11 & Wayland):** the native frame object (buffer protocol) hands the encoded buffer to Python with no copy, on every supported Python version (3.9 and newer).
 *   **Smart Bandwidth Management:**
     *   **Change Detection:** Encodes only changed stripes (Software/JPEG mode).
-    *   **Paint-Over:** Automatically improves quality for static regions.
+    *   **Paint-Over:** Cleans up a still screen once its content stops changing, even while
+        `video_streaming_mode` encodes every frame: a refresh at the paint-over quality, and after
+        a large change a key frame at it once the screen holds still, under CBR and CRF alike on
+        every encoder that takes a quantizer from the caller (under CBR a refresh at the rate
+        control's own quality on one that does not); a screen that keeps changing only a little
+        (a blinking caret) is cleaned up all the same.
     *   **Damage Throttling:** Limits processing during high-motion scenes.
     *   **On-demand keyframes:** `request_idr_frame()` forces an IDR for reconnecting clients.
     *   **Reference invalidation:** `invalidate_reference(frame_id)` has the encoder predict past a

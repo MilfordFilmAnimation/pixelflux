@@ -60,7 +60,7 @@ use super::{
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
 use crate::encoders::{self, FrameEncoder, FrameSource};
 use crate::pace::{FramePace, TickTrigger};
-use crate::pipeline::decide_hw_fullframe;
+use crate::pipeline::{decide_hw_fullframe, Damage, EncoderQuality};
 use crate::recording_sink::RecordingSink;
 use crate::RustCaptureSettings;
 
@@ -887,13 +887,15 @@ where
             }
         }
 
+        let quality = EncoderQuality::of(gpu.enc());
         let decision = decide_hw_fullframe(
             &mut state,
             &gpu.settings,
             frame_counter,
-            !gpu.settings.video_streaming_mode && is_dirty,
+            if is_dirty { Damage::Unknown } else { Damage::None },
             false,
             pending_force_idr,
+            quality,
         );
         // A tick that publishes nothing is no frame: counted as one, it would hold a change
         // landing just after it back by a pull's worth of budget or a whole period.
@@ -922,6 +924,9 @@ where
             // stamps both.
             let grabbed_ns = crate::wayland::host::now_ns();
             let dmabuf = gpu.buffers[idx].dmabuf.clone();
+            if let Some(q) = decision.hold_qp {
+                gpu.enc().hold_quantizer(q);
+            }
             let result = gpu.enc().encode_dmabuf(&dmabuf, frame_counter as u64, decision.target_qp, decision.force_idr);
             match result {
                 Ok(data) if !data.is_empty() => {

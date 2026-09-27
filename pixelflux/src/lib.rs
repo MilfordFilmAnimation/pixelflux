@@ -1323,13 +1323,17 @@ fn wayland_encode_loop(pool: &WlFramePool, cfg: WlEncodeConfig) -> Option<FrameE
                 &mut hw_state,
                 &settings,
                 f.frame_id,
-                !f.damage.is_empty(),
+                crate::pipeline::Damage::of_rects(&f.damage, width, height),
                 f.is_animated,
                 requested_idr,
+                crate::pipeline::EncoderQuality::of(encoder),
             );
             if decision.send || encoder.holds_frame() {
                 let w = width as u32;
                 let force_idr = decision.force_idr;
+                if let Some(q) = decision.hold_qp {
+                    encoder.hold_quantizer(q);
+                }
                 // The readback rows go to the encoder as they are — BGRA from the pixman
                 // framebuffer or a host frame, RGBA from a GLES readback: a hardware session
                 // converts on the GPU and a software one on its own threads, so no color
@@ -1523,39 +1527,48 @@ pub(crate) fn log_stream_settings(
 ) {
     let backend = video_encoder.map(|enc| (enc.backend_name(), enc.is_hardware()));
     let fixed_rate = video_encoder.and_then(FrameEncoder::fixed_rate_control);
+    let holds = video_encoder.map_or_else(
+        || encoders::software::stripes_hold_quantizer(settings),
+        FrameEncoder::holds_quantizer,
+    );
     let fullcolor = encoders::session_fullcolor(video_encoder, settings);
     let full_range = encoders::session_full_range(video_encoder, settings);
-    log_stream_settings_of(tag, settings, n_stripes, backend, fixed_rate, fullcolor, full_range);
+    log_stream_settings_of(tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range);
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where
 /// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the striped
-/// software path, and `fixed_rate` is the backend's one rate control where it has one
-/// (`FrameEncoder::fixed_rate_control`).
+/// software path, `fixed_rate` is the backend's one rate control where it has one
+/// (`FrameEncoder::fixed_rate_control`), and `holds` says whether the session holds a cleanup
+/// at the quantizer asked for (`FrameEncoder::holds_quantizer`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn log_stream_settings_of(
     tag: &str,
     settings: &RustCaptureSettings,
     n_stripes: usize,
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
+    holds: bool,
     fullcolor: bool,
     full_range: bool,
 ) {
     report::stream(settings, n_stripes, backend, fullcolor, full_range);
     println!(
         "{}",
-        stream_settings_line(tag, settings, n_stripes, backend, fixed_rate, fullcolor, full_range)
+        stream_settings_line(tag, settings, n_stripes, backend, fixed_rate, holds, fullcolor, full_range)
     );
 }
 
 /// The text of the "Stream settings active" line, which says what the session applies rather
 /// than what it was asked for (`encoders::rate_desc`, `encoders::paint_over_desc`).
+#[allow(clippy::too_many_arguments)]
 fn stream_settings_line(
     tag: &str,
     settings: &RustCaptureSettings,
     n_stripes: usize,
     backend: Option<(&str, bool)>,
     fixed_rate: Option<&str>,
+    holds: bool,
     fullcolor: bool,
     full_range: bool,
 ) -> String {
@@ -1566,7 +1579,7 @@ fn stream_settings_line(
 
     if !settings.codec.is_video() {
         log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", settings.jpeg_quality));
-        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate) {
+        if let Some(paint_over) = encoders::paint_over_desc(settings, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
     } else {
@@ -1587,7 +1600,7 @@ fn stream_settings_line(
         }
 
         log_msg.push_str(&format!(" | {}", encoders::rate_desc(settings, fixed_rate)));
-        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate) {
+        if let Some(paint_over) = encoders::paint_over_desc(settings, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
 
@@ -1620,8 +1633,8 @@ mod stream_settings_line_tests {
             use_paint_over_quality: false,
             ..Default::default()
         };
-        let line = |s: &RustCaptureSettings, fixed| {
-            stream_settings_line("X11", s, 1, Some(("NVENC", true)), fixed, false, false)
+        let line = |s: &RustCaptureSettings, fixed: Option<&str>| {
+            stream_settings_line("X11", s, 1, Some(("NVENC", true)), fixed, fixed.is_none(), false, false)
         };
         let nvenc = line(&crf, None);
         assert!(nvenc.contains("| CRF: 25 |") && !nvenc.contains("VBV") && !nvenc.contains("8000"), "{nvenc}");
@@ -3581,15 +3594,21 @@ fn render_node_tick(
                     }
                 } else {
                 let is_animated = node.overlay_state.is_animated();
-                let had_damage = !damage_rects.is_empty()
-                    || std::mem::take(&mut cap.pending_hw_damage);
+                let damage = match crate::pipeline::Damage::of_rects(&damage_rects, width, height) {
+                    crate::pipeline::Damage::None if std::mem::take(&mut cap.pending_hw_damage) => crate::pipeline::Damage::Unknown,
+                    damage => {
+                        cap.pending_hw_damage = false;
+                        damage
+                    }
+                };
                 let decision = crate::pipeline::decide_hw_fullframe(
                     &mut cap.vaapi_state,
                     &cap.settings,
                     cap.frame_counter,
-                    had_damage,
+                    damage,
                     is_animated,
                     requested_idr,
+                    crate::pipeline::EncoderQuality::of(encoder),
                 );
                 let mut send_frame = decision.send;
                 let force_idr = decision.force_idr;
@@ -3609,6 +3628,9 @@ fn render_node_tick(
                         .clone()
                         .or_else(|| node.offscreen_buffer.as_ref().map(|(_, d)| d.clone()));
                     let encode_start_ns = wayland::host::now_ns();
+                    if let Some(q) = decision.hold_qp {
+                        encoder.hold_quantizer(q);
+                    }
                     let result = match enc_dmabuf {
                         Some(ref dmabuf) => {
                             encoder.encode_dmabuf(dmabuf, cap.frame_counter as u64, target_qp, force_idr)

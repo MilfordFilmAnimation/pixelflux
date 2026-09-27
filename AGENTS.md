@@ -159,6 +159,25 @@ The crate's `Cargo.toml` is the one place the version lives: `setup.py` reads it
 the PEP 440 way (`2.1.0-rc.1` is `2.1.0rc1` to pip), and the release workflow stamps the tag into the manifest
 and the lock, so a build ahead of a release carries the series version and a release the tag's.
 
+A still screen is cleaned up by one policy (`pipeline::cleanup_due`, run per frame by
+`decide_hw_fullframe` and per stripe by `encode_cpu`) that reads what changed from the content —
+compositor damage, the X server's or NvFBC's report, a content hash — never from what was sent,
+so Turbo (`video_streaming_mode`) sees the screen go still like any other mode: a refresh at the
+paint-over quantizer once the region holds still for the trigger, a key frame at it once a large
+change has held still for four times that, and the same cleanup for a region that keeps changing
+only a little. The frame is held at that quantizer whatever the rate control through
+`FrameEncoder::hold_quantizer`: NVENC switches the one picture to a constant quantizer, libvpx
+pins its bounds, SVT-AV1 names it at a constant quantizer and raises the target for a key frame
+at a constant rate, VA-API and x265 name it at a constant quantizer, and x264, whose row-level
+VBV control moves a forced quantizer back, plans the key frame with `HELD_KEY_BUDGET_S` of the
+target in a fresh session. Under a constant rate there is no cleanup where the encoder's last
+quantizer (`last_quality`) is already finer, since that rate control refines a still screen
+itself, and a held key frame is bounded to `HELD_KEY_BUDGET_S` of the target. Where a session
+cannot hold a quantizer (`holds_quantizer`: VA-API and x265 at a constant rate, kvazaar, Tegra, a
+stateful V4L2 device) a constant-rate session is cleaned up by a refresh and its burst at the rate
+control's own quality, which it refines, and never by a key frame, which its small buffer would
+starve; a constant-quality one gets no cleanup.
+
 Host capture of an external Wayland compositor (`wayland/host.rs`, `wayland_host_display`) picks each
 rung per capability from the host's registry, never by a setting: frames through
 `ext-image-copy-capture` or `wlr-screencopy` into pixelflux-allocated dmabufs, else through an
