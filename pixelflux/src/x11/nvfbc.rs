@@ -1005,7 +1005,7 @@ where
             if frame.is_new { Damage::Unknown } else { Damage::None },
             false,
             pending_force_idr,
-            EncoderQuality { last: gpu.encoder.last_quality(), holds: true },
+            EncoderQuality { last: gpu.encoder.last_quality(), holds: true, reopens: false },
         );
         let mut delivered = false;
         if decision.send {

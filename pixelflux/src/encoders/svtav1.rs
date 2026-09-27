@@ -207,7 +207,6 @@ impl SvtAv1Encoder {
         } else {
             self.set("rc", "0")?;
             self.set("qp", &Self::level(self.quality.current).to_string())?;
-            self.config.use_qp_file = true;
         }
         let code = unsafe { svt_av1_enc_set_parameter(self.handle, &mut *self.config) };
         if code != EB_ErrorNone {
@@ -296,10 +295,14 @@ impl SvtAv1Encoder {
         if self.references.is_some() { self.last_reference } else { Reference::Untracked }
     }
 
-    /// Whether `hold_quantizer` holds a frame at its quantizer: at a constant quantizer always,
-    /// at a constant rate where the release takes a new target with a picture.
+    /// Whether `hold_quantizer` holds a frame at its quantizer: at a constant rate where the
+    /// release takes a new target with a picture. A constant-quantizer session is cleaned up
+    /// through its own quality instead (`pipeline::decide_constant_quality`): a per-picture
+    /// quantizer (`use_qp_file`) drops the library's key-frame and layer offsets from every
+    /// picture it names, and a cleanup key frame held that way came out at 49.6 dB where the
+    /// session's own key frame at the paint-over quality reached 61.0.
     pub fn holds_quantizer(&self) -> bool {
-        !self.rate.cbr || HAS_EVENTS
+        self.rate.cbr && HAS_EVENTS
     }
 
     /// The quality index the rate control last coded a frame at, held frames aside.
@@ -316,9 +319,9 @@ impl SvtAv1Encoder {
     }
 
     /// Encode the next frame at the quantizer the quality index `crf` selects, leaving the
-    /// session's own quantizer for the frame after: the cleanup of a still screen. A
-    /// constant-quantizer session names each picture's quantizer with the picture; the
-    /// constant-rate control takes none, and codes the frame at its own.
+    /// session's own quantizer for the frame after: the cleanup of a still screen, at a constant
+    /// rate, where a held key picture is planned with a raised target (`holds_quantizer`). A
+    /// constant-quantizer session codes the frame at its own quantizer.
     pub fn hold_quantizer(&mut self, crf: u32) {
         self.held = Some(Codec::Av1.quantizer(crf as i32));
     }
@@ -377,7 +380,6 @@ impl SvtAv1Encoder {
             header.pts = pts as i64;
             header.flags = 0;
             header.pic_type = if key { EB_AV1_KEY_PICTURE } else { EB_AV1_INVALID_PICTURE };
-            header.qp = Self::level(self.held.unwrap_or(self.quality.current));
         }
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();

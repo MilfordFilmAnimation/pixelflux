@@ -1581,7 +1581,7 @@ fn stream_settings_line(
 
     if !settings.codec.is_video() {
         log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", settings.jpeg_quality));
-        if let Some(paint_over) = encoders::paint_over_desc(settings, holds) {
+        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
     } else {
@@ -1602,7 +1602,7 @@ fn stream_settings_line(
         }
 
         log_msg.push_str(&format!(" | {}", encoders::rate_desc(settings, fixed_rate)));
-        if let Some(paint_over) = encoders::paint_over_desc(settings, holds) {
+        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate, holds) {
             log_msg.push_str(&format!(" | {paint_over}"));
         }
 

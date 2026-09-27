@@ -798,7 +798,7 @@ where
                         psettings.width, psettings.height, psettings.target_fps, pl.encoder_name()
                     );
                     let fixed = pl.fixed_rate_control();
-                    let paint_over = crate::encoders::paint_over_desc(&psettings, pl.holds_quantizer());
+                    let paint_over = crate::encoders::paint_over_desc(&psettings, fixed, pl.holds_quantizer());
                     if !pl.codec().is_video() {
                         log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", psettings.jpeg_quality));
                         if let Some(paint_over) = paint_over {

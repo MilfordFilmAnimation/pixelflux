@@ -165,18 +165,19 @@ compositor damage, the X server's or NvFBC's report, a content hash — never fr
 so Turbo (`video_streaming_mode`) sees the screen go still like any other mode: a refresh at the
 paint-over quantizer once the region holds still for the trigger, a key frame at it once a large
 change has held still for four times that, and the same cleanup for a region that keeps changing
-only a little. The frame is held at that quantizer whatever the rate control through
-`FrameEncoder::hold_quantizer`: NVENC switches the one picture to a constant quantizer, libvpx
-pins its bounds, SVT-AV1 names it at a constant quantizer and raises the target for a key frame
-at a constant rate, VA-API and x265 name it at a constant quantizer, and x264, whose row-level
-VBV control moves a forced quantizer back, plans the key frame with `HELD_KEY_BUDGET_S` of the
-target in a fresh session. Under a constant rate there is no cleanup where the encoder's last
-quantizer (`last_quality`) is already finer, since that rate control refines a still screen
-itself, and a held key frame is bounded to `HELD_KEY_BUDGET_S` of the target. Where a session
-cannot hold a quantizer (`holds_quantizer`: VA-API and x265 at a constant rate, kvazaar, Tegra, a
-stateful V4L2 device) a constant-rate session is cleaned up by a refresh and its burst at the rate
-control's own quality, which it refines, and never by a key frame, which its small buffer would
-starve; a constant-quality one gets no cleanup.
+only a little. Under a constant quality the cleanup moves the session's quality to the
+paint-over one until the region moves again (`pipeline::decide_constant_quality`, and the stripe's
+rate factor in `encode_cpu`), as main's paint-over did, so every encoder codes the cleanup key
+frame the way it codes one at that quality, with its own intra offset. Under a constant rate the
+frame is held at that quantizer through `FrameEncoder::hold_quantizer`: NVENC switches the one
+picture to a constant quantizer, libvpx pins its bounds, SVT-AV1 raises the target for a key
+frame, and x264, whose row-level VBV control moves a forced quantizer back, plans the key frame
+with `HELD_KEY_BUDGET_S` of the target in a fresh session. There is no cleanup where the encoder's
+last quantizer (`last_quality`) is already finer, since that rate control refines a still screen
+itself, and a held key frame is bounded to `HELD_KEY_BUDGET_S` of the target. Where a
+constant-rate session cannot hold a quantizer (`holds_quantizer`: VA-API and x265, kvazaar,
+Tegra, a stateful V4L2 device) it is cleaned up by a refresh and its burst at the rate control's
+own quality, which it refines, and never by a key frame, which its small buffer would starve.
 
 Host capture of an external Wayland compositor (`wayland/host.rs`, `wayland_host_display`) picks each
 rung per capability from the host's registry, never by a setting: frames through

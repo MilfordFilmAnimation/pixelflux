@@ -358,14 +358,14 @@ pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String 
 
 /// The paint-over field of a stream's log line, or `None` where paint-over changes nothing. The
 /// cleanup reads a still screen from its content, so it acts with Turbo as without. JPEG resends
-/// a still stripe at the paint-over quality when it is above the stream's. Video holds its
-/// cleanup, and the burst after it, at the paint-over CRF where the session holds a frame at a
-/// quantizer (`holds`, `FrameEncoder::holds_quantizer`): at a constant quality where that CRF is
-/// below the stream's, and at a constant rate wherever the rate control codes coarser than it.
-/// A session held to a rate that holds no quantizer is cleaned up by a refresh and its burst at
-/// the rate control's own quality, and one at a constant quality that holds none is not cleaned
-/// up at all.
-pub fn paint_over_desc(settings: &RustCaptureSettings, holds: bool) -> Option<String> {
+/// a still stripe at the paint-over quality when it is above the stream's. At a constant quality
+/// the cleanup, where the paint-over CRF is below the stream's, moves the session to that CRF for
+/// its frames and their burst, except on a backend with one rate control (`fixed`), which takes no
+/// quality from the caller and sends them at its own. At a constant rate it acts wherever the rate
+/// control codes coarser than the paint-over quantizer: held at it where the session holds a frame
+/// at a quantizer (`holds`, `FrameEncoder::holds_quantizer`), and as a refresh and its burst at the
+/// rate control's own quality elsewhere.
+pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>, holds: bool) -> Option<String> {
     if !settings.use_paint_over_quality {
         return None;
     }
@@ -378,13 +378,18 @@ pub fn paint_over_desc(settings: &RustCaptureSettings, holds: bool) -> Option<St
         });
     }
     let burst = settings.video_paintover_burst_frames;
-    if holds && (settings.video_cbr_mode || settings.video_paintover_crf < settings.video_crf) {
-        Some(format!("PaintOver CRF: {} (Burst: {burst}f)", settings.video_paintover_crf))
-    } else if settings.video_cbr_mode {
-        Some(format!("PaintOver Burst: {burst}f"))
+    let at_paint_over = if settings.video_cbr_mode {
+        holds
+    } else if settings.video_paintover_crf < settings.video_crf {
+        fixed.is_none()
     } else {
-        None
-    }
+        return None;
+    };
+    Some(if at_paint_over {
+        format!("PaintOver CRF: {} (Burst: {burst}f)", settings.video_paintover_crf)
+    } else {
+        format!("PaintOver Burst: {burst}f")
+    })
 }
 
 #[cfg(test)]
@@ -405,10 +410,11 @@ mod tests {
         }
     }
 
-    /// Paint-over is named where the cleanup acts, Turbo or not: its CRF where the session holds
-    /// a quantizer, at a constant quality below the stream's and at a constant rate whatever the
-    /// stream's CRF, its burst at a constant rate where the session holds none, JPEG's higher
-    /// quality, and nothing where it cannot fire.
+    /// Paint-over is named where the cleanup acts, Turbo or not: its CRF where the session codes
+    /// the cleanup at it, at a constant quality below the stream's on any backend that takes a
+    /// quality from the caller and at a constant rate where the session holds a quantizer; its
+    /// burst where the frames come at the backend's or the rate control's own quality; JPEG's
+    /// higher quality; and nothing where it cannot fire.
     #[test]
     fn the_paint_over_field_names_what_paint_over_does() {
         let crf = RustCaptureSettings {
@@ -422,18 +428,21 @@ mod tests {
         };
         let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
         let turbo = |s: &RustCaptureSettings| RustCaptureSettings { video_streaming_mode: true, ..s.clone() };
-        for settings in [&crf, &cbr, &turbo(&crf), &turbo(&cbr)] {
-            assert_eq!(paint_over_desc(settings, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+        for settings in [&crf, &turbo(&crf)] {
+            assert_eq!(paint_over_desc(settings, None, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+            assert_eq!(paint_over_desc(settings, None, false).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+            assert_eq!(paint_over_desc(settings, Some("VBR"), false).as_deref(), Some("PaintOver Burst: 5f"));
         }
-        assert_eq!(paint_over_desc(&cbr, false).as_deref(), Some("PaintOver Burst: 5f"));
-        assert_eq!(paint_over_desc(&turbo(&cbr), false).as_deref(), Some("PaintOver Burst: 5f"));
-        assert_eq!(paint_over_desc(&crf, false), None);
-        assert_eq!(paint_over_desc(&turbo(&crf), false), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, true), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..cbr.clone() }, false), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, true), None);
+        for settings in [&cbr, &turbo(&cbr)] {
+            assert_eq!(paint_over_desc(settings, None, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+            assert_eq!(paint_over_desc(settings, None, false).as_deref(), Some("PaintOver Burst: 5f"));
+            assert_eq!(paint_over_desc(settings, Some("CBR"), false).as_deref(), Some("PaintOver Burst: 5f"));
+        }
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, None, true), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..cbr.clone() }, None, false), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, None, true), None);
         assert_eq!(
-            paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..cbr.clone() }, true).as_deref(),
+            paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..cbr.clone() }, None, true).as_deref(),
             Some("PaintOver CRF: 25 (Burst: 5f)")
         );
         let jpeg = RustCaptureSettings {
@@ -443,10 +452,10 @@ mod tests {
             paint_over_trigger_frames: 15,
             ..crf.clone()
         };
-        assert_eq!(paint_over_desc(&jpeg, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&turbo(&jpeg), false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, false), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, false), None);
+        assert_eq!(paint_over_desc(&jpeg, None, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&turbo(&jpeg), None, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, None, false), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, None, false), None);
     }
 
     /// A held key frame past its budget is coded again six quantizer steps coarser for each
@@ -782,10 +791,12 @@ impl FrameEncoder {
     }
 
     /// Whether `hold_quantizer` holds a frame at the quantizer asked for under the session's rate
-    /// control: NVENC, libvpx, and SVT-AV1 (at a constant rate, where the release takes a new
+    /// control: NVENC, libvpx, and SVT-AV1 at a constant rate (where the release takes a new
     /// target with a picture) do; x265 and VA-API only at a constant quantizer (their
     /// `holds_quantizer` and `hold_quantizer` say why not at a constant rate); kvazaar, Tegra,
-    /// and a stateful V4L2 device take no quantizer from the caller.
+    /// and a stateful V4L2 device take no quantizer from the caller. The cleanup of a
+    /// constant-quality session moves the session's quality instead of holding a frame
+    /// (`pipeline::decide_constant_quality`), so this is read at a constant rate.
     pub fn holds_quantizer(&self) -> bool {
         match self {
             FrameEncoder::Nvenc(_) | FrameEncoder::Vpx(_) => true,
@@ -796,6 +807,13 @@ impl FrameEncoder {
             FrameEncoder::Tegra(_) => false,
             FrameEncoder::V4l2m2m(_) => false,
         }
+    }
+
+    /// Whether a change of the session's constant quality re-opens it, so the frame it applies
+    /// to is a key frame: x265, kvazaar, and SVT-AV1 take no new quality while they run. The
+    /// cleanup of a constant-quality session counts such a refresh as its key frame.
+    pub fn reopens_on_quality(&self) -> bool {
+        matches!(self, FrameEncoder::Hevc(_) | FrameEncoder::Av1(_))
     }
 
     /// Encode the next frame at the quantizer the quality index `crf` selects whatever the rate
