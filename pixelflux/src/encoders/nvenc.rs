@@ -868,9 +868,9 @@ unsafe fn probe_session_codecs(nvenc_lib: &NvencLibrary, cu_context: CUcontext) 
 /// divides evenly; the other modes count macroblocks, bytes, or rows and drift with geometry.
 const SLICE_MODE_COUNT: u32 = 3;
 
-/// Slices per H.264 and HEVC frame, the count the VA-API (`slices = 4`) and OpenH264
-/// (`SM_FIXEDSLCNUM_SLICE`) sessions emit too: a client decoding in software threads a frame
-/// across its slices, and more than four upsets some Chromium decoders. What the slices cost at
+/// Slices per H.264 and HEVC frame, the count the VA-API (`SLICES`; one for H.264 on AMD's VCE)
+/// and OpenH264 (`SM_FIXEDSLCNUM_SLICE`) sessions emit too: a client decoding in software threads
+/// a frame across its slices, and more than four upsets some Chromium decoders. What the slices cost at
 /// a fixed quantizer is measured by `gpu_bench_slices`. AV1 partitions by tiles instead, asked
 /// for as 1x1 in `configure_codec`.
 const SLICES_PER_FRAME: u32 = 4;

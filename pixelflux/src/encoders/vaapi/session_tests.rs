@@ -957,6 +957,22 @@ fn a_bound_the_driver_drops_is_written_back() {
     mock::with(|d| d.coded = None);
 }
 
+/// On AMD's VCE an H.264 picture is one slice, the cut that encoder codes at twice the rate of
+/// four; its HEVC, and every other device, keep four.
+#[test]
+fn an_h264_picture_on_vce_is_one_slice() {
+    for (vce, codec, wanted) in [(true, Codec::H264, 1), (true, Codec::H265, 4), (false, Codec::H264, 4)] {
+        mock::reset(Driver::generous());
+        let node = std::fs::File::open("/dev/null").unwrap();
+        let mut device = Device::on(mock::api(), node.into(), "stand-in").unwrap();
+        assert!(!device.vce, "a node the kernel does not answer for is not VCE");
+        device.vce = vce;
+        let mut enc = VaapiEncoder::on_device(Arc::new(device), &settings(codec, false), codec, Input::Host { rgba: false }).unwrap();
+        encode(&mut enc, 0, true);
+        assert_eq!(mock::with(|d| d.last_buffers(VAEncSliceParameterBufferType).len()), wanted, "{codec:?} on VCE {vce}");
+    }
+}
+
 /// A driver taking fewer slices than a session asks for gets as many as it takes, rather than
 /// no session at all.
 #[test]

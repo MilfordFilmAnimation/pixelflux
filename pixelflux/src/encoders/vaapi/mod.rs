@@ -55,7 +55,10 @@ use super::session::{check_host_frame, RateSettings};
 use super::sps::{h264_frame_num_range, NoReorder};
 use crate::RustCaptureSettings;
 
-/// The slices an H.264 or HEVC picture is cut into.
+/// The slices an H.264 or HEVC picture is cut into, a decoder threading a frame across them.
+/// AMD's VCE is the exception for H.264: it codes a picture cut into four slices at less than
+/// half its one-slice rate (Radeon Pro VII, 2160p: 44.6 against 20.4 ms a frame, 1080p: 8.7
+/// against 5.7), where its HEVC and every other engine measured here cost nothing for them.
 const SLICES: u32 = 4;
 /// The bytes a coded buffer holds: the uncompressed picture and some, an upper bound on any
 /// frame.
@@ -112,6 +115,62 @@ pub(crate) struct Device {
     display: VADisplay,
     _fd: OwnedFd,
     vendor: String,
+    /// Whether the device encodes H.264 on AMD's VCE (`amd_vce`).
+    vce: bool,
+}
+
+/// Whether the render node `fd` is an amdgpu device whose video encoder is VCE rather than VCN.
+/// The kernel reports the video blocks a device carries (`AMDGPU_INFO_HW_IP_COUNT`, the query
+/// Mesa reads to pick its encoder): a VCE-generation part answers for VCE and refuses the
+/// query for VCN's encoder. Any other driver is not asked.
+fn amd_vce(fd: c_int) -> bool {
+    #[repr(C)]
+    struct Version {
+        major: c_int,
+        minor: c_int,
+        patch: c_int,
+        name_len: usize,
+        name: *mut c_char,
+        date_len: usize,
+        date: *mut c_char,
+        desc_len: usize,
+        desc: *mut c_char,
+    }
+    #[repr(C)]
+    struct Info {
+        return_pointer: u64,
+        return_size: u32,
+        query: u32,
+        ip_type: u32,
+        ip_instance: u32,
+        reserved: [u32; 2],
+    }
+    const DRM_IOCTL_VERSION: u64 = 0xc040_6400;
+    const DRM_IOCTL_AMDGPU_INFO: u64 = 0x4020_6445;
+    const AMDGPU_INFO_HW_IP_COUNT: u32 = 0x03;
+    const AMDGPU_HW_IP_VCE: u32 = 4;
+    const AMDGPU_HW_IP_VCN_ENC: u32 = 7;
+    let mut name = [0u8; 16];
+    let mut version = Version {
+        major: 0,
+        minor: 0,
+        patch: 0,
+        name_len: name.len(),
+        name: name.as_mut_ptr() as *mut c_char,
+        date_len: 0,
+        date: ptr::null_mut(),
+        desc_len: 0,
+        desc: ptr::null_mut(),
+    };
+    if unsafe { libc::ioctl(fd, DRM_IOCTL_VERSION as _, &mut version as *mut Version) } != 0 || name[..version.name_len.min(name.len())] != *b"amdgpu" {
+        return false;
+    }
+    let engines = |ip_type: u32| {
+        let mut count: u32 = 0;
+        let mut info = Info { return_pointer: &mut count as *mut u32 as u64, return_size: 4, query: AMDGPU_INFO_HW_IP_COUNT, ip_type, ip_instance: 0, reserved: [0; 2] };
+        if unsafe { libc::ioctl(fd, DRM_IOCTL_AMDGPU_INFO as _, &mut info as *mut Info) } != 0 { 0 } else { count }
+    };
+    engines(AMDGPU_HW_IP_VCE) > 0 && engines(AMDGPU_HW_IP_VCN_ENC) == 0
 }
 
 /// The display is used from the one thread that holds the session.
@@ -157,7 +216,8 @@ impl Device {
             let text = (api.vaQueryVendorString)(display);
             if text.is_null() { String::new() } else { CStr::from_ptr(text).to_string_lossy().into_owned() }
         };
-        Ok(Self { api, display, _fd: fd, vendor })
+        let vce = amd_vce(fd.as_raw_fd());
+        Ok(Self { api, display, _fd: fd, vendor, vce })
     }
 
     fn check(&self, status: VAStatus, what: &str) -> Result<(), String> {
@@ -753,8 +813,9 @@ impl VaapiEncoder {
         if !rendered.is_empty() && !rendered.contains(&fourcc) {
             return Err(format!("the {} encoder takes no {} surfaces", codec.display(), fourcc_name(fourcc)));
         }
+        let wanted_slices = if matches!(arm, Arm::H264(_)) && device.vce { 1 } else { SLICES };
         let slices = match (&arm, slice_caps) {
-            (Arm::H264(_) | Arm::H265(_), (Some(max), Some(structure))) => Some(slice_layout(structure, max, me.surface_height.div_ceil(arm_block(&arm)), SLICES)?),
+            (Arm::H264(_) | Arm::H265(_), (Some(max), Some(structure))) => Some(slice_layout(structure, max, me.surface_height.div_ceil(arm_block(&arm)), wanted_slices)?),
             (Arm::H264(_) | Arm::H265(_), _) => Some((1, me.surface_height.div_ceil(arm_block(&arm)))),
             _ => None,
         };
@@ -1510,6 +1571,28 @@ mod tests {
             Err(e) => assert!(!e.is_empty(), "refusal must carry a reason"),
         }
         assert!(VaapiEncoder::new(&settings, Codec::Jpeg, Input::Host { rgba: false }).is_err());
+    }
+
+    /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): an AMD VCE device is
+    /// told from a VCN one by the kernel, and its H.264 key frame is one slice.
+    #[test]
+    #[ignore]
+    fn vaapi_vce_h264_is_one_slice() {
+        let (w, h) = (1920usize, 1080usize);
+        let settings = RustCaptureSettings { width: w as i32, height: h as i32, codec: Codec::H264, omit_stripe_headers: true, ..Default::default() };
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false }).expect("a VA-API H.264 session");
+        let frame: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff]).collect();
+        let key = enc.encode_host(&frame, w * 4, false, 0, 25, true).expect("encode");
+        let slices = super::super::codec::annexb_nals(&key).filter(|n| matches!(n[0] & 0x1f, 1 | 5)).count();
+        println!("{}: VCE {}, {slices} slice(s) in the key frame", enc.vendor(), enc.device.vce);
+        assert_eq!(slices, if enc.device.vce { 1 } else { SLICES as usize });
+    }
+
+    /// A node the kernel answers no DRM query on is not VCE.
+    #[test]
+    fn a_node_that_is_not_amdgpu_is_not_vce() {
+        let node = std::fs::File::open("/dev/null").unwrap();
+        assert!(!amd_vce(node.as_raw_fd()));
     }
 
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): whichever sequence
