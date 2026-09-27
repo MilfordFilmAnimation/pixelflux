@@ -112,8 +112,9 @@ build's (`encoders::software_encoder`, exported as `pixelflux.SOFTWARE_ENCODERS`
 resolved at build time, never by a setting: the default `gpl` feature makes libx264 the encoder behind every
 CPU H.264 session (striped and full-frame), and a build without it (`PIXELFLUX_ENABLE_GPL=0` →
 `--no-default-features --features openh264`) puts Cisco OpenH264 behind the same striped path
-(`encoders/oh264.rs`, one instance per stripe) with the same wire framing; selkies derives its rate-control
-default from the exported names. Every session, on every backend, converts with the BT.709 matrix — the sRGB
+(`encoders/oh264.rs`, one instance per stripe) with the same wire framing; selkies reads the exported names to
+name the encoder and to keep a WebRTC offer on OpenH264 at the 4:2:0 profile. Every session, on every backend,
+converts with the BT.709 matrix — the sRGB
 desktop's own primaries and transfer — at limited range for 4:2:0 and full range for the software
 4:4:4 sessions, and declares it; VP8 is the exception its bitstream forces, one color-space bit
 whose only defined value is BT.601 — told BT.709 out of band, Firefox reads neither the decoder
