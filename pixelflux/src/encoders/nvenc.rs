@@ -1188,6 +1188,13 @@ pub struct NvencEncoder {
     width: u32,
     height: u32,
     current_qp: u32,
+    /// The quality index the next frame is held at whatever the rate control
+    /// (`hold_quantizer`), and whether the driver has refused one, said once.
+    held_qp: Option<u32>,
+    hold_refused: bool,
+    /// The quality index the rate control last coded a frame at (held frames aside), from the
+    /// driver's average quantizer.
+    last_quality: Option<u32>,
     encode_config: NV_ENC_CONFIG,
     init_params: NV_ENC_INITIALIZE_PARAMS,
     input_device_ptr: CUdeviceptr,
@@ -1990,6 +1997,9 @@ impl NvencEncoder {
                 width,
                 height,
                 current_qp: codec.nvenc_quantizer(settings.video_crf),
+                held_qp: None,
+                hold_refused: false,
+                last_quality: None,
                 encode_config: config,
                 init_params,
                 input_device_ptr,
@@ -2556,6 +2566,53 @@ impl NvencEncoder {
         false
     }
 
+    /// The quality index the rate control last coded a frame at, where the driver reports its
+    /// quantizer; a held frame (`hold_quantizer`) is not the rate control's and leaves it.
+    pub fn last_quality(&self) -> Option<u32> {
+        self.last_quality
+    }
+
+    /// Encode the next frame at the constant quantizer the quality index `crf` selects, whatever
+    /// the rate control, and leave the session's own rate control and quantizer as they were
+    /// for the frame after: the cleanup of a still screen. A held key frame of a constant-rate
+    /// session that comes out past `HELD_KEY_BUDGET_S` of the target is coded again, as a key
+    /// frame, at the coarser quantizer `held_key_retry` picks.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        self.held_qp = Some(crf);
+    }
+
+    /// Put the session on constant quantizer `q` for the picture about to be submitted,
+    /// answering the rate control to restore once it is encoded; `None` where the session is
+    /// already there or the driver refused, which leaves the picture to the rate control.
+    ///
+    /// The rate-control mode is one of the parameters `nvEncReconfigureEncoder` takes without a
+    /// reset, so a constant-rate session keeps its HRD state across the held picture instead of
+    /// starting over after it.
+    unsafe fn hold_rate(&mut self, q: u32) -> Option<NV_ENC_RC_PARAMS> {
+        let saved = self.encode_config.rcParams;
+        let constant = saved.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP;
+        if constant && saved.constQP.qpIntra == q && saved.constQP.qpInterP == q {
+            return None;
+        }
+        let rc = &mut self.encode_config.rcParams;
+        rc.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP;
+        rc.constQP.qpInterP = q;
+        rc.constQP.qpInterB = q;
+        rc.constQP.qpIntra = q;
+        let status = self.reconfigure(false, false);
+        if status != NVENCSTATUS::NV_ENC_SUCCESS {
+            self.encode_config.rcParams = saved;
+            if !std::mem::replace(&mut self.hold_refused, true) {
+                eprintln!(
+                    "[NVENC] Holding a frame at quantizer {q} refused ({status:?}): {}",
+                    last_error(&self.nvenc_funcs, self.encoder_session)
+                );
+            }
+            return None;
+        }
+        Some(saved)
+    }
+
     /// Apply a runtime rate-control / frame-rate change to the live session, and report whether
     /// the session carries it afterwards.
     ///
@@ -2657,8 +2714,49 @@ impl NvencEncoder {
             ..Default::default()
         };
 
+        let held_qp = self.held_qp.take();
+        let held = held_qp.and_then(|crf| self.hold_rate(self.codec.nvenc_quantizer(crf as i32)));
+        let mut result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, held_qp.is_some());
+        let retry = match (held_qp, held, &result) {
+            (Some(crf), Some(rc), Ok(coded))
+                if force_idr && rc.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR =>
+            {
+                let cap = (rc.averageBitRate as f64 / 8.0 * super::HELD_KEY_BUDGET_S) as usize;
+                super::held_key_retry(crf, coded.len(), cap)
+            }
+            _ => None,
+        };
+        if let Some(coarser) = retry
+            && self.hold_rate(self.codec.nvenc_quantizer(coarser as i32)).is_some()
+        {
+            pic_params.inputTimeStamp = self.references.as_ref().map_or(0, ReferenceWindow::next_pts);
+            result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, true);
+        }
+        if let Some(rc) = held {
+            self.encode_config.rcParams = rc;
+            let status = self.reconfigure(false, false);
+            if status != NVENCSTATUS::NV_ENC_SUCCESS {
+                eprintln!(
+                    "[NVENC] Restoring the rate control after a held frame refused ({status:?}): {}",
+                    last_error(&self.nvenc_funcs, self.encoder_session)
+                );
+            }
+        }
+        result
+    }
+
+    /// Submit one picture and read its bitstream back behind the wire header: steps 1 to 4 of
+    /// `submit_frame` past the choice of output buffer. A `held` picture leaves `last_quality` to
+    /// the rate control's own frames.
+    unsafe fn encode_picture(
+        &mut self,
+        pic_params: &mut NV_ENC_PIC_PARAMS,
+        output_bitstream: NV_ENC_OUTPUT_PTR,
+        frame_number: u64,
+        held: bool,
+    ) -> Result<Vec<u8>, String> {
         let encode_fn = self.nvenc_funcs.nvEncEncodePicture.unwrap();
-        let res = encode_fn(self.encoder_session, &mut pic_params);
+        let res = encode_fn(self.encoder_session, pic_params);
         if res != NVENCSTATUS::NV_ENC_SUCCESS {
             return Err(format!("Encode Picture failed: {:?}", res));
         }
@@ -2680,6 +2778,13 @@ impl NvencEncoder {
         let data_size = lock_params.bitstreamSizeInBytes as usize;
         let header_sz = if self.omit_stripe_headers { 0 } else { VIDEO_HEADER_LEN };
         let mut output = Vec::with_capacity(header_sz + data_size);
+        if !held {
+            self.last_quality = match lock_params.frameAvgQP {
+                0 => None,
+                q if self.codec == Codec::Av1 => Some(self.codec.nvenc_quality_index(q)),
+                q => Some(q),
+            };
+        }
         let frame_type = match lock_params.pictureType {
             NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR => FRAME_KEY,
             NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_I => FRAME_INTRA,

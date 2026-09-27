@@ -23,7 +23,7 @@ use std::sync::{Condvar, Mutex};
 
 use codec_sys::svtav1::*;
 
-use super::codec::{av1_is_key, frame_type_from_key, push_video_header, vpx_level, Codec, VIDEO_HEADER_LEN};
+use super::codec::{av1_is_key, frame_type_from_key, push_video_header, vpx_level, Codec, VIDEO_HEADER_LEN, VPX_QINDEX};
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
 use super::session::{encode_threads, Pending, Planes, Quality, RateSettings};
 use crate::RustCaptureSettings;
@@ -77,6 +77,12 @@ pub struct SvtAv1Encoder {
     last_reference: Reference,
     next_pts: u64,
     pending: Pending,
+    /// The quantizer the next frame is held at whatever the rate control (`hold_quantizer`).
+    held: Option<u32>,
+    /// Whether the frame after a held key frame of a constant-rate session restates its target.
+    restate_target: bool,
+    /// The quality index the rate control last coded a frame at, held frames aside.
+    last_quality: Option<u32>,
 }
 
 /// The id an anchor is stored under: its timestamp, off the zero the library reserves.
@@ -118,6 +124,9 @@ impl SvtAv1Encoder {
             last_reference: Reference::Untracked,
             next_pts: 0,
             pending: Pending::default(),
+            held: None,
+            restate_target: false,
+            last_quality: None,
         };
         me.open()?;
         Ok(me)
@@ -198,6 +207,7 @@ impl SvtAv1Encoder {
         } else {
             self.set("rc", "0")?;
             self.set("qp", &Self::level(self.quality.current).to_string())?;
+            self.config.use_qp_file = true;
         }
         let code = unsafe { svt_av1_enc_set_parameter(self.handle, &mut *self.config) };
         if code != EB_ErrorNone {
@@ -286,12 +296,31 @@ impl SvtAv1Encoder {
         if self.references.is_some() { self.last_reference } else { Reference::Untracked }
     }
 
+    /// Whether `hold_quantizer` holds a frame at its quantizer: at a constant quantizer always,
+    /// at a constant rate where the release takes a new target with a picture.
+    pub fn holds_quantizer(&self) -> bool {
+        !self.rate.cbr || HAS_EVENTS
+    }
+
+    /// The quality index the rate control last coded a frame at, held frames aside.
+    pub fn last_quality(&self) -> Option<u32> {
+        self.last_quality
+    }
+
     /// Leave frame `frame_id` and every frame after it out of the predictions where the session
     /// names its references; refused otherwise, so the caller codes a key frame.
     pub fn invalidate_reference(&mut self, frame_id: u16) -> bool {
         let Some(references) = self.references.as_mut() else { return false };
         references.invalidate(frame_id);
         true
+    }
+
+    /// Encode the next frame at the quantizer the quality index `crf` selects, leaving the
+    /// session's own quantizer for the frame after: the cleanup of a still screen. A
+    /// constant-quantizer session names each picture's quantizer with the picture; the
+    /// constant-rate control takes none, and codes the frame at its own.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        self.held = Some(Codec::Av1.quantizer(crf as i32));
     }
 
     /// Apply a rate or frame-rate change: a new bitrate with the next picture where the library
@@ -348,7 +377,19 @@ impl SvtAv1Encoder {
             header.pts = pts as i64;
             header.flags = 0;
             header.pic_type = if key { EB_AV1_KEY_PICTURE } else { EB_AV1_INVALID_PICTURE };
+            header.qp = Self::level(self.held.unwrap_or(self.quality.current));
         }
+        if self.rate.cbr && HAS_EVENTS {
+            let held_key = key && self.held.is_some();
+            if held_key || self.restate_target {
+                // The rate control takes no quantizer: a held key frame's picture is planned
+                // with a target that gives it `HELD_KEY_BUDGET_S` of the session's.
+                let factor = if held_key { super::HELD_KEY_BUDGET_S * self.rate.fps as f64 } else { 1.0 };
+                self.events.target_bit_rate = (self.rate.bps() as f64 * factor.max(1.0)).min(MAX_BITRATE_BPS as f64) as u32;
+            }
+            self.restate_target = held_key;
+        }
+        let held = self.held.take().is_some();
         let sent = self.events;
         let code = unsafe { send_picture(self.handle, &mut self.input.0, sent) };
         if code != EB_ErrorNone {
@@ -372,6 +413,9 @@ impl SvtAv1Encoder {
             let Some(p) = (unsafe { packet.as_ref() }) else { break };
             let bytes = unsafe { std::slice::from_raw_parts(p.p_buffer, p.n_filled_len as usize) }.to_vec();
             let packet_pts = p.pts.max(0) as u64;
+            if !held {
+                self.last_quality = Some(Codec::Av1.quality_index(VPX_QINDEX[(p.qp as usize).min(63)] as u32));
+            }
             unsafe { svt_av1_enc_release_out_buffer(&mut packet) };
             let id = self.pending.take(packet_pts).unwrap_or(frame_number as u16);
             let is_key = av1_is_key(&bytes);

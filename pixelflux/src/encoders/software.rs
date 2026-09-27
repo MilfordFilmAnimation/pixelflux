@@ -190,6 +190,10 @@ pub struct H264EncoderWrapper {
     /// each frame can name what it predicts from.
     references: ReferenceWindow,
     last_reference: Reference,
+    /// The quantizer the next frame is held at whatever the rate control (`hold_quantizer`).
+    held_qp: Option<i32>,
+    /// The quantizer the rate control last coded a frame at, held frames aside.
+    last_qp: Option<u32>,
 }
 
 #[cfg(feature = "gpl")]
@@ -250,6 +254,17 @@ impl H264EncoderWrapper {
     pub fn new(width: i32, height: i32, crf: i32, is_i444: bool, fps: f64, threads: i32,
                cbr_mode: bool, bitrate_kbps: i32, vbv_kbit: i32,
                min_qp: i32, max_qp: i32) -> Option<Self> {
+        Self::open(width, height, crf, is_i444, fps, threads, cbr_mode, bitrate_kbps, vbv_kbit, min_qp, max_qp, None)
+    }
+
+    /// `new`, with a constant-rate session's first frame given a budget of its own where `key`
+    /// names one, `(budget_kbit, level_idc)`: the rate is that budget a frame and the VBV buffer
+    /// that budget, full, until `restore_rate`, and the level is pinned to the one the session it
+    /// replaces declared, which the raised rate would otherwise lift.
+    #[allow(clippy::too_many_arguments)]
+    fn open(width: i32, height: i32, crf: i32, is_i444: bool, fps: f64, threads: i32,
+            cbr_mode: bool, bitrate_kbps: i32, vbv_kbit: i32,
+            min_qp: i32, max_qp: i32, key: Option<(i32, i32)>) -> Option<Self> {
         unsafe {
             let mut param: x264_sys::x264_param_t = std::mem::zeroed();
             let preset = CString::new("ultrafast").unwrap();
@@ -278,6 +293,14 @@ impl H264EncoderWrapper {
                 param.rc.i_bitrate = bk;
                 param.rc.i_vbv_max_bitrate = bk;
                 param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
+                if let Some((budget, level)) = key {
+                    let rate = budget.saturating_mul(param.i_fps_num as i32).max(bk);
+                    param.rc.i_bitrate = rate;
+                    param.rc.i_vbv_max_bitrate = rate;
+                    param.rc.i_vbv_buffer_size = budget.max(1);
+                    param.rc.f_vbv_buffer_init = 1.0;
+                    param.i_level_idc = level;
+                }
                 param.rc.b_filler = 0;
                 if min_qp > 0 {
                     param.rc.i_qp_min = min_qp.min(51);
@@ -327,6 +350,8 @@ impl H264EncoderWrapper {
                     max_qp,
                     references: ReferenceWindow::new(dpb),
                     last_reference: Reference::Untracked,
+                    held_qp: None,
+                    last_qp: None,
                 })
             }
         }
@@ -414,6 +439,55 @@ impl H264EncoderWrapper {
         self.last_reference
     }
 
+    /// The quantizer the rate control last coded a frame at, held frames aside.
+    pub fn last_qp(&self) -> Option<u32> {
+        self.last_qp
+    }
+
+    /// Encode the next frame at quantizer `qp` whatever the rate control, leaving the session's
+    /// own for the frame after: x264's per-picture forced quantizer.
+    ///
+    /// Under a constant rate x264's row-level VBV control moves a forced quantizer back toward
+    /// the rate control's own for the frame, so a held key frame there, a fresh start for the
+    /// decoder anyway, starts a fresh session (`open_for_held_key`) whose rate control plans that
+    /// frame with `HELD_KEY_BUDGET_S` of the target, which also bounds its size, and takes the
+    /// session's own rate back for the frame after.
+    pub fn hold_quantizer(&mut self, qp: i32) {
+        self.held_qp = Some(qp.clamp(0, 51));
+    }
+
+    /// Replace the session with one whose first frame, the held key frame about to be encoded,
+    /// has the budget of `HELD_KEY_BUDGET_S` of the target; true where it opened, and
+    /// `restore_rate` is owed after the frame.
+    fn open_for_held_key(&mut self) -> bool {
+        let level = unsafe {
+            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            param.i_level_idc
+        };
+        let budget = (self.current_bitrate as f64 * super::HELD_KEY_BUDGET_S).round() as i32;
+        let fresh = Self::open(
+            self.width, self.height, self.current_crf, self.is_i444, self.current_fps as f64, self.threads,
+            self.is_cbr, self.current_bitrate, self.current_vbv, self.min_qp, self.max_qp, Some((budget, level)),
+        );
+        let Some(mut fresh) = fresh else { return false };
+        fresh.held_qp = self.held_qp;
+        *self = fresh;
+        true
+    }
+
+    /// Put the session's own rate and VBV buffer back after a held key frame.
+    fn restore_rate(&mut self) {
+        unsafe {
+            let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+            x264_sys::x264_encoder_parameters(self.encoder, &mut param);
+            param.rc.i_bitrate = self.current_bitrate;
+            param.rc.i_vbv_max_bitrate = self.current_bitrate;
+            param.rc.i_vbv_buffer_size = self.current_vbv.max(1);
+            x264_sys::x264_encoder_reconfig(self.encoder, &mut param);
+        }
+    }
+
     /// Leave frame `frame_id` and every frame after it out of the predictions. False when x264
     /// refuses, and the caller codes a key frame instead.
     pub fn invalidate_reference(&mut self, frame_id: u16) -> bool {
@@ -463,6 +537,30 @@ impl H264EncoderWrapper {
         omit_headers: bool,
         output_buf: &mut Vec<u8>,
     ) -> bool {
+        let key_budget = self.is_cbr && force_idr && self.held_qp.is_some() && self.open_for_held_key();
+        let coded = self.encode_picture(y, u, v, y_stride, u_stride, v_stride, frame_id, y_start, force_idr, omit_headers, output_buf);
+        if key_budget {
+            self.restore_rate();
+        }
+        coded
+    }
+
+    /// `encode_with_headers` past the choice of session.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_picture(
+        &mut self,
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        y_stride: i32,
+        u_stride: i32,
+        v_stride: i32,
+        frame_id: u16,
+        y_start: u16,
+        force_idr: bool,
+        omit_headers: bool,
+        output_buf: &mut Vec<u8>,
+    ) -> bool {
         unsafe {
             let mut pic_in: x264_sys::x264_picture_t = std::mem::zeroed();
             x264_sys::x264_picture_init(&mut pic_in);
@@ -485,6 +583,8 @@ impl H264EncoderWrapper {
             } else {
                 x264_sys::X264_TYPE_AUTO
             } as i32;
+            let held = self.held_qp.take();
+            pic_in.i_qpplus1 = held.map_or(x264_sys::X264_QP_AUTO as i32, |q| q + 1);
 
             let mut pic_out: x264_sys::x264_picture_t = std::mem::zeroed();
             let mut nals: *mut x264_sys::x264_nal_t = ptr::null_mut();
@@ -499,6 +599,9 @@ impl H264EncoderWrapper {
             );
 
             if frame_size > 0 {
+                if held.is_none() {
+                    self.last_qp = (pic_out.i_qpplus1 > 0).then(|| (pic_out.i_qpplus1 - 1) as u32);
+                }
                 let frame_type = if pic_out.i_type == x264_sys::X264_TYPE_IDR as i32 {
                     FRAME_KEY
                 } else if pic_out.i_type == x264_sys::X264_TYPE_I as i32 {

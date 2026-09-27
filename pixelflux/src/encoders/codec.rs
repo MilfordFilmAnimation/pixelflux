@@ -199,6 +199,23 @@ impl Codec {
     pub fn nvenc_quantizer_bound(self, qp: i32) -> u32 {
         if qp <= 0 { 0 } else { self.nvenc_quantizer(qp) }
     }
+
+    /// The session quality index whose quantizer (`quantizer`) is nearest `q`, a quantizer of
+    /// this codec's domain: what a rate-controlled frame's quantizer amounts to on the H.26x
+    /// scale the quality settings use.
+    pub fn quality_index(self, q: u32) -> u32 {
+        nearest_index(q, |crf| self.quantizer(crf))
+    }
+
+    /// `quality_index` for an NVENC session.
+    pub fn nvenc_quality_index(self, q: u32) -> u32 {
+        nearest_index(q, |crf| self.nvenc_quantizer(crf))
+    }
+}
+
+/// The quality index in `0..=51` whose quantizer is nearest `q`, the lowest on a tie.
+fn nearest_index(q: u32, quantizer: impl Fn(i32) -> u32) -> u32 {
+    (0..=51).min_by_key(|&crf| (quantizer(crf) as i64 - q as i64).abs()).unwrap_or(0) as u32
 }
 
 /// Session quality index → VP8 quantizer index (0..=127) breakpoints.

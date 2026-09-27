@@ -249,6 +249,40 @@ fn survives_in_child(f: impl FnOnce()) -> bool {
     }
 }
 
+/// Seconds of a constant-rate target a held frame (the cleanup of a still screen) may spend: a
+/// held key frame larger than that is coded again at a coarser quantizer (`held_key_retry`), or
+/// planned with that budget where the library's own rate control sizes it (x264, SVT-AV1),
+/// and a held refresh is coarsened to fit from the rate control's last quantizer
+/// (`pipeline::decide_hw_fullframe`). A second of the target drains in 0.4 s at the pace the
+/// WebRTC pacer holds video to, so a user acting just as the cleanup goes out waits that long at
+/// most for it. It holds a 1080p key frame at the paint-over quantizer down to 2 Mbit/s (NVENC
+/// 144 kB, x264 182 kB); a quarter second made that key frame coarser than the picture it was
+/// cleaning (x264 52 kB at 31.7 dB, NVENC 99 kB at 45.3 dB at 2 Mbit/s).
+pub(crate) const HELD_KEY_BUDGET_S: f64 = 1.0;
+
+/// The quality index a held key frame of `len` bytes is coded again at, from `crf`, where it
+/// came out larger than a budget of `cap` bytes; `None` where it fits. A quality index is a
+/// quantizer on the H.26x scale, where six steps halve the bits.
+pub(crate) fn held_key_retry(crf: u32, len: usize, cap: usize) -> Option<u32> {
+    (len > cap && cap > 0).then(|| (crf + (6.0 * (len as f64 / cap as f64).log2()).ceil() as u32).min(51))
+}
+
+/// The quality index a held key frame of a constant-rate session is first coded at, from `crf`,
+/// where the session's last held key frame, `last` = (bytes, quality index), says one at `crf`
+/// would come out past a budget of `cap` bytes: as much coarser as `held_key_retry` would take
+/// it, so the frame is coded once rather than twice, since a rate control that runs through
+/// the held frame (libvpx's) charges its buffer with both. A key frame coded more than twelve
+/// steps from `crf` says too little about one at it, and the frame is tried at `crf`.
+pub(crate) fn held_key_start(crf: u32, last: Option<(usize, u32)>, cap: usize) -> u32 {
+    match last {
+        Some((len, q)) if q.abs_diff(crf) <= 12 => {
+            let at_crf = len as f64 * 2f64.powf((q as f64 - crf as f64) / 6.0);
+            held_key_retry(crf, at_crf.round() as usize, cap).unwrap_or(crf)
+        }
+        _ => crf,
+    }
+}
+
 /// Damps visible quality "blinking": the number of consecutive frames a QP *increase* (a
 /// quality drop under sustained motion) must be requested before a fixed-QP encoder commits
 /// it. Moving the quantizer costs a codec re-open (x265, kvazaar, SVT-AV1) or a full encoder
@@ -407,6 +441,29 @@ mod tests {
         assert_eq!(paint_over_desc(&turbo(&jpeg), None).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
         assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, None), None);
         assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, None), None);
+    }
+
+    /// A held key frame past its budget is coded again six quantizer steps coarser for each
+    /// doubling past it, never past 51, and one inside it is kept.
+    #[test]
+    fn a_held_key_past_its_budget_is_coarsened_by_the_overshoot() {
+        assert_eq!(held_key_retry(18, 1000, 1000), None);
+        assert_eq!(held_key_retry(18, 2000, 1000), Some(24));
+        assert_eq!(held_key_retry(18, 3000, 1000), Some(28));
+        assert_eq!(held_key_retry(40, 64_000, 1000), Some(51));
+        assert_eq!(held_key_retry(18, 5000, 0), None, "no budget, no retry");
+    }
+
+    /// A held key frame starts where the last one says a frame of its size fits the budget: at
+    /// the paint-over index where it fit there, as much coarser as a retry would take it where
+    /// it did not, and at the paint-over index where there is no last one near enough to say.
+    #[test]
+    fn a_held_key_starts_where_the_last_one_says_it_fits() {
+        assert_eq!(held_key_start(18, None, 1000), 18);
+        assert_eq!(held_key_start(18, Some((800, 18)), 1000), 18);
+        assert_eq!(held_key_start(18, Some((2000, 18)), 1000), 24);
+        assert_eq!(held_key_start(18, Some((1000, 24)), 1000), 24, "a retried key's own index");
+        assert_eq!(held_key_start(18, Some((100, 40)), 1000), 18, "too far to say");
     }
 
     /// A session lands on the codec it asked for, or on the next video codec this host serves;
@@ -702,6 +759,54 @@ impl FrameEncoder {
             #[cfg(target_arch = "aarch64")]
             FrameEncoder::Tegra(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
             FrameEncoder::V4l2m2m(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
+        }
+    }
+
+    /// The quality index (the H.26x quantizer scale `video_crf` uses) the last frame was coded at,
+    /// where the session reports its quantizer: what a constant-rate session's picture is worth
+    /// against the paint-over quality.
+    pub fn last_quality(&self) -> Option<u32> {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.last_quality(),
+            FrameEncoder::Vpx(enc) => enc.last_quality(),
+            FrameEncoder::Hevc(enc) => enc.last_quality(),
+            FrameEncoder::Av1(enc) => enc.last_quality(),
+            _ => None,
+        }
+    }
+
+    /// Whether `hold_quantizer` holds a frame at the quantizer asked for under the session's rate
+    /// control: NVENC, libvpx, and SVT-AV1 (at a constant rate, where the release takes a new
+    /// target with a picture) do; x265 and VA-API only at a constant quantizer (their
+    /// `holds_quantizer` and `hold_quantizer` say why not at a constant rate); kvazaar, Tegra,
+    /// and a stateful V4L2 device take no quantizer from the caller.
+    pub fn holds_quantizer(&self) -> bool {
+        match self {
+            FrameEncoder::Nvenc(_) | FrameEncoder::Vpx(_) => true,
+            FrameEncoder::Vaapi(enc) => !enc.is_cbr(),
+            FrameEncoder::Hevc(enc) => enc.holds_quantizer(),
+            FrameEncoder::Av1(enc) => enc.holds_quantizer(),
+            #[cfg(target_arch = "aarch64")]
+            FrameEncoder::Tegra(_) => false,
+            FrameEncoder::V4l2m2m(_) => false,
+        }
+    }
+
+    /// Encode the next frame at the quantizer the quality index `crf` selects whatever the rate
+    /// control, and leave the session's own rate control and quality as they were for the frame
+    /// after: the cleanup of a still screen, where `holds_quantizer`. A session whose engine takes
+    /// no quantizer from the caller (Tegra, a stateful V4L2 device) codes that frame under its own
+    /// rate control.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.hold_quantizer(crf),
+            FrameEncoder::Vaapi(enc) => enc.hold_quantizer(crf),
+            FrameEncoder::Vpx(enc) => enc.hold_quantizer(crf),
+            FrameEncoder::Hevc(enc) => enc.hold_quantizer(crf),
+            FrameEncoder::Av1(enc) => enc.hold_quantizer(crf),
+            #[cfg(target_arch = "aarch64")]
+            FrameEncoder::Tegra(_) => {}
+            FrameEncoder::V4l2m2m(_) => {}
         }
     }
 

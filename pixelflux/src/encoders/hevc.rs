@@ -31,14 +31,19 @@ pub struct HevcEncoder {
     fresh: bool,
     next_pts: u64,
     pending: Pending,
+    /// The quantizer the next frame is held at whatever the rate control (`hold_quantizer`).
+    held: Option<u32>,
+    /// The quantizer the rate control last coded a frame at, held frames aside.
+    last_quality: Option<u32>,
 }
 
 unsafe impl Send for HevcEncoder {}
 
-/// What a backend answered for one submitted picture.
+/// What a backend answered for one submitted picture, with the quantizer it was coded at.
 struct Coded {
     bytes: Vec<u8>,
     pts: u64,
+    qp: u32,
 }
 
 impl HevcEncoder {
@@ -62,6 +67,8 @@ impl HevcEncoder {
             fresh: true,
             next_pts: 0,
             pending: Pending::default(),
+            held: None,
+            last_quality: None,
         })
     }
 
@@ -87,6 +94,22 @@ impl HevcEncoder {
         Reference::Untracked
     }
 
+    /// Whether `hold_quantizer` holds a frame at its quantizer: x265 at a constant rate factor,
+    /// kvazaar never. At a constant rate x265's rate control moves a forced quantizer back to
+    /// what its buffer affords (a key frame held at 18 came out 23.2 kB at 26.6 dB at 8 Mbit/s
+    /// 1080p), and a fresh session whose buffer is the key frame's budget plans it from a
+    /// fraction of that buffer (102.5 kB at 34 dB where the budget was 250 kB and the picture
+    /// before it 53.9 dB), so a constant-rate session holds none.
+    pub fn holds_quantizer(&self) -> bool {
+        Backend::HOLDS_QUANTIZER && !self.rate.cbr
+    }
+
+    /// The quality index (HEVC's quantizer) the rate control last coded a frame at, held frames
+    /// aside.
+    pub fn last_quality(&self) -> Option<u32> {
+        self.last_quality
+    }
+
     /// The library keeps its reference lists to itself: refused, so the caller codes a key frame.
     pub fn invalidate_reference(&mut self, _frame_id: u16) -> bool {
         false
@@ -97,6 +120,18 @@ impl HevcEncoder {
         self.backend = Backend::open(self.planes.width, self.planes.height, self.threads, self.planes.i444, self.rate, self.quality.current)?;
         self.fresh = true;
         Ok(())
+    }
+
+    /// Encode the next frame at the quantizer the quality index `crf` selects, leaving the
+    /// session's own quality for the frame after: the cleanup of a still screen, at a constant
+    /// rate factor, where x265 takes it as the frame's forced quantizer. A constant-rate session
+    /// codes the frame under its rate control (`holds_quantizer`). kvazaar takes no quantizer
+    /// but the one it opens at, and a re-open for the frame would need another to come back,
+    /// each a key frame, so it codes the frame at its own.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        if !self.rate.cbr {
+            self.held = Some(Codec::H265.quantizer(crf as i32));
+        }
     }
 
     /// Re-open the encoder when a rate or frame-rate setting changed: neither library's rate
@@ -120,17 +155,21 @@ impl HevcEncoder {
         if !self.rate.cbr && self.quality.update(Codec::H265.quantizer(crf as i32)).is_some() {
             self.reopen()?;
         }
+        let held = self.held.take();
         if force_idr && !self.fresh && !Backend::KEY_ON_REQUEST {
             self.reopen()?;
         }
         let key = force_idr || self.fresh;
         let full_range = self.is_full_range();
         let pts = self.next_pts;
-        let coded = self.backend.encode(&mut self.planes, pixels, stride, rgba, full_range, self.threads as usize, pts, key)?;
+        let coded = self.backend.encode(&mut self.planes, pixels, stride, rgba, full_range, self.threads as usize, pts, key, held)?;
         self.next_pts += 1;
         self.fresh = false;
         self.pending.push(pts, frame_number as u16);
         let Some(coded) = coded else { return Ok(Vec::new()) };
+        if held.is_none() {
+            self.last_quality = Some(coded.qp);
+        }
         let id = self.pending.take(coded.pts).unwrap_or(frame_number as u16);
         let mut output = Vec::with_capacity(VIDEO_HEADER_LEN + coded.bytes.len());
         if !self.omit_headers {
@@ -195,6 +234,7 @@ mod x265 {
         pub const LIBRARY: &'static str = "x265";
         pub const FULLCOLOR: bool = true;
         pub const KEY_ON_REQUEST: bool = true;
+        pub const HOLDS_QUANTIZER: bool = true;
 
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
@@ -302,6 +342,7 @@ mod x265 {
             threads: usize,
             pts: u64,
             key: bool,
+            held: Option<u32>,
         ) -> Result<Option<Coded>, String> {
             planes.convert(pixels, stride, rgba, full_range, false, threads)?;
             let api = unsafe { &*self.api };
@@ -323,6 +364,7 @@ mod x265 {
             pic.pts = pts as i64;
             pic.bitDepth = 8;
             pic.sliceType = if key { X265_TYPE_IDR as c_int } else { X265_TYPE_AUTO as c_int };
+            pic.forceqp = held.map_or(0, |q| q as c_int + 1);
             let mut nals: *mut x265_nal = ptr::null_mut();
             let mut count: u32 = 0;
             let ret = unsafe { encoder_encode(api, self.encoder, &mut nals, &mut count, &mut pic, out.as_mut_ptr()) };
@@ -336,7 +378,7 @@ mod x265 {
             for nal in unsafe { std::slice::from_raw_parts(nals, count as usize) } {
                 bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(nal.payload, nal.sizeBytes as usize) });
             }
-            Ok(Some(Coded { bytes, pts: out[0].pts.max(0) as u64 }))
+            Ok(Some(Coded { bytes, pts: out[0].pts.max(0) as u64, qp: out[0].frameData.qp.round().clamp(0.0, 51.0) as u32 }))
         }
     }
 }
@@ -375,6 +417,7 @@ mod kvazaar {
         pub const LIBRARY: &'static str = "kvazaar";
         pub const FULLCOLOR: bool = false;
         pub const KEY_ON_REQUEST: bool = false;
+        pub const HOLDS_QUANTIZER: bool = false;
 
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
@@ -449,6 +492,7 @@ mod kvazaar {
             threads: usize,
             pts: u64,
             _key: bool,
+            _held: Option<u32>,
         ) -> Result<Option<Coded>, String> {
             let api = unsafe { &*self.api };
             let pic = unsafe { (api.picture_alloc.unwrap())(planes.width as i32, planes.height as i32) };
@@ -487,7 +531,7 @@ mod kvazaar {
                     chunk = c.next;
                 }
                 let out_pts = if recon.is_null() { pts } else { unsafe { (*recon).pts.max(0) as u64 } };
-                coded = Some(Coded { bytes, pts: out_pts });
+                coded = Some(Coded { bytes, pts: out_pts, qp: info.qp.clamp(0, 51) as u32 });
             }
             unsafe {
                 (api.picture_free.unwrap())(pic);

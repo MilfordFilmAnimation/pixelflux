@@ -64,6 +64,13 @@ pub struct VpxEncoder {
     pending: Pending,
     /// The slot plan of the frame being encoded, recorded once its packet returns.
     plan: SlotPlan,
+    /// The quality index the next frame is held at whatever the rate control (`hold_quantizer`).
+    held: Option<u32>,
+    /// The quality index the rate control last coded a frame at, held frames aside.
+    last_quality: Option<u32>,
+    /// The size and quality index of the last held key frame of a constant-rate session
+    /// (`super::held_key_start`).
+    held_key: Option<(usize, u32)>,
 }
 
 unsafe impl Send for VpxEncoder {}
@@ -139,6 +146,9 @@ impl VpxEncoder {
             last_reference: Reference::Untracked,
             pending: Pending::default(),
             plan: SlotPlan::KEY,
+            held: None,
+            last_quality: None,
+            held_key: None,
         };
         let q = me.quality.current;
         me.program_rate(rate, q);
@@ -268,6 +278,29 @@ impl VpxEncoder {
         true
     }
 
+    /// The quality index the rate control last coded a frame at, held frames aside.
+    pub fn last_quality(&self) -> Option<u32> {
+        self.last_quality
+    }
+
+    /// Encode the next frame at the quantizer the quality index `crf` selects, whatever the rate
+    /// control, and put the session's own rate control back for the frame after: the cleanup of a
+    /// still screen. A held key frame of a constant-rate session starts at the quantizer the
+    /// last one says fits `HELD_KEY_BUDGET_S` of the target (`held_key_start`), and one that
+    /// comes out past it is coded again, as a key frame, at the coarser quantizer
+    /// `held_key_retry` picks.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        self.held = Some(crf);
+    }
+
+    /// Pin the configuration's quantizer bounds to the one the quality index `crf` selects.
+    fn pin_quantizer(&mut self, crf: u32) -> Result<(), String> {
+        let level = vpx_level(self.codec, self.codec.quantizer(crf as i32));
+        self.cfg.rc_min_quantizer = level;
+        self.cfg.rc_max_quantizer = level;
+        self.reconfigure()
+    }
+
     /// Re-program the rate control when a rate or frame-rate setting changed, live.
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
@@ -291,6 +324,37 @@ impl VpxEncoder {
             self.program_rate(self.rate, q);
             self.reconfigure()?;
         }
+        let capped = force_idr && self.rate.cbr;
+        let cap = (self.rate.bps() as f64 / 8.0 * super::HELD_KEY_BUDGET_S) as usize;
+        let held = self.held.take().map(|crf| if capped { super::held_key_start(crf, self.held_key, cap) } else { crf });
+        if let Some(crf) = held {
+            self.pin_quantizer(crf)?;
+        }
+        let quality = self.last_quality;
+        let mut result = self.encode_frame(pixels, stride, rgba, frame_number, force_idr);
+        let mut coded_at = held;
+        let retry = match (held, &result) {
+            (Some(crf), Ok(coded)) if capped => super::held_key_retry(crf, coded.len(), cap),
+            _ => None,
+        };
+        if let Some(coarser) = retry {
+            self.pin_quantizer(coarser)?;
+            result = self.encode_frame(pixels, stride, rgba, frame_number, true);
+            coded_at = Some(coarser);
+        }
+        if let (true, Some(crf), Ok(coded)) = (capped, coded_at, &result) {
+            self.held_key = Some((coded.len(), crf));
+        }
+        if held.is_some() {
+            self.last_quality = quality;
+            self.program_rate(self.rate, self.quality.current);
+            self.reconfigure()?;
+        }
+        result
+    }
+
+    /// Encode one packed host frame at the quantizer the configuration holds.
+    fn encode_frame(&mut self, pixels: &[u8], stride: usize, rgba: bool, frame_number: u64, force_idr: bool) -> Result<Vec<u8>, String> {
         let bt601 = self.codec == Codec::Vp8;
         self.planes.convert(pixels, stride, rgba, false, bt601, self.threads as usize)?;
 
@@ -391,6 +455,11 @@ impl VpxEncoder {
                 );
             }
             output.extend_from_slice(bytes);
+        }
+        if !output.is_empty() {
+            let mut q: c_int = 0;
+            let res = unsafe { vpx_codec_control_(&mut self.ctx, VP8E_GET_LAST_QUANTIZER as c_int, &mut q as *mut c_int) };
+            self.last_quality = (res == VPX_CODEC_OK).then(|| self.codec.quality_index(q.max(0) as u32));
         }
         Ok(output)
     }

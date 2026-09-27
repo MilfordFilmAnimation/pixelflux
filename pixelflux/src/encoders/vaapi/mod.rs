@@ -583,6 +583,8 @@ pub struct VaapiEncoder {
     last_reference: Reference,
     rate: RateSettings,
     qp: u32,
+    /// The quantizer the next frame is held at (`hold_quantizer`).
+    held: Option<u32>,
     /// Whether the driver caps each coded frame at the size a constant-rate session names.
     frame_cap: bool,
     /// The quality level asked of the driver: the highest it takes, its fastest, where libva's
@@ -795,6 +797,7 @@ impl VaapiEncoder {
             last_reference: Reference::Untracked,
             rate,
             qp: codec.quantizer(settings.video_crf),
+            held: None,
             frame_cap: false,
             quality_level: None,
             sequence_start: true,
@@ -1046,6 +1049,23 @@ impl VaapiEncoder {
         Ok(())
     }
 
+    /// Whether the session runs a constant rate.
+    pub fn is_cbr(&self) -> bool {
+        self.rate.cbr
+    }
+
+    /// Encode the next frame at the quantizer the quality index `crf` selects, and leave the
+    /// session's own quantizer for the frame after: the cleanup of a still screen, at a constant
+    /// quantizer. A constant-rate session codes the frame under its rate control: radeonsi drops
+    /// per-frame quantizer bounds (a key frame held by them came out starved in the session's
+    /// small buffer, 26 dB), and a key frame given a budget of its own through a restarted rate
+    /// control came out coarser than the picture the driver's rate control refines a still
+    /// screen to by itself (51 against 61 dB at 8 Mbit/s), so `FrameEncoder::holds_quantizer`
+    /// says no there.
+    pub fn hold_quantizer(&mut self, crf: u32) {
+        self.held = Some(self.codec.quantizer(crf as i32));
+    }
+
     /// The rate control of a sequence: the target, buffer, and frame rate a constant-rate
     /// session holds, with no filler data up to the target and each frame capped at the buffer
     /// where the driver takes a cap, and the frame rate and quality level of any.
@@ -1263,6 +1283,7 @@ impl VaapiEncoder {
         if !self.rate.cbr {
             self.qp = self.codec.quantizer(crf as i32);
         }
+        let held_qp = self.held.take();
         self.convert(source)?;
         let frame_id = frame_number as u16;
         let has_reference = match &self.references {
@@ -1304,7 +1325,8 @@ impl VaapiEncoder {
             Some(References::Slots(_)) => *self.recon.iter().find(|s| !slot_surfaces.contains(s)).ok_or("no VP8 reconstruction surface is free")?,
             _ => self.recon[(pts % self.recon.len() as u64) as usize],
         };
-        let frame = Frame { key, pts, key_pts, recon, coded: self.coded, reference, held: &held, qp: self.qp, slots, slot_surfaces };
+        let qp = if self.rate.cbr { self.qp } else { held_qp.unwrap_or(self.qp) };
+        let frame = Frame { key, pts, key_pts, recon, coded: self.coded, reference, held: &held, qp, slots, slot_surfaces };
         let mut out = Buffers::new();
         if key {
             self.arm.sequence(&self.negotiated, &mut out);

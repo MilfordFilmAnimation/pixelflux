@@ -363,20 +363,21 @@ impl Openh264Encoder {
     ///    make quality blink.
     ///
     /// A rebuild that fails to initialize leaves the running encoder untouched, so the session
-    /// continues at its current quantizer instead of dying on a quality change.
-    pub fn update_qp(&mut self, target_qp: u32) {
+    /// continues at its current quantizer instead of dying on a quality change. True where it
+    /// rebuilt, so the next frame is a key frame.
+    pub fn update_qp(&mut self, target_qp: u32) -> bool {
         if self.is_cbr {
-            return;
+            return false;
         }
         let qp = (target_qp as i32).clamp(1, 51);
         if qp == self.current_qp {
             self.qp_hysteresis_counter = 0;
-            return;
+            return false;
         }
         if qp > self.current_qp {
             self.qp_hysteresis_counter += 1;
             if self.qp_hysteresis_counter <= QP_HYSTERESIS_LIMIT {
-                return;
+                return false;
             }
         }
         self.qp_hysteresis_counter = 0;
@@ -391,11 +392,12 @@ impl Openh264Encoder {
                 self.encoder = encoder;
                 self.current_qp = qp;
                 self.enable_slices();
+                true
             }
-            None => eprintln!(
-                "[openh264] rebuild for QP {qp} failed; staying at QP {}",
-                self.current_qp
-            ),
+            None => {
+                eprintln!("[openh264] rebuild for QP {qp} failed; staying at QP {}", self.current_qp);
+                false
+            }
         }
     }
 
