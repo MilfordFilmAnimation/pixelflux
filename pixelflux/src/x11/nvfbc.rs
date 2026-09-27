@@ -667,6 +667,53 @@ fn nvidia_driven_x_server() -> Result<bool, String> {
     Ok(reply.present)
 }
 
+/// The libxcb this process's libX11 calls, when that is another copy than the host's
+/// `libxcb.so.1`, which is the one the NVIDIA library calls. The manylinux policy leaves libX11 to
+/// the host but lets a wheel bundle libxcb, and a wheel whose libraries load libX11 first binds the
+/// host's libX11 to its own copy (a pcmflux wheel whose libpulse carries libxcb does). NvFBC opens
+/// its display through libX11 and then calls the host's libxcb on that connection, whose structure
+/// is laid out by the other build: a mutex read at a shifted offset makes glibc abort the process,
+/// and a flag read at one leaves the library waiting forever.
+///
+/// Opening a display whose name carries no display number fails inside `xcb_parse_display`
+/// before anything connects, which resolves libX11's lazily bound libxcb imports through
+/// libX11's own scope, so the GOT slot then names the copy every later call of libX11 reaches.
+fn foreign_libxcb() -> Option<String> {
+    unsafe {
+        let x11 = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+        if x11.is_null() {
+            return None;
+        }
+        let open = libc::dlsym(x11, c"XOpenDisplay".as_ptr());
+        if !open.is_null() {
+            let open: unsafe extern "C" fn(*const c_char) -> *mut c_void = std::mem::transmute(open);
+            open(c"pixelflux".as_ptr());
+        }
+        libc::dlclose(x11);
+        let bound = crate::nvgpufilter::bound_import("libX11.so", b"xcb_parse_display")?;
+        let xcb = libc::dlopen(c"libxcb.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+        if xcb.is_null() {
+            return None;
+        }
+        let host = libc::dlsym(xcb, c"xcb_parse_display".as_ptr());
+        libc::dlclose(xcb);
+        let object = |addr: *const c_void| {
+            let mut info: libc::Dl_info = std::mem::zeroed();
+            (libc::dladdr(addr, &mut info) != 0 && !info.dli_sname.is_null() && !info.dli_fname.is_null())
+                .then(|| (info.dli_fbase, CStr::from_ptr(info.dli_sname), CStr::from_ptr(info.dli_fname)))
+        };
+        let (bound_base, bound_name, bound_path) = object(bound as *const c_void)?;
+        let (host_base, _, host_path) = object(host)?;
+        (bound_name.to_bytes() == b"xcb_parse_display" && bound_base != host_base).then(|| {
+            format!(
+                "libX11 calls {}, not the {} the NVIDIA library calls on the same connection",
+                bound_path.to_string_lossy(),
+                host_path.to_string_lossy()
+            )
+        })
+    }
+}
+
 /// Why the NvFBC path was not taken, for the one line that says so.
 fn declined(reason: &str) -> Option<GpuCapture> {
     println!("[X11] Zero-copy capture (NvFBC) unavailable: {reason}.");
@@ -683,8 +730,9 @@ fn declined(reason: &str) -> Option<GpuCapture> {
 ///
 /// The path is declined, rather than failed, when it cannot be zero-copy: a codec no NVENC engine
 /// serves, software encoding requested, a device that is not NVIDIA, a watermark (which is
-/// composited into host pixels and would mean reading the frame back), an X server the NVIDIA
-/// driver does not drive, or a driver that offers no NvFBC on this X server.
+/// composited into host pixels and would mean reading the frame back), a libX11 bound to another
+/// libxcb than the driver's, an X server the NVIDIA driver does not drive, or a driver that offers
+/// no NvFBC on this X server.
 fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
     if !settings.codec.is_video() {
         return declined("the codec is JPEG");
@@ -699,6 +747,9 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
     let driver = crate::get_gpu_driver(node);
     if !crate::driver_selects_nvenc(&driver) {
         return declined(&format!("the encode node's driver is {driver}"));
+    }
+    if let Some(reason) = foreign_libxcb() {
+        return declined(&reason);
     }
     // The driver is asked before an encoder is built, so a host without NvFBC never pays for an
     // NVENC session the XShm path would immediately build again. It is asked on a thread of its
@@ -1134,6 +1185,23 @@ mod abi_tests {
             .iter()
             .any(|name| name.name == NVIDIA_GLX.as_bytes());
         assert_eq!(present, listed);
+    }
+
+    /// The guard reads which libxcb libX11 calls from libX11's own GOT after the failed open
+    /// resolves it, and with the host's libX11 and no other copy of libxcb that is the host's, so
+    /// NvFBC is not declined for it.
+    #[test]
+    fn the_host_libx11_calls_the_host_libxcb() {
+        let x11 = unsafe { libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY) };
+        assert!(!x11.is_null(), "libX11.so.6 does not load here");
+        assert_eq!(foreign_libxcb(), None);
+        let bound = crate::nvgpufilter::bound_import("libX11.so", b"xcb_parse_display")
+            .expect("libX11 imports xcb_parse_display");
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        assert_ne!(unsafe { libc::dladdr(bound as *const c_void, &mut info) }, 0);
+        assert!(!info.dli_sname.is_null(), "the slot names no symbol");
+        assert_eq!(unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(), b"xcb_parse_display");
+        unsafe { libc::dlclose(x11) };
     }
 
     #[test]

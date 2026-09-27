@@ -437,9 +437,10 @@ fn dyn_addr(base: usize, v: u64) -> usize {
     }
 }
 
-/// Repoint every `ioctl` GOT slot in one loaded library to `filtered_ioctl` by walking its
-/// `PT_DYNAMIC` array — the only way to interpose without an LD_PRELOAD object — and it must cover
-/// both the lazy-PLT and `-fno-plt` relocation forms because NVIDIA ships the latter.
+/// Hand every GOT slot through which one loaded library calls `symbol` to `visit`, by walking its
+/// `PT_DYNAMIC` array — the only way to interpose without an LD_PRELOAD object, or to read where the
+/// dynamic linker bound an import — covering both the lazy-PLT and `-fno-plt` relocation forms
+/// because NVIDIA ships the latter.
 ///
 /// 1. **Parse `.dynamic`**: iterate the `Elf64Dyn` entries until `DT_NULL`, recording the dynamic
 ///    symbol table, string table, PLT relocation table (`DT_JMPREL`/`DT_PLTRELSZ`), and general
@@ -448,13 +449,17 @@ fn dyn_addr(base: usize, v: u64) -> usize {
 /// 2. **Sanity-gate the tables**: bail if the symbol or string table is missing, and — via the
 ///    `readable` closure over `page_prot` — bail if a table's mapping is known but lacks read
 ///    permission (an address whose mapping cannot be determined is presumed readable), so a wrong
-///    relative/absolute guess from `dyn_addr` cannot fault on first dereference. Also bail if the
-///    page size is unavailable.
-/// 3. **Patch both relocation tables**: hand each present, adequately-sized, readable table to
-///    `patch_reloc_table`. The PLT table (`.rela.plt`) carries the classic lazily-bound `JUMP_SLOT`
+///    relative/absolute guess from `dyn_addr` cannot fault on first dereference.
+/// 3. **Visit both relocation tables**: hand each present, adequately-sized, readable table to
+///    `visit_reloc_table`. The PLT table (`.rela.plt`) carries the classic lazily-bound `JUMP_SLOT`
 ///    entries; the general table (`.rela.dyn`) carries the `GLOB_DAT` slot that `-fno-plt` NVIDIA
 ///    builds use to bind `ioctl`.
-unsafe fn patch_ioctl_got(base: usize, dynp: *const Elf64Dyn) {
+unsafe fn visit_import_slots(
+    base: usize,
+    dynp: *const Elf64Dyn,
+    symbol: &[u8],
+    visit: &mut dyn FnMut(*mut *mut c_void),
+) {
     let mut symtab: *const libc::Elf64_Sym = std::ptr::null();
     let mut strtab: *const c_char = std::ptr::null();
     let mut jmprel: *const Elf64Rela = std::ptr::null();
@@ -486,44 +491,28 @@ unsafe fn patch_ioctl_got(base: usize, dynp: *const Elf64Dyn) {
         return;
     }
 
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as c_long;
-    if page <= 0 {
-        return;
-    }
-    let page = page as usize;
     let ent = std::mem::size_of::<Elf64Rela>();
     if !jmprel.is_null() && pltrelsz >= ent && readable(jmprel as usize) {
-        patch_reloc_table(base, symtab, strtab, jmprel, pltrelsz / ent, page);
+        visit_reloc_table(base, symtab, strtab, jmprel, pltrelsz / ent, symbol, visit);
     }
     if !rela.is_null() && relasz >= ent && readable(rela as usize) {
-        patch_reloc_table(base, symtab, strtab, rela, relasz / ent, page);
+        visit_reloc_table(base, symtab, strtab, rela, relasz / ent, symbol, visit);
     }
 }
 
-/// Repoint exactly the `ioctl` GOT slots in one relocation table to `filtered_ioctl` and
-/// nothing else — every candidate entry is name-checked so no other symbol the library imports is
-/// disturbed. It handles both the `JUMP_SLOT` and `GLOB_DAT` entry forms.
-///
-/// For each entry: skip it unless the relocation type is `R_X86_64_JUMP_SLOT` or
-/// `R_X86_64_GLOB_DAT` with a nonzero symbol index, then resolve the symbol name through
-/// `symtab`/`strtab` and skip unless it is exactly `ioctl`. For a match:
-///
-/// 1. **Locate the slot**: the GOT entry lives at `base + r_offset`; `pg` is its page-aligned base.
-/// 2. **Make the page writable**: read the slot's current protection via `page_prot` (defaulting to
-///    read/write when maps is unreadable) and `mprotect` the page to `PROT_READ | PROT_WRITE`.
-/// 3. **Publish the new pointer atomically**: store `filtered_ioctl` into the slot with an
-///    `AtomicPtr` `Release` store, since another thread may be dispatching through this GOT slot
-///    concurrently and the write must not tear.
-/// 4. **Restore protection**: return the page to its original protection rather than a hardcoded
-///    read-only — under partial RELRO these libraries lazily bind through this page, so leaving it
-///    read-only would fault the next symbol resolve.
-unsafe fn patch_reloc_table(
+/// Hand exactly the GOT slots of `symbol` in one relocation table to `visit` and nothing else —
+/// every candidate entry is name-checked so no other symbol the library imports is disturbed. It
+/// handles both the `JUMP_SLOT` and `GLOB_DAT` entry forms: an entry is skipped unless its
+/// relocation type is one of those with a nonzero symbol index whose name, resolved through
+/// `symtab`/`strtab`, is exactly `symbol`; the slot of a match lives at `base + r_offset`.
+unsafe fn visit_reloc_table(
     base: usize,
     symtab: *const libc::Elf64_Sym,
     strtab: *const c_char,
     rela: *const Elf64Rela,
     count: usize,
-    page: usize,
+    symbol: &[u8],
+    visit: &mut dyn FnMut(*mut *mut c_void),
 ) {
     for i in 0..count {
         let r = rela.add(i);
@@ -537,25 +526,43 @@ unsafe fn patch_reloc_table(
         }
         let name_off = (*symtab.add(sym_idx)).st_name as usize;
         let name = CStr::from_ptr(strtab.add(name_off));
-        if name.to_bytes() != b"ioctl" {
+        if name.to_bytes() != symbol {
             continue;
         }
-        let slot = (base + (*r).r_offset as usize) as *mut *mut c_void;
-        let pg = (slot as usize & !(page - 1)) as *mut c_void;
-        let mut orig = page_prot(slot as usize);
-        if orig < 0 {
-            orig = libc::PROT_READ | libc::PROT_WRITE;
-        }
-        if libc::mprotect(pg, page, libc::PROT_READ | libc::PROT_WRITE) == 0 {
-            let ap = &*(slot as *const AtomicPtr<c_void>);
-            ap.store(filtered_ioctl as *mut c_void, Ordering::Release);
-            libc::mprotect(pg, page, orig);
-        }
+        visit((base + (*r).r_offset as usize) as *mut *mut c_void);
+    }
+}
+
+/// Repoint one `ioctl` GOT slot to `filtered_ioctl`.
+///
+/// 1. **Make the page writable**: read the slot's current protection via `page_prot` (defaulting to
+///    read/write when maps is unreadable) and `mprotect` the page to `PROT_READ | PROT_WRITE`.
+/// 2. **Publish the new pointer atomically**: store `filtered_ioctl` into the slot with an
+///    `AtomicPtr` `Release` store, since another thread may be dispatching through this GOT slot
+///    concurrently and the write must not tear.
+/// 3. **Restore protection**: return the page to its original protection rather than a hardcoded
+///    read-only — under partial RELRO these libraries lazily bind through this page, so leaving it
+///    read-only would fault the next symbol resolve.
+unsafe fn patch_ioctl_slot(slot: *mut *mut c_void) {
+    let page = libc::sysconf(libc::_SC_PAGESIZE) as c_long;
+    if page <= 0 {
+        return;
+    }
+    let page = page as usize;
+    let pg = (slot as usize & !(page - 1)) as *mut c_void;
+    let mut orig = page_prot(slot as usize);
+    if orig < 0 {
+        orig = libc::PROT_READ | libc::PROT_WRITE;
+    }
+    if libc::mprotect(pg, page, libc::PROT_READ | libc::PROT_WRITE) == 0 {
+        let ap = &*(slot as *const AtomicPtr<c_void>);
+        ap.store(filtered_ioctl as *mut c_void, Ordering::Release);
+        libc::mprotect(pg, page, orig);
     }
 }
 
 /// `dl_iterate_phdr` callback: for each loaded object matching a targeted NVIDIA library,
-/// find its `PT_DYNAMIC` segment and hand it to `patch_ioctl_got`. Returns 0 to keep iterating.
+/// find its `PT_DYNAMIC` segment and repoint its `ioctl` slots. Returns 0 to keep iterating.
 ///
 /// 1. **Panic firewall**: the whole body runs under `catch_unwind` because a panic must not unwind
 ///    across this `extern "C"` boundary into the C `dl_iterate_phdr` — that would abort the
@@ -564,8 +571,9 @@ unsafe fn patch_reloc_table(
 ///    — the libraries that issue the enumeration ioctl (`libnvidia-encode` calls through
 ///    `libnvcuvid`). Unrelated modules (`libcudart`, `libnvidia-ml`, `libnvidia-glcore`, …) and
 ///    objects with no name are skipped so their `ioctl` bindings are left untouched.
-/// 3. **Patch each `PT_DYNAMIC`**: for a matched object, walk its program headers and call
-///    `patch_ioctl_got` on every dynamic segment, using the object's load address as the base.
+/// 3. **Patch each `PT_DYNAMIC`**: for a matched object, walk its program headers and hand every
+///    `ioctl` slot of each dynamic segment to `patch_ioctl_slot`, using the object's load address as
+///    the base.
 unsafe extern "C" fn patch_phdr_cb(
     info: *mut libc::dl_phdr_info,
     _size: libc::size_t,
@@ -587,11 +595,53 @@ unsafe extern "C" fn patch_phdr_cb(
         for i in 0..info.dlpi_phnum as isize {
             let ph = &*info.dlpi_phdr.offset(i);
             if ph.p_type == libc::PT_DYNAMIC {
-                patch_ioctl_got(base, (base + ph.p_vaddr as usize) as *const Elf64Dyn);
+                visit_import_slots(base, (base + ph.p_vaddr as usize) as *const Elf64Dyn, b"ioctl", &mut |slot| {
+                    patch_ioctl_slot(slot)
+                });
             }
         }
     }));
     0
+}
+
+/// Where the first loaded object whose path contains `object` has its import of `symbol` bound:
+/// the address its GOT slot holds, which is the library's own PLT stub while a lazy binding has not
+/// been resolved yet. `None` when no such object is loaded or it does not import `symbol`.
+pub(crate) fn bound_import(object: &str, symbol: &[u8]) -> Option<usize> {
+    struct Query<'a> {
+        object: &'a str,
+        symbol: &'a [u8],
+        found: Option<usize>,
+        done: bool,
+    }
+    unsafe extern "C" fn cb(info: *mut libc::dl_phdr_info, _size: libc::size_t, data: *mut c_void) -> c_int {
+        let q = &mut *(data as *mut Query);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let info = &*info;
+            if info.dlpi_name.is_null() || !CStr::from_ptr(info.dlpi_name).to_string_lossy().contains(q.object) {
+                return;
+            }
+            q.done = true;
+            let (symbol, found) = (q.symbol, &mut q.found);
+            let base = info.dlpi_addr as usize;
+            for i in 0..info.dlpi_phnum as isize {
+                let ph = &*info.dlpi_phdr.offset(i);
+                if ph.p_type == libc::PT_DYNAMIC {
+                    visit_import_slots(base, (base + ph.p_vaddr as usize) as *const Elf64Dyn, symbol, &mut |slot| {
+                        if found.is_none() {
+                            *found = Some((*(slot as *const AtomicPtr<c_void>)).load(Ordering::Acquire) as usize);
+                        }
+                    });
+                }
+            }
+        }));
+        q.done as c_int
+    }
+    let mut q = Query { object, symbol, found: None, done: false };
+    unsafe {
+        libc::dl_iterate_phdr(Some(cb), &mut q as *mut Query as *mut c_void);
+    }
+    q.found
 }
 
 /// True when at least one host GPU is hidden from the container — the only situation that
