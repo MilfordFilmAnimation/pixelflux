@@ -679,6 +679,7 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
         Ok(v) => v,
         Err(e) => return declined(&e),
     };
+    crate::report::zero_copy_available(true);
 
     let alloc_file = File::from(device_fd);
     let egl_file = match alloc_file.try_clone() {

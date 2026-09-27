@@ -361,6 +361,7 @@ than by a setting, so the capture says what it settled on instead of leaving it 
 | `backend` | `x11` or `wayland` |
 | `capture`, `zero_copy` | the capture path (`NvFBC`, `DRI3`, `XShm`, `dmabuf`, `readback`) and whether frames reach the encoder without a copy |
 | `capture_reason` | why a zero-copy path was declined, each declined path named (`NvFBC: ...; DRI3: ...`); empty where there is nothing to explain |
+| `zero_copy_available` | whether the display server offered the encoder a zero-copy path at all: NvFBC on an X server the NVIDIA driver drives, DRI3 on one drawing on the encode node's GPU, a Wayland compositor rendering on that GPU; a readback where it did falls short of one, and one where it did not is how the host is built |
 | `encoder`, `hardware` | `NVENC`, `VAAPI`, or the software library, and whether it runs on a GPU |
 | `encoder_reason` | why the session does not encode in hardware: the refusal the hardware session answered with, software encoding being selected, or a session given up after repeated errors |
 | `codec`, `fullcolor`, `striped` | what the stream is, after any demotion |

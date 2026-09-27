@@ -719,6 +719,7 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
         Ok(v) => v,
         Err(e) => return declined(&e),
     };
+    crate::report::zero_copy_available(true);
     let mut nvfbc = match NvfbcSession::open() {
         Ok(v) => v,
         Err(e) => return declined(&e),

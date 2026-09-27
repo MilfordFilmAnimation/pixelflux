@@ -27,12 +27,15 @@ use crate::RustCaptureSettings;
 
 /// The description half of a report. `capture_reason` says why the capture is not zero-copy
 /// and `encoder_reason` why the encoder is not hardware; both are empty where there is
-/// nothing to explain.
+/// nothing to explain. `zero_copy_available` says whether the display server offered this
+/// session's encoder a zero-copy path at all, so a readback where it did falls short of one
+/// and a readback where it did not is how the host is built.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamInfo {
     pub backend: &'static str,
     pub capture: &'static str,
     pub zero_copy: bool,
+    pub zero_copy_available: bool,
     pub capture_reason: String,
     pub encoder: String,
     pub hardware: bool,
@@ -141,9 +144,18 @@ pub fn capture(path: &'static str, zero_copy: bool) {
         info.capture = path;
         info.zero_copy = zero_copy;
         if zero_copy {
+            info.zero_copy_available = true;
             info.capture_reason.clear();
         }
     });
+}
+
+/// Whether the display server offers this session's encoder a zero-copy path, recorded where
+/// a backend finds the server's side of it there (NvFBC on an X server the NVIDIA driver
+/// drives, DRI3 on one drawing on the encode node's GPU, a compositor rendering on that GPU)
+/// and where it finds it gone (a host compositor handing out software frames only).
+pub fn zero_copy_available(available: bool) {
+    record(|info| info.zero_copy_available = available);
 }
 
 /// Why a zero-copy path was not taken. A capture that declines several keeps each reason.
@@ -254,12 +266,40 @@ mod tests {
         assert_eq!(info.backend, "x11");
         assert_eq!(info.capture, "XShm");
         assert_eq!(info.capture_reason, "NvFBC: the codec is JPEG; DRI3: no DRI3");
+        assert!(!info.zero_copy_available);
         {
             let _scope = enter(&report);
             capture("DRI3", true);
         }
         assert!(report.info().zero_copy);
+        assert!(report.info().zero_copy_available);
         assert!(report.info().capture_reason.is_empty());
+    }
+
+    /// A readback where the server offered a zero-copy path says so, and one where it offered
+    /// none says that instead, whatever reasons the declined paths left.
+    #[test]
+    fn a_readback_says_whether_a_zero_copy_path_was_offered() {
+        let offered = StreamReport::new("x11");
+        {
+            let _scope = enter(&offered);
+            capture_declined("NvFBC", "the X server offers no NV-GLX");
+            zero_copy_available(true);
+            capture_declined("DRI3", "the encoder could not read the server's buffer");
+            capture("XShm", false);
+        }
+        assert!(!offered.info().zero_copy);
+        assert!(offered.info().zero_copy_available);
+        let host = StreamReport::new("wayland");
+        {
+            let _scope = enter(&host);
+            capture("dmabuf", true);
+            capture("readback", false);
+            zero_copy_available(false);
+            capture_reason("the host compositor delivers software frames only");
+        }
+        assert!(!host.info().zero_copy);
+        assert!(!host.info().zero_copy_available);
     }
 
     /// Scopes nest, so a capture start on a thread already serving another restores it.

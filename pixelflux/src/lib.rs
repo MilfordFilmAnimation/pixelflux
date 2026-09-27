@@ -2283,6 +2283,7 @@ fn start_capture_on_display(
                 "no zero-copy encoder on the render node"
             };
             report::capture("readback", false);
+            report::zero_copy_available(gpu_intent && state.use_gpu && !different_gpu);
             report::capture_reason(why);
             println!(
                 "[Wayland] Readback capture: output {display_id} {}x{} {rendered}, read back for the encode thread ({why}).",
@@ -3125,6 +3126,7 @@ fn render_node_tick(
                     );
                     let _report = report::enter(&cap.report);
                     report::capture("readback", false);
+                    report::zero_copy_available(false);
                     report::capture_reason("the host compositor delivers software frames only");
                     cap.video_encoder = None;
                     let s = &cap.settings;
@@ -7077,7 +7079,8 @@ impl ScreenCapture {
     /// What this capture streams and how it got there, or None before a start and after a
     /// stop: `backend` (`x11`, `wayland`), `capture` (the path: `NvFBC`, `DRI3`, `XShm`,
     /// `dmabuf`, `readback`), `zero_copy` and the `capture_reason` a faster path was declined
-    /// for, `encoder` (`NVENC`, `VAAPI`, or the software library), `hardware` and the
+    /// for, `zero_copy_available` (whether the display server offered the encoder a zero-copy
+    /// path at all), `encoder` (`NVENC`, `VAAPI`, or the software library), `hardware` and the
     /// `encoder_reason` it is not, `codec`, `fullcolor`, `striped`, and for a hardware session
     /// its `gpu`, kernel `driver`, and `encode_node`. A Wayland capture adds how its compositor
     /// renders: `renderer` (`gl`, `pixman`), `render_node`, `render_gpu`, `renderer_reason`.
@@ -7100,6 +7103,7 @@ impl ScreenCapture {
         d.set_item("backend", info.backend)?;
         d.set_item("capture", info.capture)?;
         d.set_item("zero_copy", info.zero_copy)?;
+        d.set_item("zero_copy_available", info.zero_copy_available)?;
         d.set_item("capture_reason", &info.capture_reason)?;
         d.set_item("encoder", &info.encoder)?;
         d.set_item("hardware", info.hardware)?;
