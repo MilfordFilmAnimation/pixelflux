@@ -157,6 +157,8 @@ pub mod report;
 
 /// Frame-processing policy shared by the X11 and Wayland backends.
 pub mod pipeline;
+#[cfg(test)]
+mod cleanup_bench;
 /// Run-time libpipewire binding and SPA pod encoding shared by the webcam sink and host capture.
 pub mod pipewire;
 /// X11/XShm capture loop, stripe dispatch, and per-stripe change detection.
