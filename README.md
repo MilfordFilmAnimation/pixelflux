@@ -748,10 +748,11 @@ asked for.
     *   **Change Detection:** Encodes only changed stripes (Software/JPEG mode).
     *   **Paint-Over:** Cleans up a still screen once its content stops changing, even while
         `video_streaming_mode` encodes every frame: a refresh at the paint-over quality, and after
-        a large change a key frame at it once the screen holds still, under CBR and CRF alike on
-        every encoder that takes a quantizer from the caller (under CBR a refresh at the rate
-        control's own quality on one that does not); a screen that keeps changing only a little
-        (a blinking caret) is cleaned up all the same.
+        a large change a key frame at it once the screen holds still. Under CRF the session moves
+        to the paint-over quality for them on every encoder that takes a quality from the caller;
+        under CBR the frame is held at it where the encoder holds a quantizer, and one that does
+        not sends the refresh at the rate control's own quality, never a key frame. A screen that
+        keeps changing only a little (a blinking caret) is cleaned up all the same.
     *   **Damage Throttling:** Limits processing during high-motion scenes.
     *   **On-demand keyframes:** `request_idr_frame()` forces an IDR for reconnecting clients.
     *   **Reference invalidation:** `invalidate_reference(frame_id)` has the encoder predict past a
