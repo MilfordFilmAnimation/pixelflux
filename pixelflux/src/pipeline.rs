@@ -278,6 +278,12 @@ impl X11Pipeline {
         self.hw.as_ref().is_some_and(|enc| enc.is_hardware())
     }
 
+    /// The encoder's one rate control where its backend has one alone
+    /// (`FrameEncoder::fixed_rate_control`), for this pipeline's stream log.
+    pub fn fixed_rate_control(&self) -> Option<&'static str> {
+        self.hw.as_ref().and_then(FrameEncoder::fixed_rate_control)
+    }
+
     /// The `Colorspace:` field for this pipeline's stream log, describing what its encoder settled
     /// on: a hardware session only reaches 4:4:4 when the device carries it, the software path
     /// only when the build's encoder for the codec does.

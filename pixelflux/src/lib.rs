@@ -1464,8 +1464,8 @@ fn wayland_encode_loop(pool: &WlFramePool, cfg: WlEncodeConfig) -> Option<FrameE
     video_encoder
 }
 
-/// Compose the encoder half of the 1 s debug log line (backend, colorspace, frame mode) for
-/// whichever thread owns the encoders.
+/// Compose the encoder half of the 1 s debug log line (backend, colorspace, frame mode, rate
+/// control) for whichever thread owns the encoders.
 fn encoder_desc(
     settings: &RustCaptureSettings,
     video_encoder: Option<&FrameEncoder>,
@@ -1489,13 +1489,13 @@ fn encoder_desc(
         "Striped"
     };
     format!(
-        "{} ({}) {} {} {} CRF:{}",
+        "{} ({}) {} {} {} {}",
         settings.codec.display(),
         backend,
         cs_str,
         range_str,
         frame_str,
-        settings.video_crf
+        encoders::rate_desc(settings, video_encoder.and_then(FrameEncoder::fixed_rate_control))
     )
 }
 
@@ -1522,23 +1522,43 @@ pub(crate) fn log_stream_settings(
     video_encoder: Option<&FrameEncoder>,
 ) {
     let backend = video_encoder.map(|enc| (enc.backend_name(), enc.is_hardware()));
+    let fixed_rate = video_encoder.and_then(FrameEncoder::fixed_rate_control);
     let fullcolor = encoders::session_fullcolor(video_encoder, settings);
     let full_range = encoders::session_full_range(video_encoder, settings);
-    log_stream_settings_of(tag, settings, n_stripes, backend, fullcolor, full_range);
+    log_stream_settings_of(tag, settings, n_stripes, backend, fixed_rate, fullcolor, full_range);
 }
 
 /// The "Stream settings active" line for a backend named outright, `(name, hardware)`, where
 /// the session is not a `FrameEncoder` (NvFBC's own NVENC session); `None` is the striped
-/// software path.
+/// software path, and `fixed_rate` is the backend's one rate control where it has one
+/// (`FrameEncoder::fixed_rate_control`).
 pub(crate) fn log_stream_settings_of(
     tag: &str,
     settings: &RustCaptureSettings,
     n_stripes: usize,
     backend: Option<(&str, bool)>,
+    fixed_rate: Option<&str>,
     fullcolor: bool,
     full_range: bool,
 ) {
     report::stream(settings, n_stripes, backend, fullcolor, full_range);
+    println!(
+        "{}",
+        stream_settings_line(tag, settings, n_stripes, backend, fixed_rate, fullcolor, full_range)
+    );
+}
+
+/// The text of the "Stream settings active" line, which says what the session applies rather
+/// than what it was asked for (`encoders::rate_desc`, `encoders::paint_over_desc`).
+fn stream_settings_line(
+    tag: &str,
+    settings: &RustCaptureSettings,
+    n_stripes: usize,
+    backend: Option<(&str, bool)>,
+    fixed_rate: Option<&str>,
+    fullcolor: bool,
+    full_range: bool,
+) -> String {
     let mut log_msg = format!(
         "[{tag}] Stream settings active -> Res: {}x{} | FPS: {:.1} | Stripes: {}",
         settings.width, settings.height, settings.target_fps, n_stripes
@@ -1546,11 +1566,8 @@ pub(crate) fn log_stream_settings_of(
 
     if !settings.codec.is_video() {
         log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", settings.jpeg_quality));
-        if settings.use_paint_over_quality {
-            log_msg.push_str(&format!(
-                " | PaintOver Q: {} (Trigger: {}f)",
-                settings.paint_over_jpeg_quality, settings.paint_over_trigger_frames
-            ));
+        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate) {
+            log_msg.push_str(&format!(" | {paint_over}"));
         }
     } else {
         let encoder_type = match backend {
@@ -1569,20 +1586,9 @@ pub(crate) fn log_stream_settings_of(
             log_msg.push_str(" Streaming");
         }
 
-        if settings.video_cbr_mode {
-            log_msg.push_str(&format!(" | CBR {}", settings.video_bitrate_kbps));
-        } else {
-            log_msg.push_str(&format!(" | CRF: {}", settings.video_crf));
-            if settings.video_bitrate_kbps > 0 {
-                log_msg.push_str(&format!(" | VBV: {} kbps", settings.video_bitrate_kbps));
-            }
-        }
-
-        if settings.use_paint_over_quality {
-            log_msg.push_str(&format!(
-                " | PaintOver CRF: {} (Burst: {}f)",
-                settings.video_paintover_crf, settings.video_paintover_burst_frames
-            ));
+        log_msg.push_str(&format!(" | {}", encoders::rate_desc(settings, fixed_rate)));
+        if let Some(paint_over) = encoders::paint_over_desc(settings, fixed_rate) {
+            log_msg.push_str(&format!(" | {paint_over}"));
         }
 
         log_msg.push_str(&format!(
@@ -1595,8 +1601,38 @@ pub(crate) fn log_stream_settings_of(
         " | Damage Thresh: {}f | Damage Dur: {}f",
         settings.damage_block_threshold, settings.damage_block_duration
     ));
+    log_msg
+}
 
-    println!("{}", log_msg);
+#[cfg(test)]
+mod stream_settings_line_tests {
+    use super::*;
+
+    /// The line never states a rate control the encoder does not run: a CRF session names no
+    /// bitrate, a backend with one rate control names that one in either mode, and a JPEG
+    /// paint-over that cannot raise the quality is not named.
+    #[test]
+    fn the_line_states_what_the_session_applies() {
+        let crf = RustCaptureSettings {
+            codec: Codec::H264,
+            video_crf: 25,
+            video_bitrate_kbps: 8000,
+            use_paint_over_quality: false,
+            ..Default::default()
+        };
+        let line = |s: &RustCaptureSettings, fixed| {
+            stream_settings_line("X11", s, 1, Some(("NVENC", true)), fixed, false, false)
+        };
+        let nvenc = line(&crf, None);
+        assert!(nvenc.contains("| CRF: 25 |") && !nvenc.contains("VBV") && !nvenc.contains("8000"), "{nvenc}");
+        let v4l2 = line(&crf, Some("VBR"));
+        assert!(v4l2.contains("| VBR 8000 |") && !v4l2.contains("CRF"), "{v4l2}");
+        assert!(line(&crf, Some("CBR")).contains("| CBR 8000 |"));
+        assert!(line(&RustCaptureSettings { video_cbr_mode: true, ..crf.clone() }, None).contains("| CBR 8000 |"));
+        let jpeg = RustCaptureSettings { codec: Codec::Jpeg, jpeg_quality: 75, paint_over_jpeg_quality: 95, ..Default::default() };
+        assert!(line(&jpeg, None).contains("| PaintOver Q: 95 "));
+        assert!(!line(&RustCaptureSettings { paint_over_jpeg_quality: 60, ..jpeg }, None).contains("PaintOver"));
+    }
 }
 
 /// Tear down a capture's encode/delivery threads and pools, returning both join handles as

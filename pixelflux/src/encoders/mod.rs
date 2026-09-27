@@ -310,9 +310,104 @@ pub fn colorspace_desc(fullcolor: bool, full_range: bool) -> &'static str {
     }
 }
 
+/// The rate-control field of a video stream's log line, as the session applies it: a backend
+/// with one rate control (`fixed`, from `FrameEncoder::fixed_rate_control`) runs it at the
+/// bitrate target whatever the mode, and every other session runs its mode, a CRF one with no
+/// bitrate cap.
+pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String {
+    match fixed {
+        Some(mode) => format!("{mode} {}", settings.video_bitrate_kbps),
+        None if settings.video_cbr_mode => format!("CBR {}", settings.video_bitrate_kbps),
+        None => format!("CRF: {}", settings.video_crf),
+    }
+}
+
+/// The paint-over field of a stream's log line, or `None` where paint-over changes nothing.
+/// JPEG resends a still stripe at the paint-over quality when it is above the stream's, Turbo
+/// or not. Video acts only at a CRF below the stream's. A session at constant quality re-encodes
+/// a still picture, and the burst after a recovery key frame, at that CRF. A session held to a
+/// rate takes no per-frame quantizer on any backend, so paint-over is its burst of frames for
+/// the rate control to refine, which a still screen gets only outside Turbo: Turbo sends every
+/// frame anyway.
+pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> Option<String> {
+    if !settings.use_paint_over_quality {
+        return None;
+    }
+    if !settings.codec.is_video() {
+        return (settings.paint_over_jpeg_quality > settings.jpeg_quality).then(|| {
+            format!(
+                "PaintOver Q: {} (Trigger: {}f)",
+                settings.paint_over_jpeg_quality, settings.paint_over_trigger_frames
+            )
+        });
+    }
+    if settings.video_paintover_crf >= settings.video_crf {
+        return None;
+    }
+    let burst = settings.video_paintover_burst_frames;
+    if fixed.is_none() && !settings.video_cbr_mode {
+        Some(format!("PaintOver CRF: {} (Burst: {burst}f)", settings.video_paintover_crf))
+    } else if !settings.video_streaming_mode {
+        Some(format!("PaintOver Burst: {burst}f"))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rate field says what the session runs: a backend with one rate control runs it at the
+    /// bitrate target in either mode, and every other session runs its mode, CRF naming no bitrate.
+    #[test]
+    fn the_rate_field_names_what_the_backend_applies() {
+        let crf = RustCaptureSettings { codec: Codec::H264, video_crf: 25, video_bitrate_kbps: 8000, ..Default::default() };
+        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
+        assert_eq!(rate_desc(&crf, None), "CRF: 25");
+        assert_eq!(rate_desc(&cbr, None), "CBR 8000");
+        for settings in [&crf, &cbr] {
+            assert_eq!(rate_desc(settings, Some("VBR")), "VBR 8000");
+            assert_eq!(rate_desc(settings, Some("CBR")), "CBR 8000");
+        }
+    }
+
+    /// Paint-over is named only where it changes a frame: its CRF at constant quality, its burst
+    /// under a rate target outside Turbo, JPEG's higher quality with or without Turbo, and nothing
+    /// where it cannot fire.
+    #[test]
+    fn the_paint_over_field_names_what_paint_over_does() {
+        let crf = RustCaptureSettings {
+            codec: Codec::H264,
+            video_crf: 25,
+            video_paintover_crf: 18,
+            video_paintover_burst_frames: 5,
+            use_paint_over_quality: true,
+            video_streaming_mode: false,
+            ..Default::default()
+        };
+        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
+        let turbo = |s: &RustCaptureSettings| RustCaptureSettings { video_streaming_mode: true, ..s.clone() };
+        assert_eq!(paint_over_desc(&crf, None).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+        assert_eq!(paint_over_desc(&turbo(&crf), None).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
+        assert_eq!(paint_over_desc(&cbr, None).as_deref(), Some("PaintOver Burst: 5f"));
+        assert_eq!(paint_over_desc(&crf, Some("VBR")).as_deref(), Some("PaintOver Burst: 5f"));
+        assert_eq!(paint_over_desc(&turbo(&cbr), None), None);
+        assert_eq!(paint_over_desc(&turbo(&crf), Some("CBR")), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, None), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, None), None);
+        let jpeg = RustCaptureSettings {
+            codec: Codec::Jpeg,
+            jpeg_quality: 40,
+            paint_over_jpeg_quality: 90,
+            paint_over_trigger_frames: 15,
+            ..crf.clone()
+        };
+        assert_eq!(paint_over_desc(&jpeg, None).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&turbo(&jpeg), None).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
+        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, None), None);
+        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, None), None);
+    }
 
     /// A session lands on the codec it asked for, or on the next video codec this host serves;
     /// JPEG is the ladder's last leg, not its answer to one missing encoder.
@@ -530,6 +625,18 @@ impl FrameEncoder {
     /// Whether the session encodes on a GPU or a hardware engine.
     pub fn is_hardware(&self) -> bool {
         !matches!(self, FrameEncoder::Vpx(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_))
+    }
+
+    /// The rate control the session runs whatever mode it was given, for a backend that has one
+    /// alone: a V4L2 M2M device offers variable bitrate only, and Tegra's encoder is driven at a
+    /// constant one. `None` where the session runs the mode it was given.
+    pub fn fixed_rate_control(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            FrameEncoder::Tegra(_) => Some("CBR"),
+            FrameEncoder::V4l2m2m(_) => Some("VBR"),
+            _ => None,
+        }
     }
 
     /// The backend as the logs name it: `NVENC`, `VAAPI`, or the software library.

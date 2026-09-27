@@ -797,17 +797,21 @@ where
                         "[X11] Stream settings active -> Res: {}x{} | FPS: {:.1} | Encoder: {}",
                         psettings.width, psettings.height, psettings.target_fps, pl.encoder_name()
                     );
+                    let fixed = pl.fixed_rate_control();
+                    let paint_over = crate::encoders::paint_over_desc(&psettings, fixed);
                     if !pl.codec().is_video() {
                         log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", psettings.jpeg_quality));
+                        if let Some(paint_over) = paint_over {
+                            log_msg.push_str(&format!(" | {paint_over}"));
+                        }
                     } else {
-                        let mode = pl.codec().display();
-                        if psettings.video_cbr_mode {
-                            log_msg.push_str(&format!(" | Mode: {mode} CBR {}", psettings.video_bitrate_kbps));
-                        } else {
-                            log_msg.push_str(&format!(" | Mode: {mode} | CRF: {}", psettings.video_crf));
-                            if psettings.video_bitrate_kbps > 0 {
-                                log_msg.push_str(&format!(" | VBV: {} kbps", psettings.video_bitrate_kbps));
-                            }
+                        log_msg.push_str(&format!(
+                            " | Mode: {} | {}",
+                            pl.codec().display(),
+                            crate::encoders::rate_desc(&psettings, fixed)
+                        ));
+                        if let Some(paint_over) = paint_over {
+                            log_msg.push_str(&format!(" | {paint_over}"));
                         }
                         log_msg.push_str(&format!(" | Colorspace: {}", pl.colorspace_desc()));
                     }

@@ -763,7 +763,7 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
     );
     crate::report::capture("NvFBC", true);
     crate::report::hardware_encoder(encoder.device_name(), crate::encoders::driver_name(&driver), node);
-    crate::log_stream_settings_of("X11", &settings, 1, Some(("NVENC", true)), encoder.is_fullcolor(), false);
+    crate::log_stream_settings_of("X11", &settings, 1, Some(("NVENC", true)), None, encoder.is_fullcolor(), false);
     Some(GpuCapture { nvfbc, encoder, settings, request, screen })
 }
 
