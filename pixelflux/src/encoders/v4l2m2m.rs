@@ -992,15 +992,22 @@ impl V4l2M2mEncoder {
         }
         let (data, _) = self.capture[slot];
         let unit = unsafe { std::slice::from_raw_parts(data as *const u8, length) };
+        let out = self.frame(unit, frame_number);
+        self.queue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index, 0)?;
+        self.dequeue(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)?;
+        Ok(out)
+    }
+
+    /// One access unit as the wire carries it: its sequence parameter sets tagged, behind a
+    /// header naming the session's codec unless the caller frames the stream itself.
+    fn frame(&mut self, unit: &[u8], frame_number: u64) -> Vec<u8> {
         let tagged = self.tag_sequence(unit);
         let bytes = tagged.as_deref().unwrap_or(unit);
         let mut out = Vec::with_capacity(VIDEO_HEADER_LEN + bytes.len());
-        if self.omit_headers {
-            out.extend_from_slice(bytes);
-        } else {
+        if !self.omit_headers {
             push_video_header(
                 &mut out,
-                Codec::H264,
+                self.codec,
                 self.frame_type(bytes),
                 frame_number as u16,
                 0,
@@ -1008,11 +1015,9 @@ impl V4l2M2mEncoder {
                 self.height as u16,
                 Reference::Untracked,
             );
-            out.extend_from_slice(bytes);
         }
-        self.queue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index, 0)?;
-        self.dequeue(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)?;
-        Ok(out)
+        out.extend_from_slice(bytes);
+        out
     }
 }
 
@@ -1106,6 +1111,25 @@ mod tests {
         let tagged = first_set(&session.tag_sequence(&unit(&bare)).expect("a set to write"));
         assert_eq!(sps::read_color(&tagged), Some(ColorSignal::BT601_FULL));
         assert_eq!(reorder_of(&tagged), Some((0, 1)));
+    }
+
+    /// The wire header names the codec the node encodes, which is what a client builds its
+    /// decoder from: an H.265 or VP8 unit labeled H.264 is decoded as H.264.
+    #[test]
+    fn the_header_names_the_session_codec() {
+        use crate::encoders::codec::{parse_video_type, FRAME_KEY};
+        let units: [(Codec, Vec<u8>); 3] = [
+            (Codec::H264, unit(VCE_SPS)),
+            (Codec::H265, vec![0, 0, 0, 1, 0x40, 0x01, 0x0c, 0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x10]),
+            (Codec::Vp8, vec![0x50, 0x2a, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x05, 0xd0, 0x02]),
+        ];
+        for (codec, bytes) in units {
+            let mut session = stand_in(codec, "unknown-codec");
+            session.omit_headers = false;
+            let framed = session.frame(&bytes, 7);
+            assert_eq!(parse_video_type(framed[1]), Some((codec, FRAME_KEY)), "{codec:?}");
+            assert_eq!(&framed[2..4], &[0, 7], "{codec:?}: the frame number");
+        }
     }
 
     /// Only H.264 carries these sets: bytes of another codec that happen to look like one are
