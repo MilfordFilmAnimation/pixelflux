@@ -473,7 +473,7 @@ unsafe fn import_slot(slot: &mut BufferSlot, buf: &SpaBuffer, n: &Negotiated) ->
                 return false;
             }
             let chunk = unsafe { &*d.chunk };
-            builder.add_plane(unsafe { OwnedFd::from_raw_fd(dup) }, i as u32, chunk.offset, chunk.stride as u32);
+            builder.add_plane(unsafe { OwnedFd::from_raw_fd(dup) }, chunk.offset, chunk.stride as u32);
         }
         slot.dmabuf = builder.build();
         slot.dmabuf.is_some()

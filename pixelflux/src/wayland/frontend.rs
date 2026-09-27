@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use smithay::backend::renderer::utils::RendererSurfaceState;
+use smithay::backend::input::InputTime;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::{ Buffer, Fourcc};
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -47,9 +48,6 @@ use smithay::wayland::image_copy_capture::{
     FrameRef as CopyFrameRef, ImageCopyCaptureHandler, ImageCopyCaptureState,
     Session as CopySession, SessionRef as CopySessionRef,
 };
-use smithay::{
-    delegate_image_capture_source, delegate_image_copy_capture, delegate_output_capture_source,
-};
 use smithay::input::dnd::{DndFocus, Source};
 use std::sync::Arc;
 use crate::wayland::cursor::{Cursor, CursorJob};
@@ -60,7 +58,6 @@ use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server:
 };
 use smithay::reexports::wayland_server::{DataInit, Dispatch, GlobalDispatch, New};
 use smithay::wayland::viewporter::ViewporterState;
-use smithay::delegate_viewporter;
 use smithay::wayland::pointer_warp::{PointerWarpHandler, PointerWarpManager};
 use smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -70,10 +67,8 @@ use smithay::wayland::pointer_constraints::{
 };
 use smithay::input::pointer::PointerHandle;
 use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
-use smithay::delegate_single_pixel_buffer;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::wayland::presentation::PresentationState;
-use smithay::delegate_presentation;
 use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
 };
@@ -84,30 +79,21 @@ use smithay::desktop::{layer_map_for_output, LayerSurface as DesktopLayerSurface
 use smithay::wayland::shell::wlr_layer::{
     WlrLayerShellHandler, WlrLayerShellState, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
 };
-use smithay::delegate_layer_shell;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-use smithay::{delegate_foreign_toplevel_list, delegate_xdg_decoration};
 use smithay::wayland::selection::wlr_data_control::{DataControlHandler, DataControlState};
 use smithay::wayland::selection::ext_data_control::{
     DataControlHandler as ExtDataControlHandler, DataControlState as ExtDataControlState,
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
-use smithay::{delegate_cursor_shape, delegate_ext_data_control};
-use smithay::delegate_data_control;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-use smithay::delegate_xdg_activation;
 use smithay::wayland::selection::primary_selection::{
     set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
 };
-use smithay::delegate_primary_selection;
 
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
-    delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell, delegate_relative_pointer, delegate_pointer_warp,
-    delegate_pointer_constraints,
+    delegate_dispatch2,
     desktop::{Space, Window},
     input::{
         keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
@@ -117,7 +103,7 @@ use smithay::{
             GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
             GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerTarget, RelativeMotionEvent,
         },
-        touch::{DownEvent, OrientationEvent, ShapeEvent, TouchTarget, UpEvent},
+        touch::{DownEvent, FrameMarker, OrientationEvent, ShapeEvent, TouchTarget, UpEvent},
         Seat, SeatHandler, SeatState,
     },
     output::Output,
@@ -176,36 +162,18 @@ pub fn next_serial() -> Serial {
     Serial::from(SERIAL_COUNTER.fetch_add(1, Ordering::SeqCst))
 }
 
-/// Millisecond timestamp for pointer / keyboard / touch events.
+/// Timestamp for injected input events, from `CLOCK_MONOTONIC` at microsecond granularity.
 ///
-/// Samples `CLOCK_MONOTONIC` and wraps it to a `u32` millisecond count as required by the
-/// Wayland protocol for input event timestamps.
-///
-/// # Returns
-///
-/// Monotonic time in milliseconds, wrapping at `u32::MAX`.
-pub fn wayland_time() -> u32 {
+/// The seat hands clients the wrapping millisecond count the core protocol carries and the
+/// relative-pointer protocol the full microseconds, both read from this one sample.
+pub fn wayland_time() -> InputTime {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
-    (ts.tv_sec as u32).wrapping_mul(1000).wrapping_add((ts.tv_nsec as u32) / 1_000_000)
-}
-
-/// Microsecond timestamp for relative-pointer motion.
-///
-/// Samples `CLOCK_MONOTONIC` at microsecond resolution for the higher-resolution `u64` time
-/// field used by the relative-pointer protocol.
-///
-/// # Returns
-///
-/// Monotonic time in microseconds, wrapping at `u64::MAX`.
-pub fn wayland_utime() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-    }
-    (ts.tv_sec as u64).wrapping_mul(1_000_000).wrapping_add((ts.tv_nsec as u64) / 1_000)
+    InputTime::from_micros(
+        (ts.tv_sec as u64).wrapping_mul(1_000_000).wrapping_add((ts.tv_nsec as u64) / 1_000),
+    )
 }
 
 use crate::pace::FramePace;
@@ -315,6 +283,8 @@ pub struct OutputNode {
     pub frame_buffer: Vec<u8>,
     /// GPU render target for this output (GLES mode): the GBM BO and its dmabuf export.
     pub offscreen_buffer: Option<(BufferObject<()>, Dmabuf)>,
+    /// Render ticks in a row that drew nothing on the target (`UNDRAWN_TICKS_PER_FRAME`).
+    pub undrawn_ticks: u32,
     /// Watermark overlay for THIS output: loaded at the output's scale, positioned (and,
     /// for the bouncing anchor, animated) against the output's own frame dimensions.
     pub overlay_state: OverlayState,
@@ -649,13 +619,6 @@ impl PointerConstraintsHandler for AppState {
             }
         });
     }
-
-    fn cursor_position_hint(
-        &mut self,
-        _surface: &WlSurface,
-        _pointer: &PointerHandle<Self>,
-        _location: Point<f64, Logical>,
-    ) {}
 }
 
 /// Foreign-toplevel-list protocol: exposes the managed state so Smithay can advertise each
@@ -1242,7 +1205,7 @@ impl AppState {
         pointer: &PointerHandle<Self>,
         under: &Option<(FocusTarget, Point<f64, Logical>)>,
         serial: Serial,
-        time: u32,
+        time: InputTime,
     ) {
         let Some((FocusTarget::Window(next), _)) = under else { return };
         let Some(GrabStartData { focus: Some((FocusTarget::Window(held), _)), .. }) = pointer.grab_start_data()
@@ -1847,8 +1810,10 @@ impl DataControlHandler for AppState {
     }
 }
 /// No graphics tablets exist here (input is injected); the default no-op tool-image
-/// callback is all cursor-shape's tablet half needs.
-impl smithay::wayland::tablet_manager::TabletSeatHandler for AppState {}
+/// callback is all cursor-shape's tablet half needs, and a tool would focus plain surfaces.
+impl smithay::input::tablet::TabletSeatHandler for AppState {
+    type ToolFocus = WlSurface;
+}
 
 /// ext-data-control: the standardized successor of wlr-data-control. Both globals
 /// stay advertised, sharing the same selection state, so older clipboard managers
@@ -2115,7 +2080,7 @@ impl KeyboardTarget<AppState> for FocusTarget {
         key: KeysymHandle<'_>,
         state: smithay::backend::input::KeyState,
         serial: Serial,
-        time: u32,
+        time: InputTime,
     ) {
         if let Some(surface) = self.wl_surface() {
             smithay::input::keyboard::KeyboardTarget::key(
@@ -2183,7 +2148,7 @@ impl DndFocus<AppState> for FocusTarget {
         offer: Option<&mut Self::OfferData<S>>,
         seat: &Seat<AppState>,
         location: Point<f64, Logical>,
-        time: u32,
+        time: InputTime,
     ) {
         if let Some(surface) = self.wl_surface() {
             <WlSurface as DndFocus<AppState>>::motion(
@@ -2263,7 +2228,7 @@ impl PointerTarget<AppState> for FocusTarget {
             smithay::input::pointer::PointerTarget::frame(surface.as_ref(), seat, data);
         }
     }
-    fn leave(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial, time: u32) {
+    fn leave(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial, time: InputTime) {
         if let Some(surface) = self.wl_surface() {
             smithay::input::pointer::PointerTarget::leave(
                 surface.as_ref(),
@@ -2399,14 +2364,14 @@ impl PointerTarget<AppState> for FocusTarget {
 /// Forward every touch event (down / up / motion / frame / cancel / shape / orientation) to
 /// the wrapped target's underlying `wl_surface`.
 impl TouchTarget<AppState> for FocusTarget {
-    fn down(&self, seat: &Seat<AppState>, data: &mut AppState, event: &DownEvent, serial: Serial) {
+    fn down(&self, seat: &Seat<AppState>, data: &mut AppState, event: &DownEvent) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::down(surface.as_ref(), seat, data, event, serial);
+            smithay::input::touch::TouchTarget::down(surface.as_ref(), seat, data, event);
         }
     }
-    fn up(&self, seat: &Seat<AppState>, data: &mut AppState, event: &UpEvent, serial: Serial) {
+    fn up(&self, seat: &Seat<AppState>, data: &mut AppState, event: &UpEvent) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::up(surface.as_ref(), seat, data, event, serial);
+            smithay::input::touch::TouchTarget::up(surface.as_ref(), seat, data, event);
         }
     }
     fn motion(
@@ -2414,55 +2379,34 @@ impl TouchTarget<AppState> for FocusTarget {
         seat: &Seat<AppState>,
         data: &mut AppState,
         event: &smithay::input::touch::MotionEvent,
-        serial: Serial,
     ) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::motion(
-                surface.as_ref(),
-                seat,
-                data,
-                event,
-                serial,
-            );
+            smithay::input::touch::TouchTarget::motion(surface.as_ref(), seat, data, event);
         }
     }
-    fn frame(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial) {
+    fn frame(&self, seat: &Seat<AppState>, data: &mut AppState, marker: FrameMarker) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::frame(surface.as_ref(), seat, data, serial);
+            smithay::input::touch::TouchTarget::frame(surface.as_ref(), seat, data, marker);
         }
     }
-    fn cancel(&self, seat: &Seat<AppState>, data: &mut AppState, serial: Serial) {
+    fn cancel(&self, seat: &Seat<AppState>, data: &mut AppState, marker: FrameMarker) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::cancel(surface.as_ref(), seat, data, serial);
+            smithay::input::touch::TouchTarget::cancel(surface.as_ref(), seat, data, marker);
         }
     }
-    fn shape(
-        &self,
-        seat: &Seat<AppState>,
-        data: &mut AppState,
-        event: &ShapeEvent,
-        serial: Serial,
-    ) {
+    fn shape(&self, seat: &Seat<AppState>, data: &mut AppState, event: &ShapeEvent) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::shape(surface.as_ref(), seat, data, event, serial);
+            smithay::input::touch::TouchTarget::shape(surface.as_ref(), seat, data, event);
         }
     }
-    fn orientation(
-        &self,
-        seat: &Seat<AppState>,
-        data: &mut AppState,
-        event: &OrientationEvent,
-        serial: Serial,
-    ) {
+    fn orientation(&self, seat: &Seat<AppState>, data: &mut AppState, event: &OrientationEvent) {
         if let Some(surface) = self.wl_surface() {
-            smithay::input::touch::TouchTarget::orientation(
-                surface.as_ref(),
-                seat,
-                data,
-                event,
-                serial,
-            );
+            smithay::input::touch::TouchTarget::orientation(surface.as_ref(), seat, data, event);
         }
+    }
+    fn last_frame(&self, seat: &Seat<AppState>, data: &mut AppState) -> Option<FrameMarker> {
+        self.wl_surface()
+            .and_then(|surface| smithay::input::touch::TouchTarget::last_frame(surface.as_ref(), seat, data))
     }
 }
 
@@ -2923,31 +2867,7 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
-delegate_compositor!(AppState);
-delegate_shm!(AppState);
-delegate_output!(AppState);
-delegate_seat!(AppState);
-delegate_xdg_shell!(AppState);
-delegate_dmabuf!(AppState);
-delegate_image_capture_source!(AppState);
-delegate_output_capture_source!(AppState);
-delegate_image_copy_capture!(AppState);
-delegate_ext_data_control!(AppState);
-delegate_cursor_shape!(AppState);
-delegate_fractional_scale!(AppState);
-delegate_data_device!(AppState);
-delegate_data_control!(AppState);
-delegate_pointer_warp!(AppState);
-delegate_relative_pointer!(AppState);
-delegate_pointer_constraints!(AppState);
-delegate_foreign_toplevel_list!(AppState);
-delegate_xdg_decoration!(AppState);
-delegate_layer_shell!(AppState);
-delegate_single_pixel_buffer!(AppState);
-delegate_viewporter!(AppState);
-delegate_presentation!(AppState);
-delegate_xdg_activation!(AppState);
-delegate_primary_selection!(AppState);
+delegate_dispatch2!(AppState);
 
 /// Row stride (bytes) of a tightly-mapped RGBA8 GPU readback, derived from the mapping
 /// length rather than assuming `width*4`.

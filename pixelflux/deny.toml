@@ -82,12 +82,6 @@ ignore = false
 # reason it is accepted rather than left silently unaudited.
 [advisories]
 ignore = [
-    # cgmath (via smithay): unmaintained, no successor release. Smithay's own
-    # dependency; nothing pixelflux does calls into it. cgmath's swap_columns
-    # aliasing unsoundness (RUSTSEC-2026-0197) needs swap_columns(i, i) to
-    # trigger, which neither pixelflux nor smithay's capture path reaches, so it
-    # is left to surface if a build ever calls it.
-    "RUSTSEC-2026-0196",
     # paste (via smithay's pixman, and image's exr/rav1e): a build-time
     # proc-macro, unmaintained but sound. pixman keeps it in the graph
     # regardless of image's features, so there is nothing to remove.

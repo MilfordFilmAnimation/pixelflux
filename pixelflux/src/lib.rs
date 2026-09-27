@@ -208,7 +208,7 @@ use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server:
 
 use wayland::cursor::{Cursor, CursorJob};
 use pace::{FramePace, TickTrigger};
-use wayland::frontend::{AppState, ClientState, FocusTarget, next_serial, wayland_time, wayland_utime};
+use wayland::frontend::{AppState, ClientState, FocusTarget, next_serial, wayland_time};
 
 smithay::backend::renderer::element::render_elements! {
     pub CompositionElements<R, E> where R: ImportAll + ImportMem;
@@ -271,7 +271,7 @@ pub(crate) fn create_dmabuf_from_bo(bo: &BufferObject<()>) -> Dmabuf {
         DmabufFlags::empty(),
     );
 
-    builder.add_plane(fd, 0, 0, stride);
+    builder.add_plane(fd, 0, stride);
     builder.build().expect("Failed to build Dmabuf from GBM BO")
 }
 
@@ -2749,6 +2749,12 @@ fn cursor_surface_hotspot(
 /// Longest a render tick waits for the GPU to finish a frame before giving that frame up.
 const RENDER_FENCE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Render ticks in a row that draw nothing before one closes an empty frame on its target.
+/// smithay binds a dmabuf target through a texture with a framebuffer made for that bind, and
+/// the NVIDIA driver keeps the state of each one never drawn to until a frame retires it (a
+/// fence or a flush does not): about 15 KB a tick while the screen stands still.
+const UNDRAWN_TICKS_PER_FRAME: u32 = 60;
+
 /// Reads `target` back as RGBA into `dst`. The read runs in a frame of the target: a dmabuf
 /// bound as a texture gets a framebuffer of its own on each bind, which only a frame makes
 /// current, so a bare read on a tick that drew nothing would read another framebuffer.
@@ -3318,6 +3324,15 @@ fn render_node_tick(
                                 render_success = true;
                                 if let Some(damage) = result.damage {
                                     damage_rects = damage.clone();
+                                    node.undrawn_ticks = 0;
+                                } else {
+                                    node.undrawn_ticks += 1;
+                                    if node.undrawn_ticks >= UNDRAWN_TICKS_PER_FRAME {
+                                        node.undrawn_ticks = 0;
+                                        let _ = renderer
+                                            .render(&mut frame, (width, height).into(), Transform::Normal)
+                                            .and_then(|f| f.finish());
+                                    }
                                 }
                                 if wait_render_fence(&result.sync, node.id) {
                                     if let Some(c) = cap.as_deref_mut() {
@@ -3941,6 +3956,7 @@ fn create_output_on(
         damage_tracker,
         frame_buffer: vec![0u8; (width.max(0) as usize) * (height.max(0) as usize) * 4],
         offscreen_buffer: offscreen,
+        undrawn_ticks: 0,
         overlay_state: OverlayState::default(),
         capture: None,
         frame_seq: 0,
@@ -4388,6 +4404,7 @@ fn create_view_on(
         damage_tracker,
         frame_buffer: vec![0u8; (width.max(0) as usize) * (height.max(0) as usize) * 4],
         offscreen_buffer: offscreen,
+        undrawn_ticks: 0,
         overlay_state: OverlayState::default(),
         capture: None,
         frame_seq: 0,
@@ -4826,6 +4843,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
         damage_tracker,
         frame_buffer: vec![0u8; (width.max(0) as usize) * (height.max(0) as usize) * 4],
         offscreen_buffer,
+        undrawn_ticks: 0,
         overlay_state: OverlayState::default(),
         capture: None,
         frame_seq: 0,
@@ -5257,14 +5275,13 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     // next delta. The seat's relative_motion is then withheld, since a
                     // KWin that did bind the seat's relative pointer would count it twice.
                     let via_fake_input = crate::wayland::ficlient::pointer_motion_rel(dx, dy);
-                    let utime = wayland_utime();
                     let time = wayland_time();
                     let serial = next_serial();
 
                     if let Some(pointer) = state.seat.get_pointer() {
                         let current_pos = pointer.current_location();
                         let event = RelativeMotionEvent {
-                            utime,
+                            time,
                             delta: (dx, dy).into(),
                             delta_unaccel: (dx, dy).into(),
                         };

@@ -69,13 +69,13 @@ contains it.
 | CPython (`libpython`) | PSF-2.0 | permissive | both | extension module: symbols come from the hosting interpreter, nothing is linked | `pyo3` with `extension-module` |
 | glibc (`libc`, `libm`, `libpthread`, `libdl`) | LGPL-2.1-or-later | weak copyleft | both | linked shared libraries, as for every program; musllinux wheels use musl (MIT) | C runtime |
 | libgcc_s, libstdc++ | GPL-3.0-or-later WITH GCC-exception-3.1 | permissive in effect (the runtime library exception covers linked programs) | libgcc_s: both; libstdc++: whenever OpenH264 is compiled in, the only C++ code | linked shared libraries; excluded from the wheel | GCC runtime |
-| smithay (git dependency, rev `5de53056`) | MIT | permissive | both | Rust source, compiled in | the only git dependency; `deny.toml` allows exactly that repository |
+| smithay (git dependency, rev `928d4a9b`) | MIT | permissive | both | Rust source, compiled in | the only git dependency; `deny.toml` allows exactly that repository |
 
 ## Rust crates
 
 The crate graph was resolved with `cargo metadata` (normal dependencies only,
-Linux targets) for both configurations: 246 crates in the default (GPL) build,
-245 in the non-GPL build, 246 distinct crates in total. Every one of them has a
+Linux targets) for both configurations: 238 crates in the default (GPL) build,
+237 in the non-GPL build, 238 distinct crates in total. Every one of them has a
 permissive license (MPL-2.0 for `pixelflux` itself); no crate is GPL, LGPL,
 AGPL, or unlicensed. The only difference between the two sets:
 
@@ -83,12 +83,12 @@ AGPL, or unlicensed. The only difference between the two sets:
 | --- | --- | --- | --- |
 | `x264-sys` 0.2.3 | MIT (links libx264, GPL-2.0-or-later) | GPL only | `gpl` feature; the OpenH264 crates stay in both builds, since their decoder is the virtual camera's H.264 decoder |
 
-License expressions as published by the crates (count of the 246):
-MIT OR Apache-2.0 (and spellings of it) 131, MIT 68, MIT OR Apache-2.0 OR Zlib (and spellings of it) 11, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT 6, BSD-2-Clause 5, BSD-3-Clause 4, Unlicense OR MIT 4, Apache-2.0 3, BSD-3-Clause OR Apache-2.0 3, BSD-2-Clause OR Apache-2.0 OR MIT 2, ISC 2, and one each of (MIT OR Apache-2.0) AND Unicode-3.0 (`unicode-ident`), 0BSD OR MIT OR Apache-2.0 (`adler2`), Apache-2.0 OR MIT OR Unlicense (`atomic_float`), BSL-1.0 (`xxhash-rust`), CC0-1.0 OR Apache-2.0 (`imgref`), MPL-2.0 (`pixelflux`), Zlib (`zlib-rs`). `scripts/check-licenses.py --markdown` regenerates the full
+License expressions as published by the crates (count of the 238):
+MIT OR Apache-2.0 (and spellings of it) 127, MIT 67, MIT OR Apache-2.0 OR Zlib (and spellings of it) 11, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT 6, BSD-2-Clause 5, BSD-3-Clause 4, Unlicense OR MIT 4, BSD-3-Clause OR Apache-2.0 3, BSD-2-Clause OR Apache-2.0 OR MIT 2, ISC 2, and one each of (MIT OR Apache-2.0) AND Unicode-3.0 (`unicode-ident`), 0BSD OR MIT OR Apache-2.0 (`adler2`), Apache-2.0 (`gethostname`), BSL-1.0 (`xxhash-rust`), CC0-1.0 OR Apache-2.0 (`imgref`), MPL-2.0 (`pixelflux`), Zlib (`zlib-rs`). `scripts/check-licenses.py --markdown` regenerates the full
 table below.
 
 <details>
-<summary>All 246 crates (Build: both, GPL only, non-GPL only)</summary>
+<summary>All 238 crates (Build: both, GPL only, non-GPL only)</summary>
 
 | Crate | Version | License (SPDX) | Category | Build | Native library / note |
 | --- | --- | --- | --- | --- | --- |
@@ -97,7 +97,6 @@ table below.
 | aligned-vec | 0.6.4 | MIT | permissive | both |  |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 | permissive | both |  |
 | appendlist | 1.4.0 | MIT | permissive | both |  |
-| approx | 0.4.0 | Apache-2.0 | permissive | both |  |
 | arg_enum_proc_macro | 0.3.4 | MIT | permissive | both |  |
 | arrayvec | 0.7.8 | MIT OR Apache-2.0 | permissive | both |  |
 | as-slice | 0.2.1 | MIT OR Apache-2.0 | permissive | both |  |
@@ -113,7 +112,6 @@ table below.
 | async-task | 4.7.1 | Apache-2.0 OR MIT | permissive | both |  |
 | async-trait | 0.1.92 | MIT OR Apache-2.0 | permissive | both |  |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | permissive | both |  |
-| atomic_float | 1.1.0 | Apache-2.0 OR MIT OR Unlicense | permissive | both |  |
 | av-scenechange | 0.14.1 | MIT | permissive | both |  |
 | av1-grain | 0.2.5 | BSD-2-Clause | permissive | both |  |
 | avif-serialize | 0.8.9 | BSD-3-Clause | permissive | both |  |
@@ -121,28 +119,25 @@ table below.
 | bit_field | 0.10.3 | Apache-2.0/MIT | permissive | both |  |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | permissive | both |  |
 | bitstream-io | 4.10.0 | MIT/Apache-2.0 | permissive | both |  |
-| block-buffer | 0.10.4 | MIT OR Apache-2.0 | permissive | both |  |
 | blocking | 1.7.0 | Apache-2.0 OR MIT | permissive | both |  |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | permissive | both |  |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | permissive | both |  |
 | bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT | permissive | both |  |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | permissive | both |  |
 | calloop | 0.14.4 | MIT | permissive | both |  |
-| cfg-if | 1.0.4 | MIT OR Apache-2.0 | permissive | both |  |
-| cgmath | 0.18.0 | Apache-2.0 | permissive | both |  |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 | permissive | both |  |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | permissive | both |  |
 | chunked_transfer | 1.5.0 | MIT OR Apache-2.0 | permissive | both |  |
 | codec-sys | 0.1.0 | MIT OR Apache-2.0 | permissive | both | libvpx, SVT-AV1, dav1d, and libde265 on every wheel; x265 (GPL-2.0-or-later) on the GPL wheel, kvazaar on the non-GPL one (BSD-3-Clause (libvpx, kvazaar; SVT-AV1 with the Alliance for Open Media patent license), BSD-2-Clause (dav1d), LGPL-3.0-or-later (libde265), weak copyleft) |
 | color_quant | 1.1.0 | MIT | permissive | both |  |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | permissive | both |  |
-| cpufeatures | 0.2.17 | MIT OR Apache-2.0 | permissive | both |  |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | permissive | both |  |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | permissive | both |  |
 | crossbeam-channel | 0.5.17 | MIT OR Apache-2.0 | permissive | both |  |
 | crossbeam-deque | 0.8.8 | MIT OR Apache-2.0 | permissive | both |  |
 | crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 | permissive | both |  |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | permissive | both |  |
-| crypto-common | 0.1.7 | MIT OR Apache-2.0 | permissive | both |  |
 | cursor-icon | 1.2.0 | MIT OR Apache-2.0 OR Zlib | permissive | both |  |
-| digest | 0.10.7 | MIT OR Apache-2.0 | permissive | both |  |
 | dlib | 0.5.3 | MIT | permissive | both |  |
 | downcast-rs | 1.2.1 | MIT/Apache-2.0 | permissive | both |  |
 | drm | 0.14.1 | MIT | permissive | both |  |
@@ -170,11 +165,10 @@ table below.
 | gbm | 0.18.0 | MIT | permissive | both |  |
 | gbm-sys | 0.4.0 | MIT | permissive | both | libgbm (Mesa) (MIT, permissive) |
 | gcd | 2.3.0 | MIT/Apache-2.0 | permissive | both |  |
-| generic-array | 0.14.7 | MIT | permissive | both |  |
 | gethostname | 1.1.0 | Apache-2.0 | permissive | both |  |
-| getrandom | 0.3.4 | MIT OR Apache-2.0 | permissive | both |  |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | permissive | both |  |
 | gif | 0.14.2 | MIT OR Apache-2.0 | permissive | both |  |
+| glam | 0.33.11 | MIT OR Apache-2.0 | permissive | both |  |
 | half | 2.7.1 | MIT OR Apache-2.0 | permissive | both |  |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | permissive | both |  |
 | heck | 0.5.0 | MIT OR Apache-2.0 | permissive | both |  |
@@ -195,9 +189,9 @@ table below.
 | libloading | 0.9.0 | ISC | permissive | both | libEGL.so.1 (Mesa/Khronos, MIT), libpipewire-0.3.so.0 (MIT), libwayland-server.so.0 (MIT), libva.so.2 and libva-drm.so.2 (MIT), libcuda.so.1/libnvidia-encode.so.1/libnvidia-fbc.so.1 (proprietary), and on aarch64 the Jetson Linux libnvv4l2.so/libnvbuf_utils.so/libnvbufsurface.so/libnvbufsurftransform.so (proprietary) (MIT and proprietary driver libraries, permissive) |
 | libm | 0.2.16 | MIT | permissive | both |  |
 | libudev-sys | 0.1.4 | MIT | permissive | both | libudev (systemd) (LGPL-2.1-or-later, weak copyleft) |
-| linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | permissive | both | Linux kernel ABI (syscall numbers and structs) (Linux-syscall-note, permissive) |
 | linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | permissive | both | Linux kernel ABI (syscall numbers and structs) (Linux-syscall-note, permissive) |
 | linux-raw-sys | 0.9.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | permissive | both | Linux kernel ABI (syscall numbers and structs) (Linux-syscall-note, permissive) |
+| linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | permissive | both | Linux kernel ABI (syscall numbers and structs) (Linux-syscall-note, permissive) |
 | log | 0.4.34 | MIT OR Apache-2.0 | permissive | both |  |
 | loop9 | 0.1.5 | MIT | permissive | both |  |
 | maybe-rayon | 0.1.1 | MIT | permissive | both |  |
@@ -232,7 +226,7 @@ table below.
 | pixman-sys | 0.1.0 | MIT | permissive | both | libpixman-1 (MIT, permissive) |
 | png | 0.18.1 | MIT OR Apache-2.0 | permissive | both |  |
 | polling | 3.11.0 | Apache-2.0 OR MIT | permissive | both |  |
-| ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 | permissive | both |  |
+| portable-atomic | 1.15.0 | Apache-2.0 OR MIT | permissive | both |  |
 | proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | permissive | both |  |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | permissive | both |  |
 | profiling | 1.0.18 | MIT OR Apache-2.0 | permissive | both |  |
@@ -248,9 +242,8 @@ table below.
 | quick-error | 2.0.1 | MIT/Apache-2.0 | permissive | both |  |
 | quick-xml | 0.41.0 | MIT | permissive | both |  |
 | quote | 1.0.47 | MIT OR Apache-2.0 | permissive | both |  |
-| rand | 0.9.5 | MIT OR Apache-2.0 | permissive | both |  |
-| rand_chacha | 0.9.0 | MIT OR Apache-2.0 | permissive | both |  |
-| rand_core | 0.9.5 | MIT OR Apache-2.0 | permissive | both |  |
+| rand | 0.10.3 | MIT OR Apache-2.0 | permissive | both |  |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | permissive | both |  |
 | rav1e | 0.8.1 | BSD-2-Clause | permissive | both |  |
 | ravif | 0.13.0 | BSD-3-Clause | permissive | both |  |
 | raw-cpuid | 11.6.0 | MIT | permissive | both |  |
@@ -268,10 +261,10 @@ table below.
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | permissive | both |  |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 | permissive | both |  |
 | serde_repr | 0.1.21 | MIT OR Apache-2.0 | permissive | both |  |
-| sha2 | 0.10.9 | MIT OR Apache-2.0 | permissive | both |  |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | permissive | both |  |
 | simd-adler32 | 0.3.10 | MIT | permissive | both |  |
 | simd_helpers | 0.1.0 | MIT | permissive | both |  |
+| siphasher | 1.0.4 | MIT OR Apache-2.0 | permissive | both |  |
 | slab | 0.4.12 | MIT | permissive | both |  |
 | smallvec | 1.16.1 | MIT OR Apache-2.0 | permissive | both |  |
 | smithay | 0.7.0 | MIT | permissive | both |  |
@@ -293,7 +286,6 @@ table below.
 | tracing-core | 0.1.36 | MIT | permissive | both |  |
 | turbojpeg | 1.5.1 | Unlicense OR MIT | permissive | both |  |
 | turbojpeg-sys | 1.2.0 | Unlicense OR MIT | permissive | both | libjpeg-turbo 3.1 (vendored source) (IJG AND BSD-3-Clause AND Zlib, permissive) |
-| typenum | 1.20.1 | MIT OR Apache-2.0 | permissive | both |  |
 | udev | 0.9.3 | MIT | permissive | both |  |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | permissive | both |  |
 | uuid | 1.26.1 | Apache-2.0 OR MIT | permissive | both |  |
@@ -323,7 +315,7 @@ table below.
 | xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | permissive | both |  |
 | xxhash-rust | 0.8.18 | BSL-1.0 | permissive | both |  |
 | y4m | 0.8.0 | MIT | permissive | both |  |
-| yuv | 0.8.18 | BSD-3-Clause OR Apache-2.0 | permissive | both |  |
+| yuv | 0.8.19 | BSD-3-Clause OR Apache-2.0 | permissive | both |  |
 | zbus | 5.19.0 | MIT | permissive | both |  |
 | zbus_macros | 5.19.0 | MIT | permissive | both |  |
 | zbus_names | 4.3.4 | MIT | permissive | both |  |
