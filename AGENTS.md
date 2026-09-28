@@ -28,6 +28,11 @@ up for one (Miniforge serves a host with a closed package manager; keep the syst
 other GPUs) and take the operator's directives on how it is constructed and constrained. Say which checks could not
 run where the hardware for them was not available.
 
+Priority: Latency > Resource Usage >= Quality (non-perceptible or statistically insignificant fluctuations of <= 5% in
+latency for quality or bandwidth consistency is acceptable, and using a slight more GPU resources or CPU cores is also
+acceptable if without latency impact and substantial quality improvement) >> Overall Bandwidth Efficiency (since
+encoded frames are only used once unlike .mp4/.mkv)
+
 Note that parity between X11 and Wayland, as well as between WebSockets and WebRTC, or between the default dashboard
 and the wish dashboard, is considered a key focus (things that were not wired up correctly on either side, and similar
 discrepancies, are subject to fixes or deduplication). I prefer deduplicating code that performs similar purposes
