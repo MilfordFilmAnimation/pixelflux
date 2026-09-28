@@ -1137,8 +1137,11 @@ impl AppState {
     }
 
     /// Hands pointer focus to what now lies under a still pointer once a window maps, unmaps,
-    /// or moves, so a click that arrives with no motion (a pointer-locked one) reaches what is
-    /// shown there. A held grab keeps its focus until it ends.
+    /// or moves, and ahead of a button or scroll that comes with no motion (a pointer-locked
+    /// one), so input reaches what is shown there. A held grab keeps its focus until it ends.
+    /// An enter reaches only the wl_pointers a client already holds and is not repeated to one
+    /// bound later, so a client yet to bind one is not entered here: the window no longer shown
+    /// is left, and the client's first input after it binds enters it.
     pub(crate) fn refocus_pointer(&mut self) {
         if self.host.is_some() {
             return;
@@ -1148,7 +1151,12 @@ impl AppState {
             return;
         }
         let location = pointer.current_location();
-        let under = self.pointer_target_under(location);
+        let under = self.pointer_target_under(location).filter(|(target, _)| {
+            target
+                .wl_surface()
+                .and_then(|surface| surface.client())
+                .is_none_or(|client| pointer.client_pointers(&client).next().is_some())
+        });
         if pointer.current_focus() == under.as_ref().map(|(t, _)| t.clone()) {
             return;
         }

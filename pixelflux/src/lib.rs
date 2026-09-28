@@ -5312,6 +5312,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let time = wayland_time();
                     let button_state = if btn_state_val > 0 { smithay::backend::input::ButtonState::Pressed } else { smithay::backend::input::ButtonState::Released };
 
+                    state.refocus_pointer();
                     if let Some(pointer) = state.seat.get_pointer() {
                         if button_state == smithay::backend::input::ButtonState::Pressed {
                             let pos = pointer.current_location();
@@ -5335,7 +5336,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                         return;
                     }
                     let time = wayland_time();
-                    
+                    state.refocus_pointer();
                     if let Some(pointer) = state.seat.get_pointer() {
                         let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
 
