@@ -998,7 +998,7 @@ pub fn encode_cpu(
         if quiescent {
             for st in stripes.iter_mut() {
                 let armed = paint_over_armed(st);
-                crate::pipeline::cleanup_due(st, trigger_frames, armed, keys, Damage::None);
+                crate::pipeline::cleanup_due(st, trigger_frames, armed, true, keys, Damage::None);
                 st.consecutive_changes = 0;
             }
             return Vec::new();
@@ -1096,7 +1096,8 @@ pub fn encode_cpu(
             let cleanup = crate::pipeline::cleanup_due(
                 stripe_state,
                 trigger_frames,
-                armed && cleanup_allowed[i],
+                armed,
+                cleanup_allowed[i],
                 keys,
                 if is_dirty { Damage::Unknown } else { Damage::None },
             );

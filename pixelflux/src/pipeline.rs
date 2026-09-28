@@ -93,9 +93,8 @@ pub enum Cleanup {
 }
 
 /// The still-screen cleanup of one region (a whole frame, or a stripe): track how long and how
-/// much it has been changing, and say when it is due a cleanup and of which kind. `enabled`
-/// false keeps the bookkeeping and answers `Cleanup::None`; `keys` false (JPEG, whose every
-/// stripe is a picture of its own) never answers `Cleanup::Key`.
+/// much it has been changing, and say when it is due a cleanup and of which kind. `keys` false
+/// (JPEG, whose every stripe is a picture of its own) never answers `Cleanup::Key`.
 ///
 /// Static is read from the content (`damage`), never from what was sent, so a stream that
 /// encodes every frame (Turbo) sees the screen go still exactly like one that sends only changes.
@@ -110,7 +109,15 @@ pub enum Cleanup {
 /// trigger periods have passed since it first changed and at most a quarter of its recent frames
 /// carried more than a small change (a blinking caret, a ticking clock) it is cleaned up then,
 /// by a key frame when the change adds up to one.
-pub fn cleanup_due(st: &mut StripeState, trigger: u32, enabled: bool, keys: bool, damage: Damage) -> Cleanup {
+///
+/// `improves` false (the paint-over is off, or a constant rate already codes the region finer)
+/// keeps the bookkeeping and answers `Cleanup::None`, and a cleanup that falls due then restarts
+/// the count of frames since the region first changed: the region is clean, so those frames are
+/// no low motion, and counted, they would have the first frame of the next large change keyed,
+/// the whole picture at the paint-over quantizer the moment a window opens. `now` false (a
+/// stripe whose cleanup is staggered to a later frame) answers `Cleanup::None` and leaves the
+/// cleanup pending.
+pub fn cleanup_due(st: &mut StripeState, trigger: u32, improves: bool, now: bool, keys: bool, damage: Damage) -> Cleanup {
     if damage.is_dirty() {
         st.dirty_run = st.dirty_run.saturating_add(1);
         st.no_motion_frame_count = 0;
@@ -129,7 +136,14 @@ pub fn cleanup_due(st: &mut StripeState, trigger: u32, enabled: bool, keys: bool
     }
     st.motion = recent_motion(st.motion, trigger.max(1), damage.is_motion());
     let due = due_cleanup(st, trigger.max(1), keys, st.no_motion_frame_count, st.unclean_frames, st.motion);
-    if !enabled || due == Cleanup::None {
+    if due == Cleanup::None {
+        return Cleanup::None;
+    }
+    if !improves {
+        st.unclean_frames = 0;
+        return Cleanup::None;
+    }
+    if !now {
         return Cleanup::None;
     }
     st.paint_over_sent = true;
@@ -314,7 +328,7 @@ pub fn decide_hw_fullframe(
     let burst = settings.video_paintover_burst_frames;
     let improves = paint_over_improves(settings, encoder);
     let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
-    let cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, encoder.holds, damage);
+    let cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, encoder.holds, damage);
     let refresh_qp = held_refresh_quality(settings, encoder);
     let cleanup_qp = match cleanup {
         Cleanup::Refresh if encoder.holds => Some(refresh_qp),
@@ -381,7 +395,7 @@ fn decide_constant_quality(
     let burst = settings.video_paintover_burst_frames;
     let improves = settings.use_paint_over_quality && settings.video_paintover_crf < settings.video_crf;
     let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
-    let mut cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, damage);
+    let mut cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, true, damage);
     if damage.is_motion() || !improves {
         st.clean_quality = false;
     }
@@ -999,6 +1013,28 @@ mod tests {
         assert_eq!(keys(&mut st, Damage::Area(1.0), 2), (1, 1), "a scroll is refreshed, then keyed");
         assert_eq!(keys(&mut st, Damage::Area(0.001), 1), (1, 0), "a caret is refreshed, never keyed");
         assert_eq!(keys(&mut st, Damage::Area(0.3), 2), (1, 1), "0.6 of a screen changed since the last key frame");
+    }
+
+    /// A still screen the rate control codes finer than the paint-over quantizer owes no cleanup,
+    /// so its still frames are no low motion: the first frames of the next large change (a
+    /// window opening) go out at the session quality, and the key frame waits for the screen to
+    /// hold still after it.
+    #[test]
+    fn a_large_change_after_a_clean_still_screen_is_not_keyed_as_it_lands() {
+        let s = RustCaptureSettings { video_paintover_burst_frames: 0, ..hw_settings() };
+        let fine = EncoderQuality { last: Some(5), holds: true, reopens: false };
+        let coarse = EncoderQuality { last: Some(40), holds: true, reopens: false };
+        let mut st = StripeState::default();
+        let mut frame = 0u16;
+        let mut step = |st: &mut StripeState, damage: Damage, q: EncoderQuality| {
+            frame = frame.wrapping_add(1);
+            decide_hw_fullframe(st, &s, frame, damage, false, false, q)
+        };
+        step(&mut st, Damage::Area(1.0), coarse);
+        assert!((0..100).all(|_| step(&mut st, Damage::None, fine).hold_qp.is_none()), "a finer rate control is left alone");
+        let landing = [step(&mut st, Damage::Area(1.0), fine), step(&mut st, Damage::Area(1.0), coarse)];
+        assert!(landing.iter().all(|d| d.send && !d.force_idr && d.hold_qp.is_none()), "the change goes out at the session quality");
+        assert!((0..12).any(|_| step(&mut st, Damage::None, coarse).force_idr), "and is keyed once the screen holds still");
     }
 
     /// A screen that never holds still for the trigger (a caret blinking every other frame)
