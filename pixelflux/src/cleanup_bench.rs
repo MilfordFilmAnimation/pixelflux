@@ -13,7 +13,12 @@
 //! `CODEC` (h264, h265, vp8, vp9, av1, jpeg), `CPU` (1 forces software), `FULLFRAME` (1),
 //! `TURBO` (1), `CBR` (1), `KBPS`, `CRF`, `PAINT_CRF`, `PAINT` (use_paint_over_quality, 1),
 //! `W`, `H`, `FPS`, `MOTION` and `STILL` (frames), `CARET` (frames per caret toggle, 0 none),
-//! `RESUME` (frames of motion after the still phase), `TRIGGER` (paint-over trigger frames).
+//! `RESUME` (frames of motion after the still phase), `TRIGGER` (paint-over trigger frames),
+//! `PRESTILL` (frames held still before the measured phase, which then opens with the screen
+//! moving `JUMP` rows at once: a window opening on a clean still screen), `TARGET_DB` (the PSNR
+//! whose time to reach it is reported), and `ROWS` (a file for every frame's figures). Each run
+//! reports its largest frame and the worst wait a frame meets behind the ones before it on a
+//! 12, 20, 50, and 100 Mbit/s link.
 //!
 //! `cargo test --release --lib cleanup_bench::cleanup_bench -- --exact --ignored --nocapture
 //! --test-threads=1`, and `cleanup_bench::cleanup_hold_experiment` the same way.
@@ -148,6 +153,47 @@ fn source_luma(bgra: &[u8], codec: Codec) -> Vec<u8> {
         .collect()
 }
 
+/// Mean luma SSIM over 8x8 blocks (the constants of the standard index at 8 bits).
+fn ssim(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
+    let (c1, c2) = ((0.01f64 * 255.0).powi(2), (0.03f64 * 255.0).powi(2));
+    let (mut sum, mut n) = (0.0, 0usize);
+    for by in (0..h.saturating_sub(7)).step_by(8) {
+        for bx in (0..w.saturating_sub(7)).step_by(8) {
+            let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0f64, 0f64, 0f64, 0f64, 0f64);
+            for y in by..by + 8 {
+                for x in bx..bx + 8 {
+                    let (p, q) = (a[y * w + x] as f64, b[y * w + x] as f64);
+                    sa += p;
+                    sb += q;
+                    saa += p * p;
+                    sbb += q * q;
+                    sab += p * q;
+                }
+            }
+            let (ma, mb) = (sa / 64.0, sb / 64.0);
+            let (va, vb, cov) = (saa / 64.0 - ma * ma, sbb / 64.0 - mb * mb, sab / 64.0 - ma * mb);
+            sum += ((2.0 * ma * mb + c1) * (2.0 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2));
+            n += 1;
+        }
+    }
+    sum / n.max(1) as f64
+}
+
+/// The worst wait, in ms, a frame of `frames` = (send time s, bytes) meets behind the ones before it
+/// on a first-in first-out link of `mbit` Mbit/s, over the frames sent from `from` s on.
+fn link_wait(frames: &[(f64, usize)], mbit: f64, from: f64) -> f64 {
+    let bps = mbit * 1e6 / 8.0;
+    let (mut free, mut worst) = (f64::MIN, 0f64);
+    for &(t, bytes) in frames {
+        let start = free.max(t);
+        if t >= from {
+            worst = worst.max(start - t);
+        }
+        free = start + bytes as f64 / bps;
+    }
+    worst * 1e3
+}
+
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
     let mse = a.iter().zip(b).map(|(&x, &y)| {
         let d = x as f64 - y as f64;
@@ -184,14 +230,17 @@ fn cleanup_bench() {
         ..Default::default()
     };
     let motion: usize = env("MOTION", 90);
+    let prestill: usize = env("PRESTILL", 0);
+    let jump: usize = env("JUMP", 0);
     let still: usize = env("STILL", 240);
     let resume: usize = env("RESUME", 0);
     let caret_period: usize = env("CARET", 0);
+    let target_db: f64 = env("TARGET_DB", 0.0);
     let canvas = Canvas::for_bench(w, h);
     let mut p = X11Pipeline::new(settings.clone());
     let codec = p.codec();
     println!(
-        "bench {} {} {}x{} turbo={} cbr={} kbps={} crf={} paint={}/{} caret={} encoder={}",
+        "bench {} {} {}x{} turbo={} cbr={} kbps={} crf={} paint={}/{} caret={} prestill={prestill} jump={jump} encoder={}",
         codec.display(), if settings.video_fullframe { "full" } else { "striped" }, w, h,
         settings.video_streaming_mode, settings.video_cbr_mode, settings.video_bitrate_kbps,
         settings.video_crf, settings.use_paint_over_quality, settings.video_paintover_crf, caret_period,
@@ -200,16 +249,30 @@ fn cleanup_bench() {
     let budget = settings.video_bitrate_kbps as f64 * 1000.0 / 8.0 / fps;
     let mut decoders: HashMap<i32, Box<dyn Decoder>> = HashMap::new();
     let mut shown = vec![0u8; w * h];
-    let total = motion + still + resume;
+    let stop = motion + prestill;
+    let total = stop + still + resume;
     let mut still_bytes = 0usize;
     let mut resume_bytes = 0usize;
+    let mut still_keys = 0usize;
+    let mut still_max = (0usize, 0i64);
     let mut first_key: Option<(usize, usize)> = None;
     let mut last_psnr = 0.0;
+    let mut last_ssim = 0.0;
     let mut psnr_at_stop = 0.0;
-    let mut records: Vec<(i64, usize, String, f64, f64)> = Vec::new();
+    let mut records: Vec<(i64, usize, String, f64, f64, f64)> = Vec::new();
+    let mut sent: Vec<(f64, usize)> = Vec::new();
+    let rows_path = std::env::var("PF_BENCH_ROWS").ok();
     for t in 0..total {
-        let scroll = if t < motion { t * 4 } else if t < motion + still { motion * 4 } else { (t - still) * 4 };
-        let caret = caret_period > 0 && (t / caret_period).is_multiple_of(2);
+        let scroll = if t < motion {
+            t * 4
+        } else if t < stop {
+            motion * 4
+        } else if t < stop + still {
+            motion * 4 + jump
+        } else {
+            motion * 4 + jump + (t + 1 - stop - still) * 4
+        };
+        let caret = caret_period > 0 && t >= stop && ((t - stop) / caret_period).is_multiple_of(2);
         let frame = canvas.frame(h, scroll, caret);
         let start = Instant::now();
         let out = p.process(&frame, w * 4);
@@ -242,45 +305,73 @@ fn cleanup_bench() {
                 Err(e) => println!("  decode error at t={t}: {e:?}"),
             }
         }
-        let rel = t as i64 - motion as i64;
-        let in_still = (motion..motion + still).contains(&t);
+        if bytes > 0 {
+            sent.push((t as f64 / fps, bytes));
+        }
+        let rel = t as i64 - stop as i64;
+        let in_still = (stop..stop + still).contains(&t);
         if in_still {
             still_bytes += bytes;
-            if first_key.is_none() && kinds.contains('K') {
-                first_key = Some((t - motion, bytes));
+            if kinds.contains('K') {
+                still_keys += 1;
+                if first_key.is_none() {
+                    first_key = Some((t - stop, bytes));
+                }
+            }
+            if bytes > still_max.0 {
+                still_max = (bytes, rel);
             }
         }
-        if t >= motion + still {
+        if t >= stop + still {
             resume_bytes += bytes;
         }
         let measure = !out.is_empty() || rel % 30 == 0 || t + 1 == total || rel == 0;
         if measure {
-            last_psnr = psnr(&shown, &source_luma(&frame, codec));
+            let src = source_luma(&frame, codec);
+            last_psnr = psnr(&shown, &src);
+            last_ssim = if rel >= -1 { ssim(&shown, &src, w, h) } else { 0.0 };
         }
         if rel == 0 {
             psnr_at_stop = last_psnr;
         }
-        records.push((rel, bytes, kinds, ms, if measure { last_psnr } else { -1.0 }));
+        records.push((rel, bytes, kinds, ms, if measure { last_psnr } else { -1.0 }, last_ssim));
+    }
+    if let Some(path) = rows_path {
+        let rows: Vec<String> = records
+            .iter()
+            .map(|(rel, bytes, kinds, ms, q, ss)| format!("[{rel},{bytes},\"{kinds}\",{ms:.2},{q:.3},{ss:.5}]"))
+            .collect();
+        std::fs::write(&path, format!("[{}]\n", rows.join(","))).expect("rows");
     }
     let resume_at = still as i64;
-    for (rel, bytes, kinds, ms, q) in &records {
+    for (rel, bytes, kinds, ms, q, ss) in &records {
         let near_stop = (-2..24).contains(rel);
-        let keyish = kinds.contains('K') || kinds.contains('I');
+        let keyish = (kinds.contains('K') || kinds.contains('I')) && *rel >= -2;
         let near_resume = (resume_at - 1..resume_at + 8).contains(rel);
         let periodic = *rel >= 0 && rel % 30 == 0;
-        if near_stop || keyish || near_resume || periodic {
+        let big = *rel >= 0 && *bytes as f64 > 3.0 * budget;
+        if near_stop || keyish || near_resume || periodic || big {
             let k = if kinds.len() > 6 { format!("{}..{}", &kinds[..3], kinds.len()) } else { kinds.clone() };
             let q = if *q >= 0.0 { format!("{q:5.2}") } else { "  -  ".into() };
-            println!("  t={rel:+5} {:>7.1} kB {k:>6} x{:<5.1} {ms:6.2} ms  psnr {q}", *bytes as f64 / 1000.0, *bytes as f64 / budget);
+            println!("  t={rel:+5} {:>7.1} kB {k:>6} x{:<5.1} {ms:6.2} ms  psnr {q} ssim {ss:.4}", *bytes as f64 / 1000.0, *bytes as f64 / budget);
         }
     }
-    let still_sent = records.iter().filter(|r| (0..resume_at).contains(&r.0) && r.1 > 0).count();
+    let still_rows: Vec<&(i64, usize, String, f64, f64, f64)> = records.iter().filter(|r| (0..resume_at).contains(&r.0)).collect();
+    let still_sent = still_rows.iter().filter(|r| r.1 > 0).count();
+    let end_psnr = still_rows.iter().rev().find(|r| r.4 >= 0.0).map_or(last_psnr, |r| r.4);
+    let end_ssim = still_rows.last().map_or(last_ssim, |r| r.5);
+    let reach = |db: f64| still_rows.iter().find(|r| r.4 >= db).map(|r| r.0);
+    let secs = |f: Option<i64>| f.map_or("never".to_string(), |f| format!("{:.2}s", f as f64 / fps));
+    let target = if target_db > 0.0 { target_db } else { end_psnr - 0.5 };
+    let from = stop as f64 / fps - 0.5;
+    let waits: Vec<String> = [12.0, 20.0, 50.0, 100.0].iter().map(|&m| format!("{m:.0}:{:.0}", link_wait(&sent, m, from))).collect();
     println!("  still frames sent: {still_sent} of {still}; psnr at stop {psnr_at_stop:.2}");
     println!(
-        "summary codec={} turbo={} cbr={} first_key={:?} still_kB={:.1} still_kbps={:.0} resume_kB={:.1} end_psnr={:.2}",
-        codec.name(), settings.video_streaming_mode, settings.video_cbr_mode,
-        first_key, still_bytes as f64 / 1000.0, still_bytes as f64 * 8.0 / 1000.0 / (still as f64 / fps),
-        resume_bytes as f64 / 1000.0, last_psnr
+        "summary codec={} turbo={} cbr={} kbps={} {}x{} first_key={:?} keys={still_keys} max_kB={:.1}@{} still_kB={:.1} still_kbps={:.0} resume_kB={:.1} end_psnr={:.2} end_ssim={:.5} to_end-1dB={} to_end-0.5dB={} to_target({target:.2})={} link_wait_ms={}",
+        codec.name(), settings.video_streaming_mode, settings.video_cbr_mode, settings.video_bitrate_kbps, w, h,
+        first_key, still_max.0 as f64 / 1000.0, still_max.1, still_bytes as f64 / 1000.0,
+        still_bytes as f64 * 8.0 / 1000.0 / (still as f64 / fps), resume_bytes as f64 / 1000.0, end_psnr, end_ssim,
+        secs(reach(end_psnr - 1.0)), secs(reach(end_psnr - 0.5)), secs(reach(target)), waits.join(",")
     );
 }
 
