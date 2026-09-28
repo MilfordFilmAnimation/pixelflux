@@ -270,12 +270,35 @@ impl H264Backend {
 
     fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, DecodeError> {
         use openh264_sys2::*;
-        if let Some(sps) = annexb_nals(data).find(|n| n[0] & 0x1f == 7) {
+        let mut sps = None;
+        let mut scalable = false;
+        for nal in annexb_nals(data) {
+            match nal[0] & 0x1f {
+                7 if sps.is_none() => sps = Some(nal),
+                14 | 15 | 20 => scalable = true,
+                _ => {}
+            }
+        }
+        if let Some(sps) = sps {
             self.tags = Some(match sps::read_color(sps) {
                 Some(signal) => ColorTags { matrix: signal.matrix, full_range: signal.full_range },
                 None => ColorTags { matrix: 2, full_range: false },
             });
         }
+        // OpenH264 also decodes the scalable extension, and a prefix or extension NAL unit naming
+        // a layer above the base turns it to that layer for good, so it hands over no picture
+        // again, key frames included. An AVC decoder ignores the extension's units (prefix,
+        // subset SPS, extension slice), and so does this one.
+        let mut avc = Vec::new();
+        let data = if scalable {
+            for nal in annexb_nals(data).filter(|n| !matches!(n[0] & 0x1f, 14 | 15 | 20)) {
+                avc.extend_from_slice(&[0, 0, 0, 1]);
+                avc.extend_from_slice(nal);
+            }
+            &avc[..]
+        } else {
+            data
+        };
         let mut dst: [*mut u8; 3] = [ptr::null_mut(); 3];
         let mut info: SBufferInfo = unsafe { std::mem::zeroed() };
         let decode = self.api().and_then(|a| a.DecodeFrameNoDelay).ok_or_else(|| DecodeError::Fatal("OpenH264 exposes no DecodeFrameNoDelay".into()))?;
@@ -903,6 +926,21 @@ mod tests {
             let v = dec.frame().unwrap();
             assert_eq!((v.width, v.height), (32, 32));
             assert_eq!((v.y[17 * v.y_stride + 17], v.u[9 * v.uv_stride + 9], v.v[0]), (0x60, 0x60, 0x60), "access unit {n}");
+        }
+    }
+
+    /// A prefix NAL unit naming dependency layer 1, which only a scalable stream carries, leaves
+    /// every picture after it decoding, a key frame's included.
+    #[test]
+    fn h264_scalable_extension_units_never_retarget_the_decoder() {
+        let mut units = h264_stepping_poc_by_two(2, 12, 0x60);
+        units[4].splice(0..0, [0, 0, 0, 1, 0x4e, 0x80, 0x90, 0x07, 0x20]);
+        let mut dec = VideoDecoder::new(Codec::H264).unwrap();
+        for (n, unit) in units.iter().chain(&units).enumerate() {
+            match dec.decode(unit) {
+                Ok(true) => {}
+                other => panic!("access unit {n}: {other:?}"),
+            }
         }
     }
 
