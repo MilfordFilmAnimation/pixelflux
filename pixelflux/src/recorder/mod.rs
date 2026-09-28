@@ -33,7 +33,8 @@
 //!
 //! Sound comes from an Ogg Opus stream on a Unix socket, the shape pcmflux serves, read by a
 //! thread of its own: the `OpusHead` declares the track, and each packet's decode time is
-//! its granule position laid onto the recording clock from the first packet's arrival.
+//! its place under its page's granule position, laid onto the recording clock from the first
+//! packet's arrival.
 
 pub mod mp4;
 pub mod ogg;
@@ -450,34 +451,63 @@ fn open_audio(path: &str) -> Result<(ogg::PageReader<UnixStream>, ogg::OpusHead)
     Ok((reader, head))
 }
 
-/// Audio-thread body: each packet's granule position, laid onto the recording clock from
-/// the first packet's arrival, is its decode time. Ends with the stream, or on stop.
+/// Where a page's first packet starts, in samples: its granule position counts to the end of
+/// its last packet, so the page starts what its packets hold (`samples`) before that. A
+/// producer that sends nothing through a silence (pcmflux's silence gate) leaves the gap
+/// before the page, which then lands after it rather than against the page before; a final
+/// page whose granule trims its end starts where the one before ended.
+fn page_start(position: u64, granule: u64, samples: u64) -> u64 {
+    granule.saturating_sub(samples).max(position)
+}
+
+/// Audio-thread body: dates each page's packets from `page_start`, laid onto the recording
+/// clock from the first packet's arrival. Packets wait for their page's last, which carries
+/// the granule; an unfinished page's packets at the stream's end follow the page before. Ends
+/// with the stream, or on stop.
 fn audio_thread(mut reader: ogg::PageReader<UnixStream>, tx: Sender<Tap>, shared: Arc<RecShared>,
                 stop: Arc<AtomicBool>) {
     let _ = reader.inner_mut().set_read_timeout(Some(Duration::from_millis(200)));
     let mut position: u64 = 0;
     let mut anchor: Option<(u64, u64)> = None;
-    while !stop.load(Ordering::Relaxed) {
-        let (packet, granule) = match reader.next_packet() {
-            Ok(Some(item)) => item,
-            Ok(None) => break,
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
-            Err(e) => {
-                eprintln!("[recorder] audio stream ended: {e}");
-                break;
+    let mut page: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut open = true;
+    while open {
+        let granule = if stop.load(Ordering::Relaxed) {
+            None
+        } else {
+            match reader.next_packet() {
+                Ok(Some((packet, granule))) => {
+                    let samples = mp4::opus_packet_samples(&packet) as u64;
+                    page.push((packet, samples));
+                    match granule {
+                        Some(granule) => Some(granule),
+                        None => continue,
+                    }
+                }
+                Ok(None) => None,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e) => {
+                    eprintln!("[recorder] audio stream ended: {e}");
+                    None
+                }
             }
         };
+        open = granule.is_some();
+        let samples: u64 = page.iter().map(|p| p.1).sum();
+        position = granule.map_or(position, |g| page_start(position, g, samples));
         let (clock, base) = *anchor.get_or_insert_with(|| {
             (shared.start.elapsed().as_micros() as u64 * (mp4::OPUS_TIMESCALE as u64) / 1_000_000, position)
         });
-        let dts = clock + position.saturating_sub(base);
-        position = granule.unwrap_or(position + mp4::opus_packet_samples(&packet) as u64);
-        match tx.try_send(Tap::Audio(packet, dts)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                shared.dropped.fetch_add(1, Ordering::Relaxed);
+        for (packet, samples) in page.drain(..) {
+            let dts = clock + position.saturating_sub(base);
+            position += samples;
+            match tx.try_send(Tap::Audio(packet, dts)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    shared.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(TrySendError::Disconnected(_)) => return,
             }
-            Err(TrySendError::Disconnected(_)) => break,
         }
     }
 }
@@ -890,4 +920,40 @@ pub fn status_to_json(s: &RecordingStatus) -> serde_json::Value {
         "height": s.height,
         "error": s.error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn ogg_page(granule: u64, packets: &[&[u8]]) -> Vec<u8> {
+        let mut out = b"OggS\0\0".to_vec();
+        out.extend_from_slice(&granule.to_le_bytes());
+        out.extend_from_slice(&[0u8; 12]);
+        out.push(packets.len() as u8);
+        out.extend(packets.iter().map(|p| p.len() as u8));
+        packets.iter().for_each(|p| out.extend_from_slice(p));
+        out
+    }
+
+    /// Each packet keeps its place under its page's granule: contiguous pages follow each other,
+    /// the page after a gap a gated producer left sits after that gap, the packets of one page
+    /// follow one another, and a final page whose granule trims its end follows the one before.
+    #[test]
+    fn audio_packets_keep_their_place_across_a_gap() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let packet: &[u8] = &[0xf8, 0, 0];
+        for (granule, packets) in [(960, 1), (1_920, 1), (50_880, 1), (52_800, 2), (53_000, 1)] {
+            writer.write_all(&ogg_page(granule, &vec![packet; packets])).unwrap();
+        }
+        drop(writer);
+        let (tx, rx) = bounded::<Tap>(16);
+        audio_thread(ogg::PageReader::new(reader), tx, RecShared::new(), Arc::new(AtomicBool::new(false)));
+        let dts: Vec<u64> = rx.try_iter().map(|t| match t {
+            Tap::Audio(_, dts) => dts,
+            _ => unreachable!(),
+        }).collect();
+        assert_eq!(dts.iter().map(|d| d - dts[0]).collect::<Vec<_>>(), [0, 960, 49_920, 50_880, 51_840, 52_800]);
+    }
 }
