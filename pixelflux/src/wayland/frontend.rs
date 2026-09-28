@@ -159,7 +159,7 @@ use crate::encoders::overlay::OverlayState;
 use crate::encoders::FrameEncoder;
 use crate::{RustCaptureSettings, StripeState};
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 static SERIAL_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -491,9 +491,9 @@ pub type ScreenshotRequest = (u32, std::sync::mpsc::Sender<Result<Vec<u8>, Strin
 /// 3. **Keyframes** (`pending_force_idr`): set by an IDR request (client reconnect / decoder reset)
 ///    and consumed once on the next captured frame to force an immediate keyframe.
 ///
-/// 4. **Clipboard** (`pending_clipboard_read`): stages the mimes chosen in `new_selection`; the loop
-///    drains them only after the dispatch that stores the new client source, so the read targets the
-///    new selection rather than the previous one.
+/// 4. **Clipboard** (`pending_clipboard_read`): stages the mimes chosen in `new_selection`, or a
+///    cleared selection; the loop drains them only after the dispatch that stores the new client
+///    source, so the read targets the new selection rather than the previous one.
 ///
 /// 5. **GPU selection** (`auto_gpu_selected`): records that automatic (not explicit) selection
 ///    picked `render_node_path`, so `StartCapture` aims the encoder at that same node unless a
@@ -547,8 +547,12 @@ pub struct AppState {
     /// Cursor delivery jobs to the `wl-cursor` worker (PNG encode + Python call off-thread).
     pub cursor_tx: std::sync::mpsc::Sender<CursorJob>,
     pub clipboard_callback: Option<Py<PyAny>>,
-    /// The mimes of the current client selection staged for one read, delivered together.
-    pub pending_clipboard_read: Vec<String>,
+    /// The mimes of the current client selection staged for one read, delivered together; an
+    /// empty list stages the report of a selection a client cleared.
+    pub pending_clipboard_read: Option<Vec<String>>,
+    /// Bumped by every staged delivery. A reader thread hands its entries over only while its
+    /// delivery is still the newest, so a slow source cannot land after a later copy or clear.
+    pub clipboard_generation: Arc<AtomicU64>,
     /// The mimes chosen from the current CLIENT-owned clipboard selection, recorded even while
     /// no callback is registered so `SetClipboardCallback` can re-stage a read of a copy made
     /// in the gap; empty when the selection is cleared or compositor-owned.
@@ -1344,8 +1348,9 @@ impl AppState {
         true
     }
 
-    /// Drain the clipboard read staged by `new_selection` and hand its `(mime, bytes)` entries,
-    /// the flavors of one copy, to the Python callback off-thread.
+    /// Drain the clipboard delivery staged by `new_selection` and hand its `(mime, bytes)`
+    /// entries, the flavors of one copy, to the Python callback off-thread; a cleared selection
+    /// is handed over as no entries.
     ///
     /// Runs from the loop *after* the dispatch that stored the new client source, so the requests
     /// target the current selection rather than the previous one. It clones the callback, opens a
@@ -1355,10 +1360,14 @@ impl AppState {
     /// only bounds INACTIVITY — a producer that keeps bytes flowing may take as long as it needs
     /// (a large transfer from a slow source still delivers), while one that goes silent for 10 s
     /// without closing its fd is dropped so each clipboard change cannot leak a pinned thread +
-    /// pipe. The `PY_SHUTDOWN` checks keep this off a shutting-down interpreter.
+    /// pipe. Deliveries leave in the order they were staged: one that a later copy or clear
+    /// overtook is dropped (`clipboard_generation`). The `PY_SHUTDOWN` checks keep this off a
+    /// shutting-down interpreter.
     pub(crate) fn process_pending_clipboard_read(&mut self) {
-        let mimes = std::mem::take(&mut self.pending_clipboard_read);
-        if mimes.is_empty() || crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        let Some(mimes) = self.pending_clipboard_read.take() else {
+            return;
+        };
+        if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
             return;
         }
         let Some(cb) = self
@@ -1368,6 +1377,7 @@ impl AppState {
         else {
             return;
         };
+        let cleared = mimes.is_empty();
         let mut pipes = Vec::new();
         for mime in mimes {
             let Ok((reader, writer)) = std::io::pipe() else { continue };
@@ -1377,18 +1387,23 @@ impl AppState {
                 pipes.push((mime, reader));
             }
         }
-        if pipes.is_empty() {
+        if pipes.is_empty() && !cleared {
             return;
         }
+        let generations = self.clipboard_generation.clone();
+        let generation = generations.fetch_add(1, Ordering::Relaxed) + 1;
         std::thread::spawn(move || {
             let entries: Vec<(String, Vec<u8>)> = pipes
                 .into_iter()
                 .filter_map(|(mime, reader)| read_selection(reader).map(|bytes| (mime, bytes)))
                 .collect();
-            if entries.is_empty() || crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            if (entries.is_empty() && !cleared) || crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
                 return;
             }
             Python::attach(|py| {
+                if generations.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 let entries: Vec<(String, Bound<'_, PyBytes>)> =
                     entries.iter().map(|(mime, bytes)| (mime.clone(), PyBytes::new(py, bytes))).collect();
                 let _ = cb.call1(py, (entries,));
@@ -1669,6 +1684,35 @@ const CLIPBOARD_IMAGE_MIMES: &[&str] =
     &["image/png", "image/jpeg", "image/webp", "image/bmp", "image/svg+xml", "image/svg"];
 const CLIPBOARD_TEXT_MIMES: &[&str] =
     &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
+/// The flavor a password manager offers beside a secret it copies (KeePassXC and KDE set it to
+/// `secret`), in KDE's spelling and the prefixed ones a toolkit that validates mime types can
+/// see. It is read with the copy it marks, so the consumer can keep the secret out of every
+/// history it would otherwise enter.
+const CLIPBOARD_SECRET_HINTS: &[&str] = &[
+    "x-kde-passwordManagerHint",
+    "text/x-kde-passwordManagerHint",
+    "application/x-kde-passwordManagerHint",
+];
+
+/// The flavors of a client's copy the bridge reads, from the mimes its source offers: the
+/// picture, else the markup and the plain text, and a password manager's hint beside either.
+/// None for a copy offering nothing the bridge reads, which then reads like a cleared one.
+fn clipboard_flavors(offered: &[String]) -> Vec<String> {
+    let has = |want: &str| offered.iter().any(|m| m == want);
+    match CLIPBOARD_IMAGE_MIMES.iter().find(|m| has(m)) {
+        Some(image) => vec![*image],
+        None => ["text/html"]
+            .iter()
+            .filter(|m| has(m))
+            .chain(CLIPBOARD_TEXT_MIMES.iter().find(|m| has(m)))
+            .copied()
+            .collect(),
+    }
+    .into_iter()
+    .chain(CLIPBOARD_SECRET_HINTS.iter().copied().filter(|m| has(m)))
+    .map(str::to_string)
+    .collect()
+}
 
 /// One staged clipboard flavor read to its end: the source's bytes, or nothing for a source
 /// that wrote none or went silent.
@@ -1718,14 +1762,14 @@ fn read_selection(reader: std::io::PipeReader) -> Option<Vec<u8>> {
 impl SelectionHandler for AppState {
     type SelectionUserData = std::sync::Arc<Vec<(String, Vec<u8>)>>;
 
-    /// A client took the clipboard: pick the flavors to read and stage them for the loop.
+    /// A client took the clipboard, or cleared it: pick the flavors to read and stage them for
+    /// the loop.
     ///
-    /// Only client-owned clipboard (not primary) selections are relayed to Python. Among the
-    /// source's offered mimes it chooses the picture, else the markup and the plain text
-    /// (`CLIPBOARD_IMAGE_MIMES`, `CLIPBOARD_TEXT_MIMES`), and records them in
-    /// `pending_clipboard_read`. The read itself is deferred: the new source is stored only
-    /// after this handler returns, so `process_pending_clipboard_read` runs post-dispatch and
-    /// reads the new selection rather than the previous one.
+    /// Only client-owned clipboard (not primary) selections are relayed to Python. The source's
+    /// flavors (`clipboard_flavors`) are recorded in `pending_clipboard_read`, and a cleared
+    /// selection as no flavors. The read itself is deferred: the new source is stored only after
+    /// this handler returns, so `process_pending_clipboard_read` runs post-dispatch and reads the
+    /// new selection rather than the previous one.
     fn new_selection(
         &mut self,
         ty: SelectionTarget,
@@ -1735,31 +1779,17 @@ impl SelectionHandler for AppState {
         if ty != SelectionTarget::Clipboard {
             return;
         }
-        let Some(source) = source else {
-            self.current_selection_mimes.clear();
-            return;
-        };
-        let mimes = source.mime_types();
-        let offered = |want: &str| mimes.iter().any(|m| m == want);
-        let chosen: Vec<String> = match CLIPBOARD_IMAGE_MIMES.iter().find(|m| offered(m)) {
-            Some(image) => vec![image.to_string()],
-            None => ["text/html"]
-                .iter()
-                .filter(|m| offered(m))
-                .chain(CLIPBOARD_TEXT_MIMES.iter().find(|m| offered(m)))
-                .map(|s| s.to_string())
-                .collect(),
-        };
+        let chosen = source.map_or_else(Vec::new, |source| clipboard_flavors(&source.mime_types()));
         // Recorded even with no callback armed, so SetClipboardCallback can re-stage a
         // read of a copy made while nobody was listening.
         self.current_selection_mimes = chosen.clone();
-        if crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
             return;
         }
         if self.clipboard_callback.is_none() {
             return;
         }
-        self.pending_clipboard_read = chosen;
+        self.pending_clipboard_read = Some(chosen);
         let _ = seat;
     }
 
@@ -2988,5 +3018,38 @@ mod stride_tests {
     #[test]
     fn truncated_buffer_keeps_full_row() {
         assert_eq!(rgba_readback_stride(10, 5, 64), 64 * 4);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_flavor_tests {
+    use super::{clipboard_flavors, CLIPBOARD_SECRET_HINTS};
+
+    fn offer(mimes: &[&str]) -> Vec<String> {
+        clipboard_flavors(&mimes.iter().map(|m| m.to_string()).collect::<Vec<_>>())
+    }
+
+    /// A password manager's copy is read with its hint, whichever spelling it offers.
+    #[test]
+    fn a_secret_copy_is_read_with_its_hint() {
+        for hint in CLIPBOARD_SECRET_HINTS {
+            assert_eq!(
+                offer(&["TEXT", "text/plain", "text/plain;charset=utf-8", hint]),
+                vec!["text/plain;charset=utf-8".to_string(), hint.to_string()]
+            );
+        }
+    }
+
+    /// An ordinary copy reads as before: the picture alone, or the markup and the text.
+    #[test]
+    fn an_ordinary_copy_reads_as_before() {
+        assert_eq!(offer(&["text/plain", "image/png"]), vec!["image/png"]);
+        assert_eq!(offer(&["UTF8_STRING", "text/html"]), vec!["text/html", "UTF8_STRING"]);
+    }
+
+    /// A copy offering nothing the bridge reads stages no flavors, like a cleared selection.
+    #[test]
+    fn an_unreadable_copy_stages_nothing() {
+        assert!(offer(&["application/x-private"]).is_empty());
     }
 }

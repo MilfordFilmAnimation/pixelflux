@@ -4733,7 +4733,8 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
             RustCaptureSettings::default().cursor_size_cap,
         ),
         clipboard_callback: None,
-        pending_clipboard_read: Vec::new(),
+        pending_clipboard_read: None,
+        clipboard_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_selection_mimes: Vec::new(),
         last_log_time: Instant::now(),
         start_time: Instant::now(),
@@ -5026,8 +5027,10 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     state.clipboard_callback = Some(cb);
                     // Re-stage a read of the CURRENT selection so a copy made before this
                     // callback was (re)armed is delivered rather than lost; the post-dispatch
-                    // drain performs the read (a compositor-owned selection is skipped there).
-                    state.pending_clipboard_read = state.current_selection_mimes.clone();
+                    // drain performs the read. An empty or compositor-owned selection stages
+                    // nothing, since there is no copy to deliver.
+                    state.pending_clipboard_read = (!state.current_selection_mimes.is_empty())
+                        .then(|| state.current_selection_mimes.clone());
                 }
                 ThreadCommand::SetClipboard { entries } => {
                     // Every text alias is offered once, for the first text entry.
@@ -6037,7 +6040,9 @@ impl WaylandBackend {
     }
 
     /// cb(entries: list[tuple[str, bytes]]) fires when a client app copies to the clipboard,
-    /// with the flavors of the copy: the picture, or the markup and the text beneath it.
+    /// with the flavors of the copy: the picture, or the markup and the text beneath it, and a
+    /// password manager's hint beside a secret; a client clearing the clipboard fires it with
+    /// no entries.
     fn set_clipboard_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
         self.send(ThreadCommand::SetClipboardCallback(callback))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to set clipboard callback: {}", e)))?;
@@ -7725,7 +7730,9 @@ impl ScreenCapture {
             .map_or(Ok(String::new()), |be| be.bind(py).borrow().get_xkb_keymap_string(py))
     }
     /// cb(entries: list[tuple[str, bytes]]) fires when a client app copies to the clipboard,
-    /// with the flavors of the copy: the picture, or the markup and the text beneath it.
+    /// with the flavors of the copy: the picture, or the markup and the text beneath it, and a
+    /// password manager's hint beside a secret; a client clearing the clipboard fires it with
+    /// no entries.
     fn set_clipboard_callback(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<()> {
         match wayland_backend_running(py) {
             Some(be) => be.bind(py).borrow().set_clipboard_callback(callback),
