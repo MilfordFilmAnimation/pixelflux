@@ -13,6 +13,7 @@
 use crate::encoders::software::{encode_cpu, invalidate_reference, EncodedStripe, StripeState};
 use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use crate::RustCaptureSettings;
+use smithay::utils::{Physical, Rectangle};
 use std::sync::Arc;
 
 /// How much of a frame changed since the frame before it, as far as its capture can tell.
@@ -428,28 +429,94 @@ fn decide_constant_quality(
 /// change it is.
 const DAMAGE_BAND_ROWS: usize = 32;
 
-/// The damage of a host frame (`stride` bytes per row, `height` rows) against the one before
-/// it, read from a content hash per band of `DAMAGE_BAND_ROWS` rows (`StripeState::content_dirty`,
-/// one state per band in `bands`, with its damage blocks) as the fraction of bands that changed.
-/// The bands hash on the rayon pool once there are enough of them to pay for it.
-fn hash_damage(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height: usize, threshold: u32, duration: i32) -> Damage {
-    use rayon::prelude::*;
+/// Which bands of `DAMAGE_BAND_ROWS` rows of a host frame (`stride` bytes per row, `height` rows)
+/// changed against the frame before, read from a content hash per band
+/// (`StripeState::content_dirty`, one state per band in `bands`, with its damage blocks). The
+/// bands hash in turn on the calling thread: a band takes tens of microseconds, less than waking
+/// the rayon pool for it costs, which on a many-core host spent several times the hash in CPU
+/// and added milliseconds waiting on the slowest worker.
+fn hash_bands(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height: usize, threshold: u32, duration: i32) -> Vec<bool> {
     let n = height.div_ceil(DAMAGE_BAND_ROWS).max(1);
     if bands.len() != n {
         bands.clear();
         bands.resize_with(n, StripeState::default);
     }
-    let band_dirty = |(i, band): (usize, &mut StripeState)| {
-        let end = ((i + 1) * DAMAGE_BAND_ROWS).min(height) * stride;
-        let bytes = &pixels[(i * DAMAGE_BAND_ROWS * stride).min(pixels.len())..end.min(pixels.len())];
-        band.content_dirty(bytes, threshold, duration) as usize
-    };
-    let changed: usize = if n >= 8 {
-        bands.par_iter_mut().enumerate().map(band_dirty).sum()
+    bands
+        .iter_mut()
+        .enumerate()
+        .map(|(i, band)| {
+            let end = ((i + 1) * DAMAGE_BAND_ROWS).min(height) * stride;
+            let bytes = &pixels[(i * DAMAGE_BAND_ROWS * stride).min(pixels.len())..end.min(pixels.len())];
+            band.content_dirty(bytes, threshold, duration)
+        })
+        .collect()
+}
+
+/// The damage a band hash (`hash_bands`) reads: the fraction of the bands that changed. No bands
+/// read yet, before a capture's first hash, is all new.
+fn band_damage(dirty: &[bool]) -> Damage {
+    let changed = dirty.iter().filter(|&&d| d).count();
+    if dirty.is_empty() {
+        Damage::Area(1.0)
+    } else if changed == 0 {
+        Damage::None
     } else {
-        bands.iter_mut().enumerate().map(band_dirty).sum()
-    };
-    if changed == 0 { Damage::None } else { Damage::Area(changed as f32 / n as f32) }
+        Damage::Area(changed as f32 / dirty.len() as f32)
+    }
+}
+
+/// The damage of a host frame against the one before it, from its band hash (`hash_bands`).
+fn hash_damage(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height: usize, threshold: u32, duration: i32) -> Damage {
+    band_damage(&hash_bands(bands, pixels, stride, height, threshold, duration))
+}
+
+/// The rows a band hash (`hash_bands`) found changed in a `width` x `height` frame, as
+/// full-width rectangles, one per run of changed bands: the striped path's dirty map. No bands
+/// read yet is the whole frame.
+fn band_rects(dirty: &[bool], width: i32, height: i32) -> Vec<Rectangle<i32, Physical>> {
+    if dirty.is_empty() {
+        return vec![Rectangle::new((0, 0).into(), (width, height).into())];
+    }
+    let mut rects = Vec::new();
+    let mut run = None;
+    for (i, &changed) in dirty.iter().chain(std::iter::once(&false)).enumerate() {
+        match (changed, run) {
+            (true, None) => run = Some(i),
+            (false, Some(first)) => {
+                let top = (first * DAMAGE_BAND_ROWS) as i32;
+                let bottom = ((i * DAMAGE_BAND_ROWS) as i32).min(height);
+                rects.push(Rectangle::new((0, top).into(), (width, bottom - top).into()));
+                run = None;
+            }
+            _ => {}
+        }
+    }
+    rects
+}
+
+/// Run `encode` on this thread while a thread of its own hashes the frame's bands (`hash_bands`),
+/// and return what `encode` returned with the bands that changed: a Turbo frame's hash kept off
+/// its encode's path. A scoped thread per frame rather than the rayon pool, whose idle workers
+/// spin after every wake; where no thread starts, the hash runs here after the encode.
+#[allow(clippy::too_many_arguments)]
+fn hash_beside<R>(
+    bands: &mut Vec<StripeState>,
+    pixels: &[u8],
+    stride: usize,
+    height: usize,
+    threshold: u32,
+    duration: i32,
+    encode: impl FnOnce() -> R,
+) -> (R, Vec<bool>) {
+    let (out, hashed) = std::thread::scope(|s| {
+        let hashing = std::thread::Builder::new()
+            .name("pxf-x11-hash".into())
+            .spawn_scoped(s, || hash_bands(bands, pixels, stride, height, threshold, duration));
+        let out = encode();
+        (out, hashing.ok().map(|h| h.join().unwrap_or_default()))
+    });
+    let dirty = hashed.unwrap_or_else(|| hash_bands(bands, pixels, stride, height, threshold, duration));
+    (out, dirty)
 }
 
 /// Everything the X11 host-ARGB path has to remember between frames.
@@ -473,6 +540,9 @@ pub struct X11Pipeline {
     hw_state: StripeState,
     /// The content hashes of a full-frame session, one per band of `DAMAGE_BAND_ROWS` rows.
     bands: Vec<StripeState>,
+    /// The bands the content hash found changed in the frame before this one, which a Turbo
+    /// frame reads (`process`); empty until the first hash.
+    turbo_dirty: Vec<bool>,
     frame_counter: u16,
     pending_force_idr: bool,
     /// Consecutive hardware encode failures and whether this pipeline already spent its one
@@ -496,6 +566,7 @@ impl X11Pipeline {
             hw,
             hw_state: StripeState::default(),
             bands: Vec::new(),
+            turbo_dirty: Vec::new(),
             frame_counter: 0,
             pending_force_idr: false,
             hw_error_streak: 0,
@@ -647,6 +718,7 @@ impl X11Pipeline {
         self.settings.codec = codec;
         self.stripes.clear();
         self.hw_state = StripeState::default();
+        self.turbo_dirty.clear();
         true
     }
 
@@ -680,6 +752,14 @@ impl X11Pipeline {
 
     /// Encode one host-ARGB frame and return the encoded stripes.
     ///
+    /// Damage is read from the content hash (`hash_bands`). Without Turbo the hash decides whether
+    /// a frame (or a stripe) is sent, so it runs first. Turbo sends every video frame, and only
+    /// its cleanup reads the damage, so there the frame's hash runs beside its encode
+    /// (`hash_beside`) and the cleanup reads the frame before's (`turbo_dirty`; the striped path
+    /// as the rows it maps onto its stripes): the hash, a millisecond and a half at 1080p and six
+    /// at 4K, stays off the path to the client. With the paint-over off nothing reads it, and
+    /// Turbo hashes nothing.
+    ///
     /// # Arguments
     ///
     /// * `argb` - Packed BGRA pixel buffer (B,G,R,A byte order, `stride` bytes per row).
@@ -696,7 +776,12 @@ impl X11Pipeline {
         let duration = self.settings.damage_block_duration as i32;
 
         let out = if self.hw.is_some() {
-            let damage = hash_damage(&mut self.bands, argb, stride, height as usize, threshold, duration);
+            let turbo = self.settings.video_streaming_mode;
+            let damage = if turbo {
+                band_damage(&self.turbo_dirty)
+            } else {
+                hash_damage(&mut self.bands, argb, stride, height as usize, threshold, duration)
+            };
             let quality = EncoderQuality::of(self.hw.as_ref().unwrap());
             let d = decide_hw_fullframe(
                 &mut self.hw_state,
@@ -714,10 +799,18 @@ impl X11Pipeline {
                 if let Some(q) = d.hold_qp {
                     enc.hold_quantizer(q);
                 }
-                let res = if d.send {
+                let mut encode = || if d.send {
                     enc.encode_host(argb, stride, false, fc, d.target_qp, force_idr)
                 } else {
                     enc.push_held(fc)
+                };
+                let res = if turbo && self.settings.use_paint_over_quality {
+                    let (res, dirty) = hash_beside(&mut self.bands, argb, stride, height as usize, threshold, duration, encode);
+                    self.turbo_dirty = dirty;
+                    res
+                } else {
+                    self.turbo_dirty.clear();
+                    encode()
                 };
                 match res {
                     Ok(data) if !data.is_empty() => {
@@ -767,19 +860,33 @@ impl X11Pipeline {
             let force_idr_all = requested
                 || (self.settings.codec.is_video()
                     && periodic_idr_due(&self.settings, self.frame_counter));
-            encode_cpu(
-                &mut self.stripes,
-                &mut self.stripes_carrying,
-                argb,
-                width,
-                height,
-                &[],
-                &self.settings,
-                self.frame_counter,
-                false,
-                true,
-                force_idr_all,
-            )
+            if self.settings.codec.is_video() && self.settings.video_streaming_mode {
+                let rects = band_rects(&self.turbo_dirty, width, height);
+                let (stripes, carrying, settings) = (&mut self.stripes, &mut self.stripes_carrying, &self.settings);
+                let mut encode = || encode_cpu(stripes, carrying, argb, width, height, &rects, settings, self.frame_counter, false, false, force_idr_all);
+                if self.settings.use_paint_over_quality {
+                    let (out, dirty) = hash_beside(&mut self.bands, argb, stride, height as usize, threshold, duration, encode);
+                    self.turbo_dirty = dirty;
+                    out
+                } else {
+                    self.turbo_dirty.clear();
+                    encode()
+                }
+            } else {
+                encode_cpu(
+                    &mut self.stripes,
+                    &mut self.stripes_carrying,
+                    argb,
+                    width,
+                    height,
+                    &[],
+                    &self.settings,
+                    self.frame_counter,
+                    false,
+                    true,
+                    force_idr_all,
+                )
+            }
         };
 
         // An unserved request stays armed: on an infinite GOP an IDR lost to an encode
@@ -1412,6 +1519,18 @@ mod tests {
         caret[w * 4 * (DAMAGE_BAND_ROWS + 1)] = 0;
         let n = h.div_ceil(DAMAGE_BAND_ROWS);
         assert_eq!(hash_damage(&mut bands, &caret, w * 4, h, 10, 20), Damage::Area(1.0 / n as f32), "one band of {n}");
+    }
+
+    /// The rows a band hash found changed map onto full-width rectangles, one per run of bands,
+    /// the last clipped to the frame; before any hash the whole frame is dirty.
+    #[test]
+    fn band_rects_cover_the_runs_of_changed_bands() {
+        let r = |y: i32, h: i32| Rectangle::new((0, y).into(), (64, h).into());
+        assert_eq!(band_rects(&[], 64, 100), vec![r(0, 100)]);
+        assert_eq!(band_rects(&[false, false, false, false], 64, 100), vec![]);
+        assert_eq!(band_rects(&[true, true, false, true], 64, 100), vec![r(0, 64), r(96, 4)]);
+        assert_eq!(band_damage(&[true, true, false, true]), Damage::Area(0.75));
+        assert_eq!(band_damage(&[]), Damage::Area(1.0));
     }
 }
 
