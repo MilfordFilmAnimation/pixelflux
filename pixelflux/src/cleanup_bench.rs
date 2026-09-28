@@ -423,7 +423,7 @@ impl Session {
             }
             Session::Frame(enc) => {
                 if let Some(q) = held {
-                    enc.hold_quantizer(q);
+                    enc.hold_quantizer(q, None);
                 }
                 let out = enc.encode_host(bgra, w * 4, false, n, crf, key).expect("encode");
                 if out.is_empty() {

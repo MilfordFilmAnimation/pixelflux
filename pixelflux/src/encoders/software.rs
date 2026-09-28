@@ -662,7 +662,9 @@ impl H264EncoderWrapper {
 ///   the paint-over quality from a cleanup until the region changes again; `rc_bytes` (the bytes
 ///   of the stripe's last frame under its rate control) and `idle_frames` (a constant-rate
 ///   cleanup's run of small frames short of the paint-over quality) tell a cleanup that runs
-///   through the rate control when it has converged or stalled.
+///   through the rate control when it has converged or stalled, and `sweep` (the next band's
+///   start and the last band's size, as shares of the picture) carries the band sweep a
+///   full-frame refresh falls back to (`pipeline::decide_hw_fullframe`).
 /// - **Content-hash damage** (only for sources without external damage, i.e. X11): `last_hash` is
 ///   the previous frame's content hash, `consecutive_changes` counts changed frames toward the
 ///   damage-block threshold, and `in_damage_block` / `damage_block_frames_remaining` drive the
@@ -679,6 +681,7 @@ pub struct StripeState {
     pub clean_quality: bool,
     pub rc_bytes: usize,
     pub idle_frames: u32,
+    pub sweep: Option<(f64, f64)>,
     #[cfg(feature = "gpl")]
     pub h264_encoder: Option<H264EncoderWrapper>,
     #[cfg(not(feature = "gpl"))]
@@ -971,7 +974,7 @@ pub fn encode_cpu(
         if !codec.is_video() {
             return settings.use_paint_over_quality && settings.paint_over_jpeg_quality > settings.jpeg_quality;
         }
-        crate::pipeline::paint_over_improves(settings, crate::pipeline::EncoderQuality { last: coded_quality(st), bytes: None, holds, reopens: false })
+        crate::pipeline::paint_over_improves(settings, crate::pipeline::EncoderQuality { last: coded_quality(st), bytes: None, holds, reopens: false, band: None })
     };
     let trigger_frames = settings.paint_over_trigger_frames;
     let idle_candidate = damage_rects.is_empty()
@@ -1113,7 +1116,7 @@ pub fn encode_cpu(
             let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
             let mut force_idr = video && (force_idr_all || cleanup == Cleanup::Key);
             let mut hold = None;
-            let quality = crate::pipeline::EncoderQuality { last: coded_quality(stripe_state), bytes: None, holds, reopens: false };
+            let quality = crate::pipeline::EncoderQuality { last: coded_quality(stripe_state), bytes: None, holds, reopens: false, band: None };
             let refresh_crf = crate::pipeline::held_refresh_quality(settings, quality) as i32;
             if cleanup != Cleanup::None {
                 if !video {

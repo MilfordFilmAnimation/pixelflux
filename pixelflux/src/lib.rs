@@ -1334,7 +1334,7 @@ fn wayland_encode_loop(pool: &WlFramePool, cfg: WlEncodeConfig) -> Option<FrameE
                 let w = width as u32;
                 let force_idr = decision.force_idr;
                 if let Some(q) = decision.hold_qp {
-                    encoder.hold_quantizer(q);
+                    encoder.hold_quantizer(q, decision.hold_band);
                 }
                 // The readback rows go to the encoder as they are — BGRA from the pixman
                 // framebuffer or a host frame, RGBA from a GLES readback: a hardware session
@@ -3658,7 +3658,7 @@ fn render_node_tick(
                         .or_else(|| node.offscreen_buffer.as_ref().map(|(_, d)| d.clone()));
                     let encode_start_ns = wayland::host::now_ns();
                     if let Some(q) = decision.hold_qp {
-                        encoder.hold_quantizer(q);
+                        encoder.hold_quantizer(q, decision.hold_band);
                     }
                     let result = match enc_dmabuf {
                         Some(ref dmabuf) => {

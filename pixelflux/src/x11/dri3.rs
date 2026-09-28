@@ -925,7 +925,7 @@ where
             let grabbed_ns = crate::wayland::host::now_ns();
             let dmabuf = gpu.buffers[idx].dmabuf.clone();
             if let Some(q) = decision.hold_qp {
-                gpu.enc().hold_quantizer(q);
+                gpu.enc().hold_quantizer(q, decision.hold_band);
             }
             let result = gpu.enc().encode_dmabuf(&dmabuf, frame_counter as u64, decision.target_qp, decision.force_idr);
             match result {

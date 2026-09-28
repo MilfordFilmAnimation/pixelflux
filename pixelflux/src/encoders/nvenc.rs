@@ -710,6 +710,19 @@ fn set_cbr_rate(rc: &mut NV_ENC_RC_PARAMS, bps: u32, vbv: u32) {
     rc.vbvInitialDelay = vbv;
 }
 
+/// Fill `map`, the QP delta map of a `width` x `height` picture of `codec` (one entry a 16x16
+/// macroblock for H.264, a 32x32 coding tree block for HEVC, in raster order), with `delta` over
+/// the blocks the share of the picture `from..to` covers, rounded outward, and 0 elsewhere.
+fn fill_band_map(map: &mut Vec<i8>, codec: Codec, width: u32, height: u32, (from, to): (f64, f64), delta: i32) {
+    let block = if codec == Codec::H264 { 16 } else { 32 };
+    let blocks = (width.div_ceil(block) * height.div_ceil(block)) as usize;
+    let first = ((from.clamp(0.0, 1.0) * blocks as f64).floor() as usize).min(blocks);
+    let last = ((to.clamp(0.0, 1.0) * blocks as f64).ceil() as usize).clamp(first, blocks);
+    map.clear();
+    map.resize(blocks, 0);
+    map[first..last].fill(delta.clamp(-51, 0) as i8);
+}
+
 /// The driver's message for the last failure on `session`, or a stand-in when it has none: NVENC
 /// clears the string once a session is torn down, so it is only meaningful read straight after
 /// the call that failed.
@@ -1196,9 +1209,14 @@ pub struct NvencEncoder {
     height: u32,
     current_qp: u32,
     /// The quality index the next frame is held at whatever the rate control
-    /// (`hold_quantizer`), and whether the driver has refused one, said once.
+    /// (`hold_quantizer`), the band of it that quantizer covers, and whether the driver has
+    /// refused one, said once.
     held_qp: Option<u32>,
+    held_band: Option<(f64, f64)>,
     hold_refused: bool,
+    /// Bytes of the last held frame, and the QP delta map a held band is coded through.
+    held_bytes: usize,
+    qp_map: Vec<i8>,
     /// The quality index the rate control last coded a frame at (held frames aside), from the
     /// driver's average quantizer.
     last_quality: Option<u32>,
@@ -2019,7 +2037,10 @@ impl NvencEncoder {
                 height,
                 current_qp: codec.nvenc_quantizer(settings.video_crf),
                 held_qp: None,
+                held_band: None,
                 hold_refused: false,
+                held_bytes: 0,
+                qp_map: Vec::new(),
                 last_quality: None,
                 last_bytes: None,
                 encode_config: config,
@@ -2621,25 +2642,40 @@ impl NvencEncoder {
     /// the rate control, and leave the session's own rate control and quantizer as they were
     /// for the frame after: the cleanup of a still screen. A held key frame of a constant-rate
     /// session that comes out past `HELD_KEY_BUDGET_S` of the target is coded again, as a key
-    /// frame, at the coarser quantizer `held_key_retry` picks.
-    pub fn hold_quantizer(&mut self, crf: u32) {
+    /// frame, at the coarser quantizer `held_key_retry` picks. `band`, the share of the picture
+    /// from and to in raster order, confines `crf` to the blocks it covers (`band_size`), the rest
+    /// of the frame held at the coarsest quantizer: a still region is left as it is at any
+    /// quantizer, and a change the frame carries before its damage is known (X11 under Turbo
+    /// hashes a frame beside its encode) costs what the rate control's own frame would.
+    pub fn hold_quantizer(&mut self, crf: u32, band: Option<(f64, f64)>) {
         self.held_qp = Some(crf);
+        self.held_band = band.filter(|_| self.band_size().is_some());
     }
 
-    /// Put the session on constant quantizer `q` for the picture about to be submitted,
-    /// answering the rate control to restore once it is encoded; `None` where the session is
-    /// already there or the driver refused, which leaves the picture to the rate control.
+    /// The bytes of the last held frame (0 before one), where the session holds a band: H.264 and
+    /// HEVC, whose QP delta map is one entry a macroblock or a 32x32 coding tree block.
+    pub fn band_size(&self) -> Option<usize> {
+        matches!(self.codec, Codec::H264 | Codec::H265).then_some(self.held_bytes)
+    }
+
+    /// Put the session on constant quantizer `q` for the picture about to be submitted, `mapped`
+    /// with the picture's QP delta map on top (`fill_band_map`), answering the rate control to
+    /// restore once it is encoded; `None` where the session is already there or the driver
+    /// refused, which leaves the picture to the rate control.
     ///
     /// The rate-control mode is one of the parameters `nvEncReconfigureEncoder` takes without a
     /// reset, so a constant-rate session keeps its HRD state across the held picture instead of
     /// starting over after it.
-    unsafe fn hold_rate(&mut self, q: u32) -> Option<NV_ENC_RC_PARAMS> {
+    unsafe fn hold_rate(&mut self, q: u32, mapped: bool) -> Option<NV_ENC_RC_PARAMS> {
         let saved = self.encode_config.rcParams;
         let constant = saved.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP;
-        if constant && saved.constQP.qpIntra == q && saved.constQP.qpInterP == q {
+        if constant && !mapped && saved.constQP.qpIntra == q && saved.constQP.qpInterP == q {
             return None;
         }
         let rc = &mut self.encode_config.rcParams;
+        if mapped {
+            rc.qpMapMode = NV_ENC_QP_MAP_MODE::NV_ENC_QP_MAP_DELTA;
+        }
         rc.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CONSTQP;
         rc.constQP.qpInterP = q;
         rc.constQP.qpInterB = q;
@@ -2778,7 +2814,23 @@ impl NvencEncoder {
             }
         }
         let held_qp = self.held_qp.take();
-        let held = held_qp.and_then(|crf| self.hold_rate(self.codec.nvenc_quantizer(crf as i32)));
+        let band = self.held_band.take();
+        let held = held_qp.and_then(|crf| {
+            let q = self.codec.nvenc_quantizer(crf as i32);
+            let rest = self.codec.nvenc_quantizer(51);
+            match band {
+                Some(share) if rest > q => {
+                    fill_band_map(&mut self.qp_map, self.codec, self.width, self.height, share, q as i32 - rest as i32);
+                    let held = self.hold_rate(rest, true);
+                    if held.is_some() {
+                        pic_params.qpDeltaMap = self.qp_map.as_mut_ptr();
+                        pic_params.qpDeltaMapSize = self.qp_map.len() as u32;
+                    }
+                    held
+                }
+                _ => self.hold_rate(q, false),
+            }
+        });
         let mut result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, held_qp.is_some(), anchor);
         let retry = match (held_qp, held, &result) {
             (Some(crf), Some(rc), Ok(coded))
@@ -2790,7 +2842,7 @@ impl NvencEncoder {
             _ => None,
         };
         if let Some(coarser) = retry
-            && self.hold_rate(self.codec.nvenc_quantizer(coarser as i32)).is_some()
+            && self.hold_rate(self.codec.nvenc_quantizer(coarser as i32), false).is_some()
         {
             pic_params.inputTimeStamp = self.references.as_ref().map_or(0, ReferenceWindow::next_pts);
             result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, true, anchor);
@@ -2849,6 +2901,8 @@ impl NvencEncoder {
                 q => Some(q),
             };
             self.last_bytes = Some(data_size);
+        } else {
+            self.held_bytes = data_size;
         }
         let frame_type = match lock_params.pictureType {
             NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR => FRAME_KEY,
@@ -3533,6 +3587,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A band's share of the picture lands on the blocks it covers, rounded outward, so the bands
+    /// of a sweep leave no block between them, and nowhere else.
+    #[test]
+    fn a_band_covers_its_share_of_the_blocks() {
+        let mut map = Vec::new();
+        fill_band_map(&mut map, Codec::H264, 1920, 1080, (0.0, 1.0 / 64.0), -33);
+        assert_eq!(map.len(), 120 * 68);
+        assert_eq!(map.iter().filter(|&&d| d == -33).count(), 128);
+        assert!(map[..128].iter().all(|&d| d == -33) && map[128..].iter().all(|&d| d == 0));
+        fill_band_map(&mut map, Codec::H265, 1920, 1080, (0.5, 0.75), -80);
+        assert_eq!(map.len(), 60 * 34);
+        assert!(map[..1020].iter().all(|&d| d == 0) && map[1530..].iter().all(|&d| d == 0));
+        assert!(map[1020..1530].iter().all(|&d| d == -51), "the delta is bounded to the quantizer range");
+        let covered = |a: f64, b: f64| {
+            let mut m = Vec::new();
+            fill_band_map(&mut m, Codec::H264, 1280, 720, (a, b), -1);
+            m.iter().map(|&d| d != 0).collect::<Vec<bool>>()
+        };
+        let (x, y) = (covered(0.0, 0.3), covered(0.3, 1.0));
+        assert!(x.iter().zip(&y).all(|(a, b)| *a || *b), "adjacent bands leave no block out");
     }
 }
 

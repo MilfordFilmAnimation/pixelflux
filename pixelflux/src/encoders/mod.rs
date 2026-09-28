@@ -801,6 +801,16 @@ impl FrameEncoder {
         }
     }
 
+    /// The bytes of the last frame held at a quantizer (0 before one), where the session holds a
+    /// band of a frame at it (`hold_quantizer`): NVENC's H.264 and HEVC sessions, through a QP
+    /// delta map.
+    pub fn band_size(&self) -> Option<usize> {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.band_size(),
+            _ => None,
+        }
+    }
+
     /// Whether `hold_quantizer` holds a frame at the quantizer asked for under the session's rate
     /// control: NVENC, libvpx, and SVT-AV1 at a constant rate (where the release takes a new
     /// target with a picture) do; x265 and VA-API only at a constant quantizer (their
@@ -831,10 +841,12 @@ impl FrameEncoder {
     /// control, and leave the session's own rate control and quality as they were for the frame
     /// after: the cleanup of a still screen, where `holds_quantizer`. A session whose engine takes
     /// no quantizer from the caller (Tegra, a stateful V4L2 device) codes that frame under its own
-    /// rate control.
-    pub fn hold_quantizer(&mut self, crf: u32) {
+    /// rate control. `band`, the share of the picture from and to in raster order, confines the
+    /// quantizer to that band where `band_size` says the session holds one, the rest of the frame
+    /// held at the coarsest quantizer.
+    pub fn hold_quantizer(&mut self, crf: u32, band: Option<(f64, f64)>) {
         match self {
-            FrameEncoder::Nvenc(enc) => enc.hold_quantizer(crf),
+            FrameEncoder::Nvenc(enc) => enc.hold_quantizer(crf, band),
             FrameEncoder::Vaapi(enc) => enc.hold_quantizer(crf),
             FrameEncoder::Vpx(enc) => enc.hold_quantizer(crf),
             FrameEncoder::Hevc(enc) => enc.hold_quantizer(crf),

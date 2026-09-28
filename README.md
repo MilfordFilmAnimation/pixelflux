@@ -752,8 +752,9 @@ asked for.
         to the paint-over quality for them on every encoder that takes a quality from the caller.
         Under CBR, NVENC and software H.264 are cleaned up through their rate control: the frames
         keep flowing, each within its budget, until it codes the screen at the paint-over quality,
-        with no key frame, and NVENC holds one frame at that quality only where its rate control
-        stops short of it (a low rate for the resolution). Other encoders that hold a quantizer
+        with no key frame, and only where NVENC's rate control stops short of it (a low rate for
+        the resolution) does NVENC refresh the screen at that quality, a band of it a frame, each
+        within the budget (one held frame for AV1). Other encoders that hold a quantizer
         hold the cleanup frames at it; one that does not sends the refresh at the rate control's
         own quality, never a key frame. A screen that keeps changing only a little (a blinking
         caret) is cleaned up all the same.

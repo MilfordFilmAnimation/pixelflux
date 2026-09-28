@@ -1005,14 +1005,20 @@ where
             if frame.is_new { Damage::Unknown } else { Damage::None },
             false,
             pending_force_idr,
-            EncoderQuality { last: gpu.encoder.last_quality(), bytes: gpu.encoder.last_size(), holds: true, reopens: false },
+            EncoderQuality {
+                last: gpu.encoder.last_quality(),
+                bytes: gpu.encoder.last_size(),
+                holds: true,
+                reopens: false,
+                band: gpu.encoder.band_size(),
+            },
         );
         let mut delivered = false;
         if decision.send {
             let pitch = frame_pitch(frame.byte_size, frame.width, frame.height);
             let encode_start_ns = crate::wayland::host::now_ns();
             if let Some(q) = decision.hold_qp {
-                gpu.encoder.hold_quantizer(q);
+                gpu.encoder.hold_quantizer(q, decision.hold_band);
             }
             match gpu.encoder.encode_cuda_pitch(
                 frame.device_ptr,
