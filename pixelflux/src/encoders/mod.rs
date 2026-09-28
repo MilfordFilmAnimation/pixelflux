@@ -547,8 +547,20 @@ mod tests {
 
     /// A capture start takes what its node's probe settled rather than opening the backend
     /// again: node 99 has no render device, so it reads as NVENC's, which has no VP8 engine.
+    /// A device whose sessions other processes hold settles nothing, so the probe is asked
+    /// until it does before the capture starts.
     #[test]
     fn a_session_takes_the_answer_its_node_probe_settled() {
+        let settled = (0..300)
+            .find_map(|_| match probe_node(99) {
+                Err((_, e)) if e == nvenc::SESSIONS_TAKEN => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    None
+                }
+                Err((backend, e)) => Some(format!("{} VP8 did not open: {e}", backend.to_uppercase())),
+                Ok(_) => Some("render node 99 has no VP8 engine".to_string()),
+            })
+            .expect("the device had no NVENC session to spare for 30 s");
         let report = crate::report::StreamReport::new("x11");
         let _scope = crate::report::enter(&report);
         let mut settings = RustCaptureSettings {
@@ -560,10 +572,6 @@ mod tests {
         };
         let encoder = select_frame_encoder(&mut settings, FrameSource::Host { rgba: false }, None, "test");
         assert!(encoder.is_some_and(|enc| !enc.is_hardware()), "VP8 comes up in software");
-        let settled = match probe_node(99) {
-            Err((backend, e)) => format!("{} VP8 did not open: {e}", backend.to_uppercase()),
-            Ok(_) => "render node 99 has no VP8 engine".to_string(),
-        };
         assert_eq!(report.info().encoder_reason, settled);
     }
 
