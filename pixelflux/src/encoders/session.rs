@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 
+use super::frame_rate::FrameRate;
 use super::software::convert_to_yuv_mt;
 use super::{vbv_bits, QP_HYSTERESIS_LIMIT};
 use crate::RustCaptureSettings;
@@ -128,7 +129,7 @@ pub struct RateSettings {
     pub bitrate_kbps: i32,
     pub vbv_multiplier: f64,
     pub keyframe_interval_s: f64,
-    pub fps: i32,
+    pub fps: FrameRate,
     pub min_qp: i32,
     pub max_qp: i32,
 }
@@ -140,7 +141,7 @@ impl RateSettings {
             bitrate_kbps: settings.video_bitrate_kbps,
             vbv_multiplier: settings.video_vbv_multiplier,
             keyframe_interval_s: settings.keyframe_interval_s,
-            fps: (settings.target_fps.max(1.0)) as i32,
+            fps: FrameRate::of(settings.target_fps),
             min_qp: settings.video_min_qp,
             max_qp: settings.video_max_qp,
         }
@@ -161,7 +162,7 @@ impl RateSettings {
 
     /// The VBV buffer, in bits, the constant-rate target is held to.
     pub fn vbv(&self) -> u32 {
-        vbv_bits(self.bps().min(u32::MAX as u64) as u32, self.fps as f64, self.keyframe_interval_s, self.vbv_multiplier)
+        vbv_bits(self.bps().min(u32::MAX as u64) as u32, self.fps.fps(), self.keyframe_interval_s, self.vbv_multiplier)
     }
 }
 
@@ -229,7 +230,10 @@ mod tests {
         settings.video_bitrate_kbps = 8000;
         assert_eq!(rate.changed(&settings), None, "a bitrate moves nothing in constant-quality mode");
         settings.target_fps = 60.0;
-        assert_eq!(rate.changed(&settings).map(|r| r.fps), Some(60));
+        assert_eq!(rate.changed(&settings).map(|r| r.fps), Some(FrameRate { num: 60, den: 1 }));
+        let ntsc = RateSettings::new(&RustCaptureSettings { target_fps: 60000.0 / 1001.0, ..settings.clone() });
+        assert_eq!(ntsc.fps, FrameRate { num: 60000, den: 1001 });
+        assert!(ntsc.changed(&settings).is_some(), "60 fps moves a session at 59.94");
         settings.video_cbr_mode = true;
         let cbr = RateSettings::new(&settings);
         settings.video_bitrate_kbps = 9000;

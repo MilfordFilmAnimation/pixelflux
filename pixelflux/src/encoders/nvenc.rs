@@ -40,6 +40,7 @@ use super::codec::{
     av1_level, h264_dpb_frames, h264_level, h265_dpb_frames, h265_level, h265_tier, push_video_header,
     Codec, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, VIDEO_HEADER_LEN,
 };
+use super::frame_rate::FrameRate;
 use super::reference::{Invalidation, Reference, ReferenceWindow, ANCHORS};
 use super::sps::h264_frame_num_range;
 use crate::RustCaptureSettings;
@@ -1850,11 +1851,12 @@ impl NvencEncoder {
             config.rcParams.set_strictGOPTarget(1);
             config.rcParams.set_enableLookahead(0);
             config.rcParams.lookaheadDepth = 0;
+            let rate = FrameRate::of(settings.target_fps);
             let level = nvenc_level(
                 codec,
                 width,
                 height,
-                settings.target_fps as u32,
+                rate.ceil(),
                 config.rcParams.maxBitRate as u64,
                 tuning.hevc_high_tier,
             );
@@ -1886,8 +1888,8 @@ impl NvencEncoder {
                 encodeHeight: height,
                 darWidth: width,
                 darHeight: height,
-                frameRateNum: settings.target_fps.max(1.0) as u32,
-                frameRateDen: 1,
+                frameRateNum: rate.num,
+                frameRateDen: rate.den,
                 enablePTD: 1,
                 encodeConfig: &mut config,
                 maxEncodeWidth: nvenc_headroom(width, HEADROOM_WIDTH, caps_wmax),
@@ -2342,7 +2344,8 @@ impl NvencEncoder {
             self.omit_stripe_headers = settings.omit_stripe_headers;
             return Ok(false);
         }
-        let dpb = self.dpb_frames_at(new_w, new_h, settings.target_fps.max(1.0) as u32).min(self.dpb);
+        let rate = FrameRate::of(settings.target_fps);
+        let dpb = self.dpb_frames_at(new_w, new_h, rate.ceil()).min(self.dpb);
 
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
@@ -2388,7 +2391,7 @@ impl NvencEncoder {
                 self.encode_config.rcParams.constQP.qpIntra = qp;
                 self.current_qp = qp;
             }
-            self.set_level(new_w, new_h, settings.target_fps as u32);
+            self.set_level(new_w, new_h, rate.ceil());
             match self.codec {
                 Codec::H265 => self.encode_config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = dpb,
                 Codec::Av1 => self.encode_config.encodeCodecConfig.av1Config.maxNumRefFramesInDPB = dpb,
@@ -2398,8 +2401,8 @@ impl NvencEncoder {
             self.init_params.encodeHeight = new_h;
             self.init_params.darWidth = new_w;
             self.init_params.darHeight = new_h;
-            self.init_params.frameRateNum = (settings.target_fps.max(1.0)) as u32;
-            self.init_params.frameRateDen = 1;
+            self.init_params.frameRateNum = rate.num;
+            self.init_params.frameRateDen = rate.den;
             if self.reconfigure(true, true) != NVENCSTATUS::NV_ENC_SUCCESS {
                 (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
                 return Err("NvEncReconfigureEncoder rejected the resolution change".into());
@@ -2719,18 +2722,19 @@ impl NvencEncoder {
                 if rc.averageBitRate != bps || rc.maxBitRate != bps || rc.vbvBufferSize != vbv {
                     set_cbr_rate(rc, bps, vbv);
                     changed = true;
-                    let (w, h, fps) = (self.init_params.encodeWidth, self.init_params.encodeHeight, self.init_params.frameRateNum);
+                    let fps = self.init_params.frameRateNum.div_ceil(self.init_params.frameRateDen.max(1));
+                    let (w, h) = (self.init_params.encodeWidth, self.init_params.encodeHeight);
                     if self.level_for(w, h, fps) > self.declared_level() {
                         self.set_level(w, h, fps);
                         level_raised = true;
                     }
                 }
             }
-            let fps = (settings.target_fps.max(1.0)) as u32;
-            if self.init_params.frameRateNum != fps {
-                self.init_params.frameRateNum = fps;
-                self.init_params.frameRateDen = 1;
-                let (w, h) = (self.init_params.encodeWidth, self.init_params.encodeHeight);
+            let rate = FrameRate::of(settings.target_fps);
+            if (self.init_params.frameRateNum, self.init_params.frameRateDen) != (rate.num, rate.den) {
+                self.init_params.frameRateNum = rate.num;
+                self.init_params.frameRateDen = rate.den;
+                let (w, h, fps) = (self.init_params.encodeWidth, self.init_params.encodeHeight, rate.ceil());
                 if self.level_for(w, h, fps) > self.declared_level() {
                     self.set_level(w, h, fps);
                     level_raised = true;
@@ -4585,6 +4589,38 @@ mod gpu_tests {
             let at60 = kbit(&mut enc, 80..200);
             println!("{codec:?}: {at120:.1} kbit a frame at 120 fps, {at60:.1} at 60");
             assert!(at60 > 1.4 * at120, "{codec:?}: halving the frame rate left {at60:.1} kbit a frame against {at120:.1}");
+        }
+    }
+
+    /// On a real GPU, a session is opened at the capture's rate as the fraction it names, a live
+    /// change of rate reaches the driver the same way, and an H.264 stream declares the rate in
+    /// its timing. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_frame_rate_reaches_the_driver_as_its_fraction() {
+        let f = frame(640, 360, 30);
+        for codec in [Codec::H264, Codec::H265] {
+            for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
+                let fps = num as f64 / den as f64;
+                let mut s = settings(640, 360, fps);
+                s.codec = codec;
+                s.video_cbr_mode = true;
+                s.video_bitrate_kbps = 8000;
+                let mut enc = host_session(&s).unwrap_or_else(|e| panic!("{codec:?} at {num}/{den}: {e}"));
+                assert_eq!((enc.init_params.frameRateNum, enc.init_params.frameRateDen), (num, den), "{codec:?}");
+                let pkt = enc.encode_cpu_argb(&f, 640 * 4, 0, 25, true).expect("encode");
+                if codec == Codec::H264 {
+                    let (tick, scale) = crate::encoders::sps::h264_timing(&pkt[VIDEO_HEADER_LEN..]).expect("SPS timing");
+                    assert_eq!(scale as u64 * den as u64, 2 * num as u64 * tick as u64, "the SPS declares {scale}/2x{tick}, not {num}/{den}");
+                }
+                s.target_fps = 30.0;
+                assert!(enc.reconfigure_rate(&s), "{codec:?}: the driver refused 30 fps");
+                assert_eq!((enc.init_params.frameRateNum, enc.init_params.frameRateDen), (30, 1));
+                s.target_fps = fps;
+                assert!(enc.reconfigure_rate(&s), "{codec:?}: the driver refused {num}/{den}");
+                assert_eq!((enc.init_params.frameRateNum, enc.init_params.frameRateDen), (num, den), "{codec:?}");
+                enc.encode_cpu_argb(&f, 640 * 4, 1, 25, false).expect("encode after the change");
+            }
         }
     }
 

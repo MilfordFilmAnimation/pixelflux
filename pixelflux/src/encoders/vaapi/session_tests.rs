@@ -6,7 +6,7 @@ use super::mock::{self, Driver};
 use super::*;
 use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY};
 use crate::encoders::sps::fixtures::{assert_no_reorder, VCE_SPS};
-use crate::encoders::sps::{h264_frame_num_range, h264_max_num_ref_frames, h264_reorder, read_color, ColorSignal};
+use crate::encoders::sps::{h264_frame_num_range, h264_max_num_ref_frames, h264_reorder, h264_timing, read_color, ColorSignal};
 
 const W: i32 = 320;
 const H: i32 = 240;
@@ -126,6 +126,52 @@ fn every_codec_comes_up_and_asks_for_what_it_needs() {
             assert_eq!(d.contexts[0].1.len(), recon + 1, "{codec:?}: the encode context over the reconstruction and converted surfaces");
             assert_eq!(d.contexts[1].1.len(), 1, "the processing context over the converted surface");
         });
+    }
+}
+
+/// Every codec takes the capture's rate as the fraction it names: the frame-rate buffer packs
+/// it into its two 16-bit terms, the nearest fraction that fits where the NTSC one does not,
+/// and the H.264 and HEVC sequences declare it in their timing.
+#[test]
+fn the_frame_rate_reaches_every_codec_as_its_fraction() {
+    for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
+        let fps = num as f64 / den as f64;
+        let fit = FrameRate { num, den }.within(0xffff);
+        for codec in Codec::VIDEO {
+            mock::reset(Driver::generous());
+            let mut enc = open(codec, &RustCaptureSettings { target_fps: fps, ..settings(codec, true) })
+                .unwrap_or_else(|e| panic!("{codec:?}: {e}"));
+            encode(&mut enc, 0, true);
+            mock::with(|d| {
+                let (_, bytes) = d.last_misc().into_iter().find(|m| m.0 == VAEncMiscParameterTypeFrameRate).expect("a frame rate");
+                let fr: VAEncMiscParameterFrameRate = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                assert_eq!((fr.framerate & 0xffff, fr.framerate >> 16), (fit.num, fit.den), "{codec:?} at {num}/{den}");
+                let headers = || d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSequence).unwrap().1;
+                match codec {
+                    Codec::H264 => {
+                        let s: VAEncSequenceParameterBufferH264 = d.last_param(VAEncSequenceParameterBufferType).unwrap();
+                        assert_eq!((s.num_units_in_tick, s.time_scale), (den, 2 * num), "{num}/{den}");
+                        assert_eq!(h264_timing(&headers()), Some((den, 2 * num)), "{num}/{den}: the packed SPS");
+                    }
+                    Codec::H265 => {
+                        let vps = nal(&headers(), 32, true);
+                        let mut r = Reader { bytes: &vps, pos: 0 };
+                        for _ in 0..4 {
+                            r.u(32);
+                        }
+                        r.u(1);
+                        r.ue();
+                        r.ue();
+                        r.ue();
+                        r.u(6);
+                        r.ue();
+                        assert_eq!(r.u(1), 1, "vps_timing_info_present_flag");
+                        assert_eq!((r.u(32), r.u(32)), (den, num), "{num}/{den}: the VPS");
+                    }
+                    _ => {}
+                }
+            });
+        }
     }
 }
 

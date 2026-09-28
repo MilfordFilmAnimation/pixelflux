@@ -173,7 +173,7 @@ impl Arm {
         self.ctb_height = surface_height.div_ceil(t.ctu_size);
         self.slices = slices;
         self.dpb = n.dpb;
-        self.level_idc = h265_level(n.width, n.height, n.fps, n.bits_per_second as u64, true).max(n.dpb_level);
+        self.level_idc = h265_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64, true).max(n.dpb_level);
         self.tier = h265_tier(self.level_idc);
         self.pic_init_qp = if n.rc_mode == VA_RC_CQP { PIC_INIT_QP_CQP } else { PIC_INIT_QP_CBR };
         self.cu_qp_delta = n.rc_mode != VA_RC_CQP && t.cu_qp_delta;
@@ -198,8 +198,8 @@ impl Arm {
         w.u(6, 0);
         w.ue(0);
         w.flag(true);
-        w.u(32, 1);
-        w.u(32, n.fps as u64);
+        w.u(32, n.fps.den as u64);
+        w.u(32, n.fps.num as u64);
         w.flag(true);
         w.ue(0);
         w.ue(0);
@@ -270,8 +270,8 @@ impl Arm {
         w.flag(false);
         w.flag(false);
         w.flag(true);
-        w.u(32, 1);
-        w.u(32, n.fps as u64);
+        w.u(32, n.fps.den as u64);
+        w.u(32, n.fps.num as u64);
         w.flag(true);
         w.ue(0);
         w.flag(false);

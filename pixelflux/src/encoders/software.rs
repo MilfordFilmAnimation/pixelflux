@@ -15,6 +15,8 @@
 
 #[cfg(feature = "gpl")]
 use super::codec::{h264_dpb_frames, h264_level, push_video_header, FRAME_DELTA, FRAME_INTRA, FRAME_KEY};
+#[cfg(feature = "gpl")]
+use super::frame_rate::FrameRate;
 use super::codec::{push_jpeg_header, Codec};
 use super::reference::Reference;
 use crate::pipeline::{Cleanup, Damage};
@@ -160,6 +162,13 @@ thread_local! {
 #[cfg(feature = "gpl")]
 static X264_OPEN_CLOSE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The rate an x264 session is opened at: the capture's, or 30 frames per second where it names
+/// less than one.
+#[cfg(feature = "gpl")]
+fn x264_frame_rate(fps: f64) -> FrameRate {
+    FrameRate::of(if fps < 1.0 { 30.0 } else { fps })
+}
+
 /// One long-lived libx264 session for a stripe, holding the raw `x264_t` handle alongside a
 /// mirror of its live parameters so the encoder can be retuned per frame instead of rebuilt.
 ///
@@ -181,7 +190,7 @@ pub struct H264EncoderWrapper {
     is_cbr: bool,
     current_bitrate: i32,
     current_vbv: i32,
-    current_fps: u32,
+    current_fps: FrameRate,
     /// Open-time parameters retained so a frame-rate change can reopen the session: x264's live
     /// reconfigure cannot alter the frame rate, and CBR/VBV budgets are derived from it.
     threads: i32,
@@ -275,15 +284,16 @@ impl H264EncoderWrapper {
                 return None;
             }
 
+            let frame_rate = x264_frame_rate(fps);
             param.i_width = width;
             param.i_height = height;
-            param.i_fps_num = if fps < 1.0 { 30 } else { fps as u32 };
-            param.i_fps_den = 1;
+            param.i_fps_num = frame_rate.num;
+            param.i_fps_den = frame_rate.den;
             param.i_keyint_max = x264_sys::X264_KEYINT_MAX_INFINITE as i32;
             param.i_scenecut_threshold = 0;
             let bitrate_bps = if cbr_mode { bitrate_kbps.saturating_abs() as u64 * 1000 } else { 0 };
             let dpb = h264_dpb_frames(
-                h264_level(width as u32, height as u32, param.i_fps_num, bitrate_bps),
+                h264_level(width as u32, height as u32, frame_rate.ceil(), bitrate_bps),
                 width as u32,
                 height as u32,
             );
@@ -295,7 +305,7 @@ impl H264EncoderWrapper {
                 param.rc.i_vbv_max_bitrate = bk;
                 param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
                 if let Some((budget, level)) = key {
-                    let rate = budget.saturating_mul(param.i_fps_num as i32).max(bk);
+                    let rate = ((budget as f64 * frame_rate.fps()) as i32).max(bk);
                     param.rc.i_bitrate = rate;
                     param.rc.i_vbv_max_bitrate = rate;
                     param.rc.i_vbv_buffer_size = budget.max(1);
@@ -345,7 +355,7 @@ impl H264EncoderWrapper {
                     is_cbr: cbr_mode,
                     current_bitrate: bitrate_kbps.saturating_abs(),
                     current_vbv: vbv_kbit,
-                    current_fps: if fps < 1.0 { 30 } else { fps as u32 },
+                    current_fps: frame_rate,
                     threads,
                     min_qp,
                     max_qp,
@@ -397,7 +407,7 @@ impl H264EncoderWrapper {
     /// it cannot drift from the encoder's real state.
     pub fn reconfigure_rate(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
         let bk = bitrate_kbps.saturating_abs();
-        let new_fps = if fps < 1.0 { 30 } else { fps as u32 };
+        let new_fps = x264_frame_rate(fps);
         let rate_changed =
             self.is_cbr && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
         let fps_changed = self.current_fps != new_fps;
@@ -410,7 +420,7 @@ impl H264EncoderWrapper {
                 self.height,
                 self.current_crf,
                 self.is_i444,
-                new_fps as f64,
+                new_fps.fps(),
                 self.threads,
                 self.is_cbr,
                 bk,
@@ -468,7 +478,7 @@ impl H264EncoderWrapper {
         };
         let budget = (self.current_bitrate as f64 * super::HELD_KEY_BUDGET_S).round() as i32;
         let fresh = Self::open(
-            self.width, self.height, self.current_crf, self.is_i444, self.current_fps as f64, self.threads,
+            self.width, self.height, self.current_crf, self.is_i444, self.current_fps.fps(), self.threads,
             self.is_cbr, self.current_bitrate, self.current_vbv, self.min_qp, self.max_qp, Some((budget, level)),
         );
         let Some(mut fresh) = fresh else { return false };
@@ -2087,6 +2097,33 @@ mod qp_bound_sweep {
                 assert_eq!(dec.color_tags(), Some(want));
             }
         }
+    }
+
+    /// x264 is opened at the capture's rate as the fraction it names, its SPS declares that
+    /// rate, and a session moved to another rate reopens at it.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_takes_the_frame_rate_as_its_fraction() {
+        use crate::encoders::frame_rate::FrameRate;
+        use crate::encoders::sps::h264_timing;
+        let (w, h) = (64usize, 64usize);
+        let (y, uv) = (vec![90u8; w * h], vec![128u8; w * h / 4]);
+        for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
+            let mut enc = H264EncoderWrapper::new(w as i32, h as i32, 25, false, num as f64 / den as f64, 1, true, 4000, 100, 0, 0)
+                .expect("x264 init");
+            let param = unsafe {
+                let mut param: x264_sys::x264_param_t = std::mem::zeroed();
+                x264_sys::x264_encoder_parameters(enc.encoder, &mut param);
+                param
+            };
+            assert_eq!((param.i_fps_num, param.i_fps_den), (num, den));
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(&y, &uv, &uv, w as i32, (w / 2) as i32, (w / 2) as i32, 0, 0, true, true, &mut out));
+            assert_eq!(h264_timing(&out), Some((den, 2 * num)), "{num}/{den}: the SPS declares the rate");
+        }
+        let mut enc = H264EncoderWrapper::new(w as i32, h as i32, 25, false, 60.0, 1, true, 4000, 100, 0, 0).expect("x264 init");
+        enc.reconfigure_rate(4000, 100, 60000.0 / 1001.0);
+        assert_eq!(enc.current_fps, FrameRate { num: 60000, den: 1001 }, "60 fps moved to 59.94");
     }
 
     /// The color chart, converted by the host path and encoded by x264, decodes back to the

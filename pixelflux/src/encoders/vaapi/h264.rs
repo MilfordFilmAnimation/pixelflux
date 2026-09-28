@@ -77,7 +77,7 @@ impl Arm {
         self.mb_height = surface_height / 16;
         self.slices = slices;
         self.dpb = n.dpb;
-        self.level_idc = h264_level(n.width, n.height, n.fps, n.bits_per_second as u64).max(n.dpb_level);
+        self.level_idc = h264_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64).max(n.dpb_level);
         let profile_idc = if self.profile == VAProfileH264High {
             100
         } else if self.profile == VAProfileH264Main {
@@ -133,8 +133,8 @@ impl Arm {
         w.u(8, 1);
         w.flag(false);
         w.flag(true);
-        w.u(32, 1);
-        w.u(32, 2 * n.fps as u64);
+        w.u(32, n.fps.den as u64);
+        w.u(32, 2 * n.fps.num as u64);
         w.flag(true);
         w.flag(false);
         w.flag(false);
@@ -204,8 +204,8 @@ impl Arm {
             s.frame_crop_bottom_offset = (self.mb_height * 16 - n.height) / 2;
         }
         s.vui_parameters_present_flag = 1;
-        s.num_units_in_tick = 1;
-        s.time_scale = 2 * n.fps;
+        s.num_units_in_tick = n.fps.den;
+        s.time_scale = 2 * n.fps.num;
     }
 
     pub(super) fn sequence(&mut self, n: &Negotiated, out: &mut Buffers) {

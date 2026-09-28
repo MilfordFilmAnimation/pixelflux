@@ -23,6 +23,7 @@ use std::time::Duration;
 use crossbeam_channel::{bounded, Sender, TrySendError};
 
 use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN, WIRE_VIDEO};
+use crate::encoders::frame_rate::FrameRate;
 use crate::encoders::software::EncodedStripe;
 
 /// Per-write timeout on a client stream; a stalled write surfaces as a soft error that
@@ -73,7 +74,7 @@ pub struct RecordingSink {
     /// One-time notice that the session's video frames are striped and unrecordable.
     warned_unrecordable: AtomicBool,
     /// The capture frame rate an IVF header declares.
-    fps: u32,
+    fps: FrameRate,
 }
 
 impl RecordingSink {
@@ -84,7 +85,7 @@ impl RecordingSink {
         if settings_path.is_empty() {
             return None;
         }
-        match Self::bind(settings_path.to_string(), fps.round().max(1.0) as u32) {
+        match Self::bind(settings_path.to_string(), FrameRate::of(fps)) {
             Ok(sink) => Some(Arc::new(sink)),
             Err(e) => {
                 eprintln!("[recording_sink] bind failed: {:?}", e);
@@ -95,7 +96,7 @@ impl RecordingSink {
 
     /// Create the socket and spawn the accept thread. Each accepted connection gets a write
     /// timeout, a bounded queue, and a writer thread; the sink keeps only the feed handle.
-    fn bind(path: String, fps: u32) -> std::io::Result<Self> {
+    fn bind(path: String, fps: FrameRate) -> std::io::Result<Self> {
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
         listener.set_nonblocking(true)?;
@@ -266,8 +267,9 @@ impl Drop for RecordingSink {
 
 /// The container bytes a client's stream needs ahead of its `index`th frame: an IVF file
 /// header (on the first frame) and frame header for VP8 and VP9, a temporal delimiter for an
-/// AV1 unit that does not open with one, nothing for the Annex-B codecs.
-fn stream_prefix(codec: Codec, payload: &[u8], index: u64, size: (u16, u16), fps: u32) -> Vec<u8> {
+/// AV1 unit that does not open with one, nothing for the Annex-B codecs. The IVF header's time
+/// base is one frame at `fps`, which the frame index counts in.
+fn stream_prefix(codec: Codec, payload: &[u8], index: u64, size: (u16, u16), fps: FrameRate) -> Vec<u8> {
     match codec {
         Codec::Vp8 | Codec::Vp9 => {
             let mut prefix = Vec::with_capacity(44);
@@ -278,8 +280,8 @@ fn stream_prefix(codec: Codec, payload: &[u8], index: u64, size: (u16, u16), fps
                 prefix.extend_from_slice(if codec == Codec::Vp8 { b"VP80" } else { b"VP90" });
                 prefix.extend_from_slice(&size.0.to_le_bytes());
                 prefix.extend_from_slice(&size.1.to_le_bytes());
-                prefix.extend_from_slice(&fps.to_le_bytes());
-                prefix.extend_from_slice(&1u32.to_le_bytes());
+                prefix.extend_from_slice(&fps.num.to_le_bytes());
+                prefix.extend_from_slice(&fps.den.to_le_bytes());
                 prefix.extend_from_slice(&0u32.to_le_bytes());
                 prefix.extend_from_slice(&0u32.to_le_bytes());
             }
@@ -329,27 +331,31 @@ mod prefix_tests {
     /// frame index; an AV1 unit is opened with a temporal delimiter only when it lacks one.
     #[test]
     fn prefixes_follow_the_codec() {
-        assert!(stream_prefix(Codec::H264, &[0, 0, 1, 0x65], 0, (1280, 720), 60).is_empty());
-        assert!(stream_prefix(Codec::H265, &[0, 0, 1, 0x26, 1], 3, (1280, 720), 60).is_empty());
+        assert!(stream_prefix(Codec::H264, &[0, 0, 1, 0x65], 0, (1280, 720), FrameRate::of(60.0)).is_empty());
+        assert!(stream_prefix(Codec::H265, &[0, 0, 1, 0x26, 1], 3, (1280, 720), FrameRate::of(60.0)).is_empty());
 
-        let first = stream_prefix(Codec::Vp9, &[0x82, 0x49, 0x83], 0, (1280, 720), 60);
+        let first = stream_prefix(Codec::Vp9, &[0x82, 0x49, 0x83], 0, (1280, 720), FrameRate::of(60.0));
         assert_eq!(first.len(), 44);
         assert_eq!(&first[..4], b"DKIF");
         assert_eq!(&first[8..12], b"VP90");
         assert_eq!(u16::from_le_bytes([first[12], first[13]]), 1280);
         assert_eq!(u16::from_le_bytes([first[14], first[15]]), 720);
         assert_eq!(u32::from_le_bytes([first[16], first[17], first[18], first[19]]), 60);
+        assert_eq!(u32::from_le_bytes([first[20], first[21], first[22], first[23]]), 1);
         assert_eq!(u32::from_le_bytes([first[32], first[33], first[34], first[35]]), 3);
         assert_eq!(u64::from_le_bytes(first[36..44].try_into().unwrap()), 0);
-        let later = stream_prefix(Codec::Vp8, &[0u8; 100], 7, (1280, 720), 60);
+        let later = stream_prefix(Codec::Vp8, &[0u8; 100], 7, (1280, 720), FrameRate::of(60.0));
         assert_eq!(later.len(), 12);
         assert_eq!(u32::from_le_bytes(later[..4].try_into().unwrap()), 100);
         assert_eq!(u64::from_le_bytes(later[4..].try_into().unwrap()), 7);
-        assert_eq!(&stream_prefix(Codec::Vp8, &[], 0, (64, 64), 30)[8..12], b"VP80");
+        assert_eq!(&stream_prefix(Codec::Vp8, &[], 0, (64, 64), FrameRate::of(30.0))[8..12], b"VP80");
 
-        assert!(stream_prefix(Codec::Av1, &[0x12, 0x00, 0x32, 0x01, 0x10], 0, (64, 64), 30).is_empty());
-        assert_eq!(stream_prefix(Codec::Av1, &[0x32, 0x01, 0x10], 0, (64, 64), 30), vec![0x12, 0x00]);
-        assert_eq!(stream_prefix(Codec::Av1, &[], 0, (64, 64), 30), vec![0x12, 0x00]);
+        assert!(stream_prefix(Codec::Av1, &[0x12, 0x00, 0x32, 0x01, 0x10], 0, (64, 64), FrameRate::of(30.0)).is_empty());
+        assert_eq!(stream_prefix(Codec::Av1, &[0x32, 0x01, 0x10], 0, (64, 64), FrameRate::of(30.0)), vec![0x12, 0x00]);
+        assert_eq!(stream_prefix(Codec::Av1, &[], 0, (64, 64), FrameRate::of(30.0)), vec![0x12, 0x00]);
+        let ntsc = stream_prefix(Codec::Vp8, &[], 0, (64, 64), FrameRate::of(60000.0 / 1001.0));
+        assert_eq!(u32::from_le_bytes(ntsc[16..20].try_into().unwrap()), 60000, "59.94 fps is 1001/60000 s a frame");
+        assert_eq!(u32::from_le_bytes(ntsc[20..24].try_into().unwrap()), 1001);
     }
 }
 

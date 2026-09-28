@@ -12,6 +12,8 @@
 pub mod bits;
 /// Codec identities, wire framing, quantizer domains, level ladders, bitstream reads.
 pub mod codec;
+/// A frame rate as the fraction encoder parameters and bitstream timing take.
+pub mod frame_rate;
 /// Software HEVC: x265 with the `gpl` feature, kvazaar without it.
 pub mod hevc;
 /// Tegra hardware video encoding through the vendor V4L2 encoder, loaded at runtime: the only path to a

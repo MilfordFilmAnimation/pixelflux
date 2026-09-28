@@ -802,7 +802,7 @@ where
     let mut tid_sent = false;
 
     while !controls.stop.load(Ordering::Relaxed) {
-        let fps = (controls.fps_milli.load(Ordering::Relaxed).max(1) as f64) / 1000.0;
+        let fps = f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
         let frame_dur = Duration::from_secs_f64(1.0 / fps.max(1.0));
         let trigger = wait_for_frame(&gpu.x.conn, Some(&gpu.x.damage), &pace, frame_dur);
         let woke = Instant::now();

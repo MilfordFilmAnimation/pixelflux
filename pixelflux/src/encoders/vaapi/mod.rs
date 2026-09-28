@@ -51,6 +51,7 @@ use super::codec::{
     Codec, VIDEO_HEADER_LEN,
 };
 use super::reference::{Reference, ReferenceSlots, ReferenceWindow, SlotPlan, REFERENCE_FRAMES};
+use super::frame_rate::FrameRate;
 use super::session::{check_host_frame, RateSettings};
 use super::sps::{h264_frame_num_range, NoReorder};
 use crate::RustCaptureSettings;
@@ -437,7 +438,7 @@ pub(super) struct Negotiated {
     pub rc_mode: u32,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: FrameRate,
     pub bits_per_second: u32,
     /// The reference frames the decoded picture buffer holds.
     pub dpb: u32,
@@ -693,7 +694,7 @@ impl VaapiEncoder {
         let rt_format = if fullcolor { VA_RT_FORMAT_YUV444 } else { VA_RT_FORMAT_YUV420 };
         let width = settings.width.max(1) as u32;
         let height = settings.height.max(1) as u32;
-        let fps = rate.fps.max(1) as u32;
+        let fps = rate.fps;
         let bits_per_second = if rate.cbr { rate.bps().min(u32::MAX as u64) as u32 } else { 0 };
 
         let mut attribs = Vec::new();
@@ -715,8 +716,8 @@ impl VaapiEncoder {
         }
         let level_bitrate = bits_per_second as u64;
         let dpb_level = match codec {
-            Codec::H264 => super::codec::h264_level(width, height, fps, level_bitrate),
-            Codec::H265 => super::codec::h265_level(width, height, fps, level_bitrate, true),
+            Codec::H264 => super::codec::h264_level(width, height, fps.ceil(), level_bitrate),
+            Codec::H265 => super::codec::h265_level(width, height, fps.ceil(), level_bitrate, true),
             _ => 0,
         };
         let dpb = match codec {
@@ -1034,7 +1035,7 @@ impl VaapiEncoder {
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
         let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
         self.rate = rate;
-        self.negotiated.fps = rate.fps.max(1) as u32;
+        self.negotiated.fps = rate.fps;
         self.negotiated.bits_per_second = if rate.cbr { rate.bps().min(u32::MAX as u64) as u32 } else { 0 };
         self.negotiated.min_qp = self.codec.quantizer_bound(rate.min_qp);
         self.negotiated.max_qp = self.codec.quantizer_bound(rate.max_qp);
@@ -1095,8 +1096,9 @@ impl VaapiEncoder {
                 out.push_misc(VAEncMiscParameterTypeMaxFrameSize, &cap);
             }
         }
+        let fps = self.negotiated.fps.within(0xffff);
         let mut frame_rate: VAEncMiscParameterFrameRate = unsafe { std::mem::zeroed() };
-        frame_rate.framerate = (1 << 16) | self.negotiated.fps;
+        frame_rate.framerate = (fps.den << 16) | fps.num;
         out.push_misc(VAEncMiscParameterTypeFrameRate, &frame_rate);
         if let Some(level) = self.quality_level {
             let quality = VAEncMiscParameterBufferQualityLevel { quality_level: level, va_reserved: [0; 4] };

@@ -694,6 +694,27 @@ pub fn h264_reorder(stream: &[u8]) -> Option<(u32, u32)> {
     bound.declared.map(|((reorder, ..), (buffering, ..))| (reorder, buffering))
 }
 
+/// The timing the first SPS of an Annex B H.264 stream declares, as `(num_units_in_tick,
+/// time_scale)`, or None where it declares none or cannot be read.
+#[cfg(test)]
+pub fn h264_timing(stream: &[u8]) -> Option<(u32, u32)> {
+    let nal = crate::encoders::codec::annexb_nals(stream).find(|n| n[0] & 0x1f == 7)?;
+    let rbsp = unescape(&nal[1..]);
+    let at = locate(&rbsp).ok()?;
+    if !at.vui_present {
+        return None;
+    }
+    let mut r = Reader { bits: &rbsp, pos: at.end };
+    if r.bit().ok()? == 1 {
+        r.ue().ok()?;
+        r.ue().ok()?;
+    }
+    if r.bit().ok()? == 0 {
+        return None;
+    }
+    Some((r.bits(32).ok()?, r.bits(32).ok()?))
+}
+
 /// Sequence parameter sets devices wrote, and the edits the tests make of them.
 #[cfg(test)]
 pub(crate) mod fixtures {

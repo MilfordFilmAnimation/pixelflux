@@ -163,7 +163,7 @@ impl Arm {
             return Err(format!("this VA-API driver encodes at most {max_tiles} AV1 tiles, and {}x{} needs {tiles}", n.width, n.height));
         }
         let _ = (surface_width, surface_height);
-        self.level_idx = av1_level(n.width, n.height, n.fps, n.bits_per_second as u64);
+        self.level_idx = av1_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64);
         let cbr = n.rc_mode != VA_RC_CQP;
 
         let mut w = BitWriter::new();

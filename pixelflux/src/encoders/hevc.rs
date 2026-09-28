@@ -236,6 +236,12 @@ mod x265 {
         pub const KEY_ON_REQUEST: bool = true;
         pub const HOLDS_QUANTIZER: bool = true;
 
+        /// The frame rate the library was configured at, as `(num, den)`.
+        #[cfg(test)]
+        pub fn frame_rate(&self) -> (u32, u32) {
+            unsafe { ((*self.params).fpsNum, (*self.params).fpsDenom) }
+        }
+
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
             match unsafe { ((*self.api).param_parse.unwrap())(self.params, n.as_ptr(), v.as_ptr()) } {
@@ -293,7 +299,7 @@ mod x265 {
                 ("log-level", "none".into()),
                 ("input-res", format!("{width}x{height}")),
                 ("input-csp", if i444 { "i444" } else { "i420" }.into()),
-                ("fps", format!("{}/1", rate.fps)),
+                ("fps", format!("{}/{}", rate.fps.num, rate.fps.den)),
                 ("range", if i444 { "full" } else { "limited" }.into()),
                 ("colorprim", "bt709".into()),
                 ("transfer", "bt709".into()),
@@ -419,6 +425,12 @@ mod kvazaar {
         pub const KEY_ON_REQUEST: bool = false;
         pub const HOLDS_QUANTIZER: bool = false;
 
+        /// The frame rate the library was configured at, as `(num, den)`.
+        #[cfg(test)]
+        pub fn frame_rate(&self) -> (u32, u32) {
+            unsafe { ((*self.config).framerate_num as u32, (*self.config).framerate_denom as u32) }
+        }
+
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
             if unsafe { ((*self.api).config_parse.unwrap())(self.config, n.as_ptr(), v.as_ptr()) } == 0 {
@@ -448,8 +460,8 @@ mod kvazaar {
                 let cfg = &mut *config;
                 cfg.width = width as i32;
                 cfg.height = height as i32;
-                cfg.framerate_num = rate.fps;
-                cfg.framerate_denom = 1;
+                cfg.framerate_num = rate.fps.num as i32;
+                cfg.framerate_denom = rate.fps.den as i32;
                 cfg.vui.fullrange = 0;
                 cfg.vui.colorprim = 1;
                 cfg.vui.transfer = 1;
@@ -566,5 +578,18 @@ mod tests {
         }
         assert_eq!(kinds, [Some(super::super::codec::FRAME_KEY), Some(super::super::codec::FRAME_DELTA), Some(super::super::codec::FRAME_KEY), Some(super::super::codec::FRAME_DELTA)]);
         assert!(!enc.invalidate_reference(1));
+    }
+
+    /// The library is configured at the capture's rate as the fraction it names.
+    #[test]
+    fn the_frame_rate_reaches_the_library_as_its_fraction() {
+        for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
+            let settings = RustCaptureSettings {
+                width: 64, height: 48, target_fps: num as f64 / den as f64, codec: Codec::H265, video_cbr_mode: true,
+                video_bitrate_kbps: 2000, ..Default::default()
+            };
+            let enc = HevcEncoder::new(&settings, false).expect("session");
+            assert_eq!(enc.backend.frame_rate(), (num, den), "{}", Backend::LIBRARY);
+        }
     }
 }

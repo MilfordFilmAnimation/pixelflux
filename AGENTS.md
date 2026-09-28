@@ -147,7 +147,9 @@ FFmpeg's nor GStreamer's M2M encoder guarantees it. Every H.264 stream bounds re
 Chromium's hardware decoders hold a whole decoded picture buffer back where a stream declares no bound: the software
 encoders and NVENC write the restriction, and the sessions whose device or driver writes its own SPS (VA-API, V4L2
 M2M, Tegra) write it back where it is missing (`sps::bound_reorder`), each only where it proves its pictures leave
-in display order; the unit tests hold each encoder to it. Encoder settings are chosen by measured latency first, frame rate second, quality third, and
+in display order; the unit tests hold each encoder to it. Every session takes the capture's frame rate as the fraction
+it names (`encoders::frame_rate`: 59.94 is 60000/1001), never a whole number, so its rate control and the timing its
+stream declares hold to the rate the capture is paced at. Encoder settings are chosen by measured latency first, frame rate second, quality third, and
 bitrate last: every software encoder runs at the fastest setting its library offers in real time (x264
 ultrafast, VP8 speed 16, VP9 speed 8 with screen tuning, SVT-AV1 preset 11 in its real-time mode, x265
 ultrafast with wavefront threads), NVENC at preset P3 with two-pass quarter-resolution rate control

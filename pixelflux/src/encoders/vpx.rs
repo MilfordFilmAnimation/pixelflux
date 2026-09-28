@@ -113,7 +113,7 @@ impl VpxEncoder {
         }
         cfg.g_w = settings.width.max(1) as u32;
         cfg.g_h = settings.height.max(1) as u32;
-        cfg.g_timebase = vpx_rational { num: 1, den: rate.fps };
+        cfg.g_timebase = vpx_rational { num: rate.fps.den as i32, den: rate.fps.num as i32 };
         cfg.g_threads = threads.min(64);
         cfg.g_lag_in_frames = 0;
         cfg.g_pass = VPX_RC_ONE_PASS;
@@ -213,7 +213,7 @@ impl VpxEncoder {
     /// a pinned quantizer names a rate it never reaches with both bounds at the quantizer.
     fn program_rate(&mut self, rate: RateSettings, q: u32) {
         let cfg = &mut self.cfg;
-        cfg.g_timebase = vpx_rational { num: 1, den: rate.fps };
+        cfg.g_timebase = vpx_rational { num: rate.fps.den as i32, den: rate.fps.num as i32 };
         cfg.rc_end_usage = VPX_CBR;
         if rate.cbr {
             let kbps = (rate.bps() / 1000).clamp(1, u32::MAX as u64) as u32;
@@ -512,6 +512,21 @@ mod tests {
     /// A frame a client lost is left out of the predictions: the next frame names the newest
     /// frame before it, and a decoder that never saw the lost frames decodes it exactly as one
     /// that saw everything. VP9 reaches back through its recent frames, VP8 through its anchors.
+    /// Both codecs count time in frames of the capture's rate, as the fraction it names, a live
+    /// change of rate included.
+    #[test]
+    fn the_time_base_is_one_frame_of_the_rate() {
+        for codec in [Codec::Vp8, Codec::Vp9] {
+            for (num, den) in [(60000i32, 1001i32), (120000, 1001), (144000, 1001), (60, 1)] {
+                let fps = num as f64 / den as f64;
+                let mut enc = VpxEncoder::new(&RustCaptureSettings { target_fps: fps, ..settings(codec) }, codec, false).expect("session");
+                assert_eq!((enc.cfg.g_timebase.num, enc.cfg.g_timebase.den), (den, num), "{codec:?}");
+                enc.reconfigure_rate(&RustCaptureSettings { target_fps: 30.0, ..settings(codec) }).expect("30 fps");
+                assert_eq!((enc.cfg.g_timebase.num, enc.cfg.g_timebase.den), (1, 30), "{codec:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_lost_frame_is_predicted_past() {
         for codec in [Codec::Vp8, Codec::Vp9] {

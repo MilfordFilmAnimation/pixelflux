@@ -1085,7 +1085,7 @@ pub struct WlEncodeControls {
     rate_dirty: AtomicBool,
     bitrate_kbps: AtomicI32,
     vbv_mult_milli: AtomicI32,
-    fps_milli: AtomicU64,
+    fps_bits: AtomicU64,
     force_idr: AtomicBool,
     invalid_frames: Mutex<Vec<u16>>,
     /// Pending per-frame tunables for the encode thread (mutex, not atomics: one struct, set
@@ -1100,7 +1100,7 @@ impl WlEncodeControls {
             rate_dirty: AtomicBool::new(false),
             bitrate_kbps: AtomicI32::new(0),
             vbv_mult_milli: AtomicI32::new(0),
-            fps_milli: AtomicU64::new(0),
+            fps_bits: AtomicU64::new(0),
             force_idr: AtomicBool::new(false),
             invalid_frames: Mutex::new(Vec::new()),
             tunables_dirty: AtomicBool::new(false),
@@ -1288,7 +1288,7 @@ fn wayland_encode_loop(pool: &WlFramePool, cfg: WlEncodeConfig) -> Option<FrameE
             settings.video_bitrate_kbps = cfg.controls.bitrate_kbps.load(Ordering::Relaxed);
             settings.video_vbv_multiplier =
                 cfg.controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
-            let fps = (cfg.controls.fps_milli.load(Ordering::Relaxed) as f64) / 1000.0;
+            let fps = f64::from_bits(cfg.controls.fps_bits.load(Ordering::Relaxed));
             if fps > 0.0 {
                 settings.target_fps = fps;
             }
@@ -1915,10 +1915,7 @@ fn bootstrap_readback_pool(
         (settings.video_vbv_multiplier * 1000.0).round() as i32,
         Ordering::Relaxed,
     );
-    c.fps_milli.store(
-        (settings.target_fps.max(1.0) * 1000.0) as u64,
-        Ordering::Relaxed,
-    );
+    c.fps_bits.store(settings.target_fps.max(1.0).to_bits(), Ordering::Relaxed);
     let cfg = WlEncodeConfig {
         settings: settings.clone(),
         display_id,
@@ -5447,10 +5444,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                                 (cap.settings.video_vbv_multiplier * 1000.0).round() as i32,
                                 Ordering::Relaxed,
                             );
-                            c.fps_milli.store(
-                                (cap.settings.target_fps.max(1.0) * 1000.0) as u64,
-                                Ordering::Relaxed,
-                            );
+                            c.fps_bits.store(cap.settings.target_fps.max(1.0).to_bits(), Ordering::Relaxed);
                             c.rate_dirty.store(true, Ordering::Release);
                             if display_id == 0 {
                                 state.settings.video_bitrate_kbps = cap.settings.video_bitrate_kbps;
@@ -7329,7 +7323,7 @@ impl ScreenCapture {
         match backend {
             0 | 1 => {
                 if let Some(c) = &controls {
-                    c.fps_milli.store((fps.max(1.0) * 1000.0) as u64, Ordering::Relaxed);
+                    c.fps_bits.store(fps.max(1.0).to_bits(), Ordering::Relaxed);
                     c.rate_dirty.store(true, Ordering::Release);
                     py.detach(crate::x11::follow_frame_rate);
                 }

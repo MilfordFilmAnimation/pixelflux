@@ -163,8 +163,8 @@ impl SvtAv1Encoder {
             cfg.enc_mode = 11;
             cfg.source_width = self.planes.width as u32;
             cfg.source_height = self.planes.height as u32;
-            cfg.frame_rate_numerator = rate.fps as u32;
-            cfg.frame_rate_denominator = 1;
+            cfg.frame_rate_numerator = rate.fps.num;
+            cfg.frame_rate_denominator = rate.fps.den;
             cfg.encoder_bit_depth = 8;
             cfg.encoder_color_format = EB_YUV420;
             cfg.color_primaries = EB_CICP_CP_BT_709;
@@ -386,7 +386,7 @@ impl SvtAv1Encoder {
             if held_key || self.restate_target {
                 // The rate control takes no quantizer: a held key frame's picture is planned
                 // with a target that gives it `HELD_KEY_BUDGET_S` of the session's.
-                let factor = if held_key { super::HELD_KEY_BUDGET_S * self.rate.fps as f64 } else { 1.0 };
+                let factor = if held_key { super::HELD_KEY_BUDGET_S * self.rate.fps.fps() } else { 1.0 };
                 self.events.target_bit_rate = (self.rate.bps() as f64 * factor.max(1.0)).min(MAX_BITRATE_BPS as f64) as u32;
             }
             self.restate_target = held_key;
@@ -467,6 +467,24 @@ mod tests {
             let _ = done.send(());
         });
         assert!(closed.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "the release never returned");
+    }
+
+    /// The library is configured at the capture's rate as the fraction it names, a live change
+    /// of rate included.
+    #[test]
+    fn the_frame_rate_reaches_the_library_as_its_fraction() {
+        for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
+            let fps = num as f64 / den as f64;
+            let settings = RustCaptureSettings {
+                width: 64, height: 64, target_fps: fps, codec: Codec::Av1, video_cbr_mode: true, video_bitrate_kbps: 2000,
+                ..Default::default()
+            };
+            let mut enc = SvtAv1Encoder::new(&settings, false).expect("session");
+            assert_eq!((enc.config.frame_rate_numerator, enc.config.frame_rate_denominator), (num, den));
+            enc.reconfigure_rate(&RustCaptureSettings { target_fps: 30.0, ..settings.clone() }).expect("30 fps");
+            enc.reconfigure_rate(&settings).expect("back");
+            assert_eq!((enc.config.frame_rate_numerator, enc.config.frame_rate_denominator), (num, den));
+        }
     }
 
     /// Sessions opened and closed on many threads at once each encode their frame.
