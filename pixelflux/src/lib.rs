@@ -4071,6 +4071,7 @@ fn reposition_output_on(state: &mut AppState, id: u32, x: i32, y: i32) -> bool {
     for window in &windows {
         state.space.map_element(window.clone(), (x, y), false);
     }
+    state.refocus_pointer();
     if let Some(cap) = state.output_nodes[idx].capture.as_mut() {
         cap.needs_full_render = true;
     }
@@ -5210,45 +5211,7 @@ fn run_wayland_thread(cfg: WaylandThreadConfig) {
                     let p = state.layout_physical_to_logical(x, y);
 
                     if let Some(pointer) = state.seat.get_pointer() {
-                        // Layer surfaces live on the output under the point; their
-                        // geometry is output-local, so hit-test with the local point and
-                        // report the global location.
-                        let layer_hit = |state: &AppState, layers: &[smithay::wayland::shell::wlr_layer::Layer]| {
-                            let idx = state.node_idx_under(p)?;
-                            let node = &state.output_nodes[idx];
-                            let origin = Point::<i32, smithay::utils::Logical>::from(node.pos);
-                            let local = (p - origin.to_f64()).to_i32_round();
-                            let layer_map = layer_map_for_output(&node.output);
-                            for layer in layer_map.layers().rev() {
-                                if layers.contains(&layer.layer())
-                                    && let Some(bbox) = layer_map.layer_geometry(layer)
-                                    && bbox.contains(local) {
-                                            return Some((
-                                                FocusTarget::LayerSurface(layer.clone()),
-                                                (bbox.loc + origin).to_f64(),
-                                            ));
-                                        }
-                            }
-                            None
-                        };
-
-                        let mut under = layer_hit(state, &[
-                            smithay::wayland::shell::wlr_layer::Layer::Overlay,
-                            smithay::wayland::shell::wlr_layer::Layer::Top,
-                        ]);
-
-                        if under.is_none() {
-                            under = state.space.element_under(p).map(|(window, loc)| {
-                                (FocusTarget::Window(window.clone()), loc.to_f64())
-                            });
-                        }
-
-                        if under.is_none() {
-                            under = layer_hit(state, &[
-                                smithay::wayland::shell::wlr_layer::Layer::Bottom,
-                                smithay::wayland::shell::wlr_layer::Layer::Background,
-                            ]);
-                        }
+                        let under = state.pointer_target_under(p);
 
                         state.release_grab_across_screens(&pointer, &under, serial, time);
                         let entered = pointer.current_focus() != under.as_ref().map(|(t, _)| t.clone());

@@ -864,6 +864,7 @@ impl CompositorHandler for AppState {
             if !has_buffer {
                 self.space.unmap_elem(&window);
                 self.pending_windows.push(window);
+                self.refocus_pointer();
                 return;
             }
         }
@@ -1004,6 +1005,7 @@ impl CompositorHandler for AppState {
                     if let Some(keyboard) = self.seat.get_keyboard() {
                         keyboard.set_focus(self, Some(target.clone()), serial);
                     }
+                    self.refocus_pointer();
                 } else {
                     // A client that drew before answering the parked size (a nested
                     // compositor's spare screen starts at its backend's own default)
@@ -1104,6 +1106,59 @@ impl AppState {
             }
             _ => false,
         })
+    }
+
+    /// What the pointer targets at a logical layout point: an overlay or top layer surface,
+    /// then a window, then a bottom or background layer surface. Layer geometry is
+    /// output-local, so layers are hit-tested with the point local to the output under it.
+    pub(crate) fn pointer_target_under(
+        &self,
+        p: Point<f64, Logical>,
+    ) -> Option<(FocusTarget, Point<f64, Logical>)> {
+        use smithay::wayland::shell::wlr_layer::Layer;
+        let layer_hit = |layers: &[Layer]| {
+            let node = &self.output_nodes[self.node_idx_under(p)?];
+            let origin = Point::<i32, Logical>::from(node.pos);
+            let local = (p - origin.to_f64()).to_i32_round();
+            let layer_map = layer_map_for_output(&node.output);
+            layer_map.layers().rev().find_map(|layer| {
+                let bbox = layer_map.layer_geometry(layer)?;
+                (layers.contains(&layer.layer()) && bbox.contains(local))
+                    .then(|| (FocusTarget::LayerSurface(layer.clone()), (bbox.loc + origin).to_f64()))
+            })
+        };
+        layer_hit(&[Layer::Overlay, Layer::Top])
+            .or_else(|| {
+                self.space
+                    .element_under(p)
+                    .map(|(window, loc)| (FocusTarget::Window(window.clone()), loc.to_f64()))
+            })
+            .or_else(|| layer_hit(&[Layer::Bottom, Layer::Background]))
+    }
+
+    /// Hands pointer focus to what now lies under a still pointer once a window maps, unmaps,
+    /// or moves, so a click that arrives with no motion (a pointer-locked one) reaches what is
+    /// shown there. A held grab keeps its focus until it ends.
+    pub(crate) fn refocus_pointer(&mut self) {
+        if self.host.is_some() {
+            return;
+        }
+        let Some(pointer) = self.seat.get_pointer() else { return };
+        if pointer.is_grabbed() {
+            return;
+        }
+        let location = pointer.current_location();
+        let under = self.pointer_target_under(location);
+        if pointer.current_focus() == under.as_ref().map(|(t, _)| t.clone()) {
+            return;
+        }
+        let time = wayland_time();
+        pointer.motion(self, under.clone(), &MotionEvent { location, serial: next_serial(), time });
+        if under.is_some() {
+            pointer.motion(self, under.clone(), &MotionEvent { location, serial: next_serial(), time });
+        }
+        pointer.frame(self);
+        self.activate_constraint_under(&pointer, &under, location);
     }
 
     /// Activates a constraint waiting on the surface the pointer has arrived over.
@@ -1232,6 +1287,7 @@ impl AppState {
             self.output_nodes[idx].output.leave(&surface);
         }
         self.space.map_element(window.clone(), PARKED_POS, false);
+        self.refocus_pointer();
         if let Some(toplevel) = window.toplevel() {
             let toplevel = toplevel.clone();
             self.send_forced_fullscreen_configure(&toplevel);
@@ -1256,6 +1312,7 @@ impl AppState {
             meta.parked.store(false, Ordering::Relaxed);
         }
         self.space.map_element(window.clone(), pos, true);
+        self.refocus_pointer();
         if let Some(surface) = window.wl_surface() {
             if let Some(old) = old_output
                 && old_id != id {
@@ -2627,6 +2684,7 @@ impl XdgShellHandler for AppState {
             .cloned();
         if let Some(window) = mapped {
             self.space.unmap_elem(&window);
+            self.refocus_pointer();
         }
         if let Some(handle) = with_states(surface.wl_surface(), |states| states.data_map.get::<ForeignToplevelHandle>().cloned()) {
              self.foreign_toplevel_list.remove_toplevel(&handle);
