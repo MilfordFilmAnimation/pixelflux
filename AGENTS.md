@@ -241,6 +241,12 @@ v4l2loopback output device (`v4l2out.rs`), and a PipeWire `Video/Source` node (`
 loaded at run time, pods built by hand — never add a build-time PipeWire dependency). `cargo test --lib webcam`
 covers the ring, decoders (including an OpenH264 encode-and-decode round trip), and pod layouts; the device-level and browser
 checks live in selkies (`tests/integration/test_webcam_device.py`, `tests/e2e/test_webcam.py`).
+The H.264 decoder flushes OpenH264 after every access unit that returns no picture, so a picture held for
+reordering leaves without a frame of delay; upstream's single-threaded `FlushFrame` never returns that picture's
+buffer, so OpenH264 is built from `pixelflux/openh264-sys2`, the crates.io package vendored in place of the registry
+copy (`[patch.crates-io]`) with `flush-frame.patch` applied. A version bump re-vendors the package and re-applies the
+patch; an edit to the vendored source needs `cargo clean -p openh264-sys2`, since its build script reruns only on
+environment changes.
 
 Licensing is part of the build matrix: `LICENSES.md` inventories every crate and native library of the default
 (`gpl`, libx264) and `PIXELFLUX_ENABLE_GPL=0` (`openh264`) builds, `scripts/check-licenses.py` and

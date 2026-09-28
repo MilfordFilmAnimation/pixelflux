@@ -784,6 +784,128 @@ mod tests {
         assert!(decoded >= 5, "decoded {} of 6 frames", decoded);
     }
 
+    /// A High-profile H.264 stream of `frames` access units at `mbs` macroblocks square, its
+    /// fields in the order of the specification's syntax tables: an SPS with picture order count
+    /// type 0 and two reference frames, a CAVLC PPS, an IDR of I_PCM macroblocks holding
+    /// `sample`, then P pictures of skipped macroblocks whose picture order count steps by two,
+    /// as the VCE firmware under Mesa 24.0 writes it.
+    fn h264_stepping_poc_by_two(mbs: u32, frames: u32, sample: u8) -> Vec<Vec<u8>> {
+        struct Bits(Vec<u8>, usize);
+        impl Bits {
+            fn u(&mut self, value: u32, count: usize) {
+                for shift in (0..count).rev() {
+                    if self.1 % 8 == 0 {
+                        self.0.push(0);
+                    }
+                    if (value >> shift) & 1 != 0 {
+                        *self.0.last_mut().unwrap() |= 0x80 >> (self.1 % 8);
+                    }
+                    self.1 += 1;
+                }
+            }
+            fn ue(&mut self, value: u32) {
+                let coded = value + 1;
+                let length = 32 - coded.leading_zeros() as usize;
+                self.u(0, length - 1);
+                self.u(coded, length);
+            }
+            fn align(&mut self) {
+                while self.1 % 8 != 0 {
+                    self.u(0, 1);
+                }
+            }
+            fn nal(mut self, header: u8) -> Vec<u8> {
+                self.u(1, 1);
+                self.align();
+                let mut out = vec![0, 0, 0, 1, header];
+                let mut zeros = 0;
+                for byte in self.0 {
+                    if zeros >= 2 && byte <= 3 {
+                        out.push(3);
+                        zeros = 0;
+                    }
+                    zeros = if byte == 0 { zeros + 1 } else { 0 };
+                    out.push(byte);
+                }
+                out
+            }
+        }
+        let mut sps = Bits(Vec::new(), 0);
+        sps.u(100, 8);
+        sps.u(0, 8);
+        sps.u(40, 8);
+        for value in [0, 1, 0, 0] {
+            sps.ue(value);
+        }
+        sps.u(0, 2);
+        for value in [0, 0, 0, 2] {
+            sps.ue(value);
+        }
+        sps.u(0, 1);
+        sps.ue(mbs - 1);
+        sps.ue(mbs - 1);
+        sps.u(0b1100, 4);
+        let mut pps = Bits(Vec::new(), 0);
+        pps.ue(0);
+        pps.ue(0);
+        pps.u(0, 2);
+        for value in [0, 0, 0] {
+            pps.ue(value);
+        }
+        pps.u(0, 3);
+        for value in [0, 0, 0] {
+            pps.ue(value);
+        }
+        pps.u(0, 3);
+        let mut idr = Bits(Vec::new(), 0);
+        for value in [0, 7, 0] {
+            idr.ue(value);
+        }
+        idr.u(0, 4);
+        idr.ue(0);
+        idr.u(0, 4);
+        idr.u(0, 2);
+        idr.ue(0);
+        for _ in 0..mbs * mbs {
+            idr.ue(25);
+            idr.align();
+            for _ in 0..384 {
+                idr.u(sample as u32, 8);
+            }
+        }
+        let mut units = vec![[sps.nal(0x67), pps.nal(0x68), idr.nal(0x65)].concat()];
+        for n in 1..frames {
+            let mut p = Bits(Vec::new(), 0);
+            for value in [0, 5, 0] {
+                p.ue(value);
+            }
+            p.u(n % 16, 4);
+            p.u(2 * n % 16, 4);
+            p.u(0, 3);
+            p.ue(0);
+            p.ue(mbs * mbs);
+            units.push(p.nal(0x41));
+        }
+        units
+    }
+
+    /// OpenH264 holds each picture of such a stream for reordering and hands it over on a flush,
+    /// which has to return the picture's buffer: its pool of reference frames plus two would
+    /// otherwise run dry at the fifth picture.
+    #[test]
+    fn h264_pictures_held_for_reordering_leave_with_their_own_access_units() {
+        let mut dec = VideoDecoder::new(Codec::H264).unwrap();
+        for (n, unit) in h264_stepping_poc_by_two(2, 12, 0x60).iter().enumerate() {
+            match dec.decode(unit) {
+                Ok(true) => {}
+                other => panic!("access unit {n}: {other:?}"),
+            }
+            let v = dec.frame().unwrap();
+            assert_eq!((v.width, v.height), (32, 32));
+            assert_eq!((v.y[17 * v.y_stride + 17], v.u[9 * v.uv_stride + 9], v.v[0]), (0x60, 0x60, 0x60), "access unit {n}");
+        }
+    }
+
     /// Garbage is a corrupt packet, never a decoder to throw away.
     #[test]
     fn a_decoder_rejects_garbage_without_fatal() {

@@ -96,6 +96,13 @@ features = [
     "wayland_frontend",
 ]
 
+# openh264-sys2 0.9.8 as published, vendored with one fix to OpenH264 2.6
+# (openh264-sys2/flush-frame.patch): the single-threaded decoder's FlushFrame hands a
+# held picture over without returning its buffer, so the pool runs dry after as many
+# flushes as the stream has reference frames plus two.
+[patch.crates-io]
+openh264-sys2 = { path = "openh264-sys2" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -171,9 +171,11 @@ def classify_expression(expression: str) -> int:
 
 # Native libraries behind the crates that bind, vendor, or load them. `rank` is
 # the license category of the native code, `copyleft_features` the crate
-# features that link a copyleft library, and `how` the way it reaches the
-# extension. Every crate named like a native binding (-sys, _sys, -ffi) has to
-# be described here, so a new binding fails the check until it is inventoried.
+# features that link a copyleft library, `how` the way it reaches the
+# extension, and `vendored` the directory of a patched copy of a crates.io
+# package, which the graph has to resolve to. Every crate named like a native
+# binding (-sys, _sys, -ffi) has to be described here, so a new binding fails
+# the check until it is inventoried.
 NATIVE: Dict[str, Dict[str, object]] = {
     "x264-sys": dict(
         library="libx264", license="GPL-2.0-or-later", rank=COPYLEFT,
@@ -197,10 +199,14 @@ NATIVE: Dict[str, Dict[str, object]] = {
             "MIT OR Apache-2.0, path dependency",
         note="VA-API encoders and video processor"),
     "openh264-sys2": dict(
-        library="Cisco OpenH264 2.6 (vendored source)", license="BSD-2-Clause",
-        rank=PERMISSIVE, how="compiled from vendored source and linked statically",
-        note="full-frame software H.264 without GPL; AVC patent licenses are the deployer's "
-             "concern as with any H.264 encoder"),
+        library="Cisco OpenH264 2.6 (vendored source, decoder patched)", license="BSD-2-Clause",
+        rank=PERMISSIVE, vendored="pixelflux/openh264-sys2",
+        how="compiled from the source vendored under pixelflux/openh264-sys2/ and linked "
+            "statically: the crates.io 0.9.8 package with flush-frame.patch applied, in place "
+            "of the registry copy through [patch.crates-io]",
+        note="the virtual camera's H.264 decoder in every build and the software H.264 "
+             "encoder of the non-GPL one; AVC patent licenses are the deployer's concern as "
+             "with any H.264 codec"),
     "turbojpeg-sys": dict(
         library="libjpeg-turbo 3.1 (vendored source)",
         license="IJG AND BSD-3-Clause AND Zlib", rank=PERMISSIVE,
@@ -351,6 +357,9 @@ def audit(meta: dict, set_name: str) -> Tuple[List[dict], List[str]]:
                 problems.append("%s %s: links %s (%s) in the %s set"
                                 % (name, pkg["version"], native["library"],
                                    native["license"], set_name))
+            if native.get("vendored") and pkg.get("source"):
+                problems.append("%s %s: resolves to %s, not the patched copy vendored under %s"
+                                % (name, pkg["version"], pkg["source"], native["vendored"]))
         elif NATIVE_NAME.search(name):
             problems.append("%s %s: native binding not described in NATIVE (add it there "
                             "and to LICENSES.md)" % (name, pkg["version"]))
