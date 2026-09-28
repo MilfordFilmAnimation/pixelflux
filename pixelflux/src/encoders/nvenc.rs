@@ -1223,8 +1223,10 @@ pub struct NvencEncoder {
     /// The 4:2:0 chroma convert, where the driver took the kernel and the session is not 4:4:4.
     /// `None` leaves NVENC's own conversion in place.
     csc: Option<ChromaConvert>,
-    /// The decoded picture buffer the session declares, in frames, which a resize lowers where
-    /// the new level admits fewer and never raises.
+    /// The decoded picture buffer the session declares, in frames: what its picture's level
+    /// admits. The driver lowers it in place but never raises it, so a resize to a picture whose
+    /// level admits more reopens a session that predicts past losses, and leaves one that tracks
+    /// no references at the smaller buffer.
     dpb: u32,
     /// The frames the decoder holds, so a lost one can be left out of the predictions and each
     /// frame can name what it predicts from; None where the device cannot invalidate a
@@ -2240,11 +2242,13 @@ impl NvencEncoder {
     ///    the encode path; pinned hosts are dropped because the source shm segments are recreated
     ///    on resize and may reuse the same base addresses.
     /// 4. **Reconfigure the session**: update the level for the new size, the decoded picture
-    ///    buffer where that level admits fewer frames (the driver takes a smaller one at the
-    ///    forced IDR and refuses to raise it again), the CBR bitrate + VBV or the ConstQP, and the
-    ///    new dimensions / DAR / frame rate, then `NvEncReconfigureEncoder` with `resetEncoder`
-    ///    and `forceIDR` so the stream restarts cleanly at the new size. Driver rejection returns
-    ///    `Err`.
+    ///    buffer that level admits, the CBR bitrate + VBV or the ConstQP, and the new dimensions /
+    ///    DAR / frame rate, then `NvEncReconfigureEncoder` with `resetEncoder` and `forceIDR` so
+    ///    the stream restarts cleanly at the new size. The driver takes a smaller buffer at the
+    ///    forced IDR but refuses a larger one, so where the level admits more frames than a
+    ///    session tracking references holds, the NVENC session is reopened at the new config on
+    ///    the same CUDA context instead (about 100 ms, against a few for the reconfigure), its
+    ///    first frame a key frame. Driver rejection returns `Err`.
     /// 5. **Reallocate the packed input** at the new size and register + map it as init does, in
     ///    the byte order the session was last fed.
     ///
@@ -2282,7 +2286,9 @@ impl NvencEncoder {
             self.omit_stripe_headers = settings.omit_stripe_headers;
             return Ok(false);
         }
-        let dpb = self.dpb_frames_at(new_w, new_h, settings.target_fps.max(1.0) as u32).min(self.dpb);
+        let admitted = self.dpb_frames_at(new_w, new_h, settings.target_fps.max(1.0) as u32);
+        let reopen = admitted > self.dpb && self.references.is_some();
+        let dpb = if reopen { admitted } else { admitted.min(self.dpb) };
 
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
@@ -2340,7 +2346,12 @@ impl NvencEncoder {
             self.init_params.darHeight = new_h;
             self.init_params.frameRateNum = (settings.target_fps.max(1.0)) as u32;
             self.init_params.frameRateDen = 1;
-            if self.reconfigure(true, true) != NVENCSTATUS::NV_ENC_SUCCESS {
+            if reopen {
+                if let Err(e) = self.reopen_session() {
+                    (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
+                    return Err(e);
+                }
+            } else if self.reconfigure(true, true) != NVENCSTATUS::NV_ENC_SUCCESS {
                 (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
                 return Err("NvEncReconfigureEncoder rejected the resolution change".into());
             }
@@ -2522,6 +2533,49 @@ impl NvencEncoder {
         self.registered_input_resource = reg_res.registeredResource;
         self.mapped_input_buffer = map_params.mappedResource;
         self.input_format = format;
+        Ok(())
+    }
+
+    /// Replace the NVENC session with one initialized at the live config, with its bitstream
+    /// buffers, on the same CUDA context, which is current; nothing may be registered on the old
+    /// one.
+    unsafe fn reopen_session(&mut self) -> Result<(), String> {
+        let f = &self.nvenc_funcs;
+        for bs in self.bitstream_buffers.drain(..) {
+            (f.nvEncDestroyBitstreamBuffer.unwrap())(self.encoder_session, bs);
+        }
+        (f.nvEncDestroyEncoder.unwrap())(self.encoder_session);
+        self.encoder_session = ptr::null_mut();
+        let mut session_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
+            version: sv(NvStruct::OpenSessionExParams),
+            deviceType: NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_CUDA,
+            device: self.cuda_context as *mut c_void,
+            apiVersion: neg_api(),
+            ..Default::default()
+        };
+        let status = (f.nvEncOpenEncodeSessionEx.unwrap())(&mut session_params, &mut self.encoder_session);
+        if status != NVENCSTATUS::NV_ENC_SUCCESS {
+            self.encoder_session = ptr::null_mut();
+            return Err(session_refusal(status));
+        }
+        self.init_params.encodeConfig = &mut self.encode_config;
+        let mut init = Negotiated::new(self.init_params);
+        let status = (f.nvEncInitializeEncoder.unwrap())(self.encoder_session, &mut init.value);
+        if status != NVENCSTATUS::NV_ENC_SUCCESS {
+            return Err(format!("Reopening the session failed ({status:?}): {}", last_error(f, self.encoder_session)));
+        }
+        self.current_buffer_idx = 0;
+        for _ in 0..BITSTREAM_BUFFERS {
+            let mut params = NV_ENC_CREATE_BITSTREAM_BUFFER {
+                version: sv(NvStruct::CreateBitstreamBuffer),
+                ..Default::default()
+            };
+            let status = (f.nvEncCreateBitstreamBuffer.unwrap())(self.encoder_session, &mut params);
+            if status != NVENCSTATUS::NV_ENC_SUCCESS {
+                return Err("Failed to create bitstream buffer".into());
+            }
+            self.bitstream_buffers.push(params.bitstreamBuffer);
+        }
         Ok(())
     }
 
@@ -3526,6 +3580,26 @@ mod gpu_tests {
         }
     }
 
+    /// Test helper: how far apart, in mean luma, the last picture of `frames` decodes with and
+    /// without the frames at the `lost` indices.
+    fn apart_without(codec: Codec, frames: &[Vec<u8>], lost: std::ops::Range<usize>) -> f64 {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (mut whole, mut lossy) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
+        for (i, f) in frames.iter().enumerate() {
+            assert!(whole.decode(f).expect("decode"), "{codec:?} frame {i}");
+            if !lost.contains(&i) {
+                assert!(lossy.decode(f).expect("decode past the loss"), "{codec:?} frame {i}");
+            }
+        }
+        let (a, b) = (whole.frame().unwrap(), lossy.frame().unwrap());
+        a.y.chunks(a.y_stride)
+            .zip(b.y.chunks(b.y_stride))
+            .take(a.height)
+            .flat_map(|(ra, rb)| ra[..a.width].iter().zip(&rb[..a.width]).map(|(&x, &y)| (x as f64 - y as f64).abs()))
+            .sum::<f64>()
+            / (a.width * a.height) as f64
+    }
+
     /// Test helper: the gradient frame with a 256x256 block of another gradient moved `step`
     /// blocks along its top rows, the frames of a steady desktop-like sequence.
     fn moving_frame(w: usize, h: usize, step: usize) -> Vec<u8> {
@@ -3789,26 +3863,7 @@ mod gpu_tests {
     fn gpu_predicts_past_a_lost_frame() {
         use crate::encoders::reference::Reference;
         use crate::encoders::sps::h264_max_num_ref_frames;
-        use crate::webcam::decode::{VideoDecoder, Decoder as _};
         let (w, h) = (1280usize, 720usize);
-        let apart = |a: &crate::webcam::convert::I420View<'_>, b: &crate::webcam::convert::I420View<'_>| {
-            a.y.chunks(a.y_stride)
-                .zip(b.y.chunks(b.y_stride))
-                .take(a.height)
-                .flat_map(|(ra, rb)| ra[..a.width].iter().zip(&rb[..a.width]).map(|(&x, &y)| (x as f64 - y as f64).abs()))
-                .sum::<f64>()
-                / (a.width * a.height) as f64
-        };
-        let apart_without = |codec: Codec, frames: &[Vec<u8>], lost: std::ops::Range<usize>| {
-            let (mut whole, mut lossy) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
-            for (i, f) in frames.iter().enumerate() {
-                assert!(whole.decode(f).expect("decode"), "{codec:?} frame {i}");
-                if !lost.contains(&i) {
-                    assert!(lossy.decode(f).expect("decode past the loss"), "{codec:?} frame {i}");
-                }
-            }
-            apart(&whole.frame().unwrap(), &lossy.frame().unwrap())
-        };
         for codec in [Codec::H264, Codec::H265, Codec::Av1] {
             let mut s = settings(w as i32, h as i32, 60.0);
             s.codec = codec;
@@ -3879,6 +3934,82 @@ mod gpu_tests {
             assert!(off < 0.5, "{codec:?}: the decoder that lost frames 12-{} shows {off:.2} off the one that saw them", 10 + dpb);
             assert!(enc.invalidate_reference(11));
             assert_eq!(encode(&mut enc, 13 + dpb, 1920, 1080).1, Reference::None, "{codec:?}: frame 11 left the buffer");
+        }
+    }
+
+    /// A session opened at 1080p and resized to 720p takes the larger buffer 720p's level admits,
+    /// reopening the session the driver will not raise it on, so a loss six frames deep is still
+    /// predicted past and decodes as if nothing was lost; a round trip through 1080p ends back at
+    /// it. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_a_shrink_takes_the_buffer_its_level_admits() {
+        use crate::encoders::reference::Reference;
+        use crate::encoders::sps::h264_max_num_ref_frames;
+        for codec in [Codec::H264, Codec::H265] {
+            let mut s = settings(1920, 1080, 60.0);
+            s.codec = codec;
+            s.omit_stripe_headers = true;
+            let mut enc = match host_session(&s) {
+                Ok(enc) => enc,
+                Err(e) if codec == Codec::H265 => {
+                    println!("{codec:?}: {e}");
+                    continue;
+                }
+                Err(e) => panic!("{codec:?}: {e}"),
+            };
+            let encode = |enc: &mut NvencEncoder, i: usize, w: usize, h: usize| {
+                let out = enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 25, i == 0).expect("encode");
+                (out, enc.last_reference())
+            };
+            let (first, reference) = encode(&mut enc, 0, 1920, 1080);
+            if reference == Reference::Untracked {
+                println!("{codec:?}: this device cannot invalidate a reference");
+                continue;
+            }
+            if codec == Codec::H264 {
+                assert_eq!(h264_max_num_ref_frames(&first), Some(4), "1080p at level 4.2 admits four");
+            }
+            let admitted = enc.dpb_frames_at(1280, 720, 60);
+            assert_eq!(admitted, REFERENCE_FRAMES, "{codec:?}");
+            (s.width, s.height) = (1280, 720);
+            assert!(enc.reconfigure_resolution(&s).expect("shrink"), "{codec:?}");
+            println!("{codec:?}: 1080p -> 720p holds {} frames; 720p admits {admitted}", enc.dpb);
+            assert_eq!(enc.dpb, admitted, "{codec:?}: the shrink kept the 1080p buffer");
+            let mut frames = Vec::new();
+            for i in 1..=8 {
+                let (out, reference) = encode(&mut enc, i, 1280, 720);
+                if i == 1 {
+                    assert_eq!(reference, Reference::None, "{codec:?}: the resize's IDR");
+                    if codec == Codec::H264 {
+                        assert_eq!(h264_max_num_ref_frames(&out), Some(REFERENCE_FRAMES), "720p declares eight");
+                    }
+                } else {
+                    assert_eq!(reference, Reference::Frame(i as u16 - 1), "{codec:?} frame {i}");
+                }
+                frames.push(out);
+            }
+            assert!(enc.invalidate_reference(2), "{codec:?}: the device refused the invalidation");
+            let (out, reference) = encode(&mut enc, 9, 1280, 720);
+            assert_eq!(reference, Reference::Frame(1), "{codec:?}: a loss six deep");
+            frames.push(out);
+            let off = apart_without(codec, &frames, 1..8);
+            println!("{codec:?}: at 720p, frame 9 without frames 2-8 is {off:.3} off the complete decode");
+            assert!(off < 0.5, "{codec:?}: the decoder that lost frames 2-8 shows {off:.2} off the one that saw them");
+            (s.width, s.height) = (1920, 1080);
+            assert!(enc.reconfigure_resolution(&s).expect("in-place grow"), "{codec:?}");
+            assert_eq!(enc.dpb, enc.dpb_frames_at(1920, 1080, 60), "{codec:?}");
+            let (out, _) = encode(&mut enc, 10, 1920, 1080);
+            if codec == Codec::H264 {
+                assert_eq!(h264_max_num_ref_frames(&out), Some(4), "1080p declares four");
+            }
+            (s.width, s.height) = (1280, 720);
+            assert!(enc.reconfigure_resolution(&s).expect("shrink"), "{codec:?}");
+            assert_eq!(enc.dpb, admitted, "{codec:?}: the round trip kept the 1080p buffer");
+            let (out, _) = encode(&mut enc, 11, 1280, 720);
+            if codec == Codec::H264 {
+                assert_eq!(h264_max_num_ref_frames(&out), Some(REFERENCE_FRAMES), "720p declares eight again");
+            }
         }
     }
 

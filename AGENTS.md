@@ -68,8 +68,10 @@ low nibble being the frame kind), the per-codec quantizer domain the shared `vid
 level ladders, and the bitstream reads that label frames. A session advertises its stream's level from the
 shared ladder at the current geometry (`codec.rs`), the lowest a decoder is asked to accept, so a hardware
 decoder that gates on the level — older Apple and Intel parts refuse a level above their ceiling even for a
-picture they could hold — takes the stream; NVENC re-declares it with a forced IDR on each in-place resize, and
-holds AV1 alone at the resize headroom's level, which NVENC validates its session against at init. JPEG and
+picture they could hold — takes the stream; NVENC re-declares it with a forced IDR on each in-place resize
+(reopening the session where the new level admits a larger decoded picture buffer, which the driver lowers in
+place but never raises), and holds AV1 alone at the resize headroom's level, which NVENC validates its session
+against at init. JPEG and
 H.264 may stripe (`encoders/software.rs`);
 every other codec streams whole frames. Every session that can name what a frame predicts from
 does (`encoders/reference.rs`, `StripeFrame.reference_frame_id`), and `invalidate_reference`
