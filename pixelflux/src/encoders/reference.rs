@@ -7,6 +7,18 @@ use std::collections::VecDeque;
 /// for, where its level admits it.
 pub const REFERENCE_FRAMES: u32 = 8;
 
+/// The most long-term frames a window keeps as anchors, out of the decoded picture buffer, so a
+/// loss older than every recent frame still finds one before it.
+pub const ANCHORS: usize = 2;
+
+/// Two anchors take a frame every `ANCHOR_EVERY` frames after a key frame by turns, the lost or
+/// older one first, so one is always twelve to twenty-three frames old.
+const ANCHOR_EVERY: u64 = 12;
+
+/// One anchor takes a frame every `ANCHOR_ALONE_EVERY` frames after a key frame: a loss just
+/// before it is reported once it has moved on, which a longer period makes rarer.
+const ANCHOR_ALONE_EVERY: u64 = 48;
+
 /// The frame a delivered frame predicts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Reference {
@@ -58,9 +70,15 @@ pub enum Invalidation {
 /// a gap across that wrap, and FFmpeg's H.264 decoder derives the picture order past such a gap
 /// wrongly and withholds every picture after it until a key frame, so a loss covering that frame
 /// is answered with a key frame rather than a prediction past it.
+///
+/// A window `with_anchors` also keeps long-term frames out of the buffer: the key frame is the
+/// first anchor and frames after it are marked on a schedule, and a loss older than every recent
+/// frame is predicted past from the newest anchor before it.
 pub struct ReferenceWindow {
     frames: VecDeque<(u16, u64, bool)>,
     capacity: usize,
+    anchors: Vec<Option<(u16, u64, bool)>>,
+    recent: VecDeque<(u16, u64)>,
     next_pts: u64,
     age: KeyAge,
     key_pts: u64,
@@ -96,11 +114,44 @@ impl ReferenceWindow {
         Self {
             frames: VecDeque::new(),
             capacity: capacity.max(1) as usize,
+            anchors: Vec::new(),
+            recent: VecDeque::new(),
             next_pts: 0,
             age: KeyAge::default(),
             key_pts: 0,
             frame_num_range: 0,
         }
+    }
+
+    /// A window over a decoded picture buffer of `capacity` frames, `count` of them anchors (one
+    /// or two).
+    pub fn with_anchors(capacity: u32, count: usize) -> Self {
+        let mut w = Self::new(capacity);
+        w.anchors = vec![None; count.clamp(1, ANCHORS)];
+        w.set_capacity(capacity);
+        w
+    }
+
+    /// Whether the window keeps anchors.
+    pub fn anchored(&self) -> bool {
+        !self.anchors.is_empty()
+    }
+
+    /// The anchor the next frame is marked into, if any: the first for a key frame or while none
+    /// is held, and on the schedule after it the one that is empty, lost, or older.
+    pub fn plan_anchor(&self, key: bool) -> Option<u8> {
+        if self.anchors.is_empty() {
+            return None;
+        }
+        if key || !self.has_reference() || self.anchors.iter().all(Option::is_none) {
+            return Some(0);
+        }
+        let every = if self.anchors.len() == 1 { ANCHOR_ALONE_EVERY } else { ANCHOR_EVERY };
+        if !(self.next_pts - self.key_pts).is_multiple_of(every) {
+            return None;
+        }
+        let rank = |a: &Option<(u16, u64, bool)>| a.map_or((0, 0), |(_, pts, lost)| (u8::from(!lost), pts));
+        (0..self.anchors.len()).min_by_key(|&i| rank(&self.anchors[i])).map(|i| i as u8)
     }
 
     /// How many values the stream's `frame_num` takes before it wraps; 0 for a codec without
@@ -109,9 +160,17 @@ impl ReferenceWindow {
         self.frame_num_range = range as u64;
     }
 
-    /// The decoded picture buffer the session has now; frames past it are let go.
+    /// Forget every frame held, for a stream the session restarts with a key frame of its own.
+    pub fn reset(&mut self) {
+        self.frames.clear();
+        self.anchors.iter_mut().for_each(|a| *a = None);
+        self.recent.clear();
+    }
+
+    /// The decoded picture buffer the session has now; frames past it are let go. The anchors
+    /// take their share of it.
     pub fn set_capacity(&mut self, capacity: u32) {
-        self.capacity = capacity.max(1) as usize;
+        self.capacity = capacity.saturating_sub(self.anchors.len() as u32).max(1) as usize;
         while self.frames.len() > self.capacity {
             self.frames.pop_front();
         }
@@ -122,21 +181,37 @@ impl ReferenceWindow {
         self.next_pts
     }
 
+    /// The anchors held, in no order.
+    fn anchor_frames(&self) -> impl Iterator<Item = (u16, u64, bool)> + '_ {
+        self.anchors.iter().flatten().copied()
+    }
+
     /// Whether a frame not coded as a key frame has a reference left to predict from.
     pub fn has_reference(&self) -> bool {
-        self.frames.iter().any(|f| !f.2)
+        self.frames.iter().copied().chain(self.anchor_frames()).any(|f| !f.2)
     }
 
     /// The newest frame the client still has, as its id and timestamp: the one the next frame
     /// predicts from.
     pub fn newest_valid(&self) -> Option<(u16, u64)> {
-        self.frames.iter().rev().find(|f| !f.2).map(|f| (f.0, f.1))
+        let held = self.frames.iter().copied().chain(self.anchor_frames());
+        held.filter(|f| !f.2).max_by_key(|f| f.1).map(|f| (f.0, f.1))
     }
 
     /// The frames the decoder holds, oldest first: each frame's id, timestamp, and whether
     /// a client reported it lost.
     pub fn held(&self) -> impl Iterator<Item = (u16, u64, bool)> + '_ {
-        self.frames.iter().copied()
+        // The anchors, newest first so the oldest pops, merged into the recent frames.
+        let mut anchors: Vec<_> = self.anchor_frames().collect();
+        anchors.sort_by_key(|f| std::cmp::Reverse(f.1));
+        let mut frames = self.frames.iter().copied().peekable();
+        std::iter::from_fn(move || {
+            if anchors.last().is_some_and(|a| frames.peek().is_none_or(|f| a.1 < f.1)) {
+                anchors.pop()
+            } else {
+                frames.next()
+            }
+        })
     }
 
     /// The timestamp of the last key frame, where the counts a codec keeps restart.
@@ -146,25 +221,46 @@ impl ReferenceWindow {
 
     /// Record the frame just encoded with `next_pts` and answer what it predicted from.
     pub fn record(&mut self, frame_id: u16, key: bool) -> Reference {
+        self.record_marked(frame_id, key, None)
+    }
+
+    /// Record the frame just encoded with `next_pts`, marked into `anchor` where the session
+    /// marked it (`plan_anchor`), and answer what it predicted from.
+    pub fn record_marked(&mut self, frame_id: u16, key: bool, anchor: Option<u8>) -> Reference {
         let pts = self.next_pts;
         self.next_pts += 1;
         self.age.record(frame_id, key);
         let reference = if key {
             self.frames.clear();
+            self.anchors.iter_mut().for_each(|a| *a = None);
             self.key_pts = pts;
             Reference::None
         } else {
-            self.frames.iter().rev().find(|f| !f.2).map_or(Reference::None, |f| Reference::Frame(f.0))
+            self.newest_valid().map_or(Reference::None, |(id, _)| Reference::Frame(id))
         };
-        self.frames.push_back((frame_id, pts, false));
-        if self.frames.len() > self.capacity {
-            self.frames.pop_front();
+        match anchor.and_then(|slot| self.anchors.get_mut(slot as usize)) {
+            Some(slot) => *slot = Some((frame_id, pts, false)),
+            None => {
+                self.frames.push_back((frame_id, pts, false));
+                if self.frames.len() > self.capacity {
+                    self.frames.pop_front();
+                }
+            }
+        }
+        if self.anchored() {
+            self.recent.push_back((frame_id, pts));
+            if self.recent.len() > RECENT_FRAMES {
+                self.recent.pop_front();
+            }
         }
         reference
     }
 
     /// Leave `frame_id` and every frame encoded after it out of the references.
     pub fn invalidate(&mut self, frame_id: u16) -> Invalidation {
+        if self.anchored() {
+            return self.invalidate_anchored(frame_id);
+        }
         let Some(&(oldest, _, _)) = self.frames.front() else {
             return Invalidation::Ignored;
         };
@@ -186,6 +282,37 @@ impl ReferenceWindow {
             }
             None => Invalidation::Ignored,
         }
+    }
+
+    /// `invalidate` where anchors are kept: a loss older than every recent frame is dated by
+    /// the frames remembered and predicted past from an anchor before it, where one is left.
+    fn invalidate_anchored(&mut self, frame_id: u16) -> Invalidation {
+        let remembered = self.recent.iter().rev().find(|r| r.0 == frame_id).map(|r| r.1);
+        let lost_pts = match remembered {
+            Some(pts) if pts >= self.key_pts => pts,
+            Some(_) => return Invalidation::Ignored,
+            None => {
+                // Older than every frame remembered, so everything held predicts through it; a
+                // frame before the key frame, or one never sent, was never a reference.
+                let Some(&(oldest, _)) = self.recent.front() else { return Invalidation::Ignored };
+                if !self.age.behind(frame_id).is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) {
+                    return Invalidation::Ignored;
+                }
+                self.key_pts
+            }
+        };
+        let newest = self.next_pts.saturating_sub(1);
+        // The first frame at or after the loss that carries `frame_num` 0, if one was sent.
+        let range = self.frame_num_range;
+        let wraps = range > 0 && (lost_pts - self.key_pts).div_ceil(range) * range <= newest - self.key_pts;
+        let cut = if wraps { 0 } else { lost_pts };
+        for f in self.frames.iter_mut().filter(|f| f.1 >= cut) {
+            f.2 = true;
+        }
+        for a in self.anchors.iter_mut().flatten().filter(|a| a.1 >= cut) {
+            a.2 = true;
+        }
+        if wraps || !self.has_reference() { Invalidation::KeyFrame } else { Invalidation::Forget(lost_pts) }
     }
 }
 
@@ -593,6 +720,140 @@ mod tests {
         }
         assert_eq!(w.invalidate(id(39_989)), Invalidation::Ignored, "before the key frame");
         assert_eq!(w.invalidate(id(39_995)), Invalidation::Forget(39_995));
+    }
+
+    /// A window over four frames that keeps anchors, fed a key frame and `n` frames after it as
+    /// its session would mark them.
+    fn anchored(n: u16) -> ReferenceWindow {
+        let mut w = ReferenceWindow::with_anchors(4, 2);
+        for id in 0..=n {
+            let key = id == 0;
+            let slot = w.plan_anchor(key);
+            w.record_marked(id, key, slot);
+        }
+        w
+    }
+
+    #[test]
+    fn anchors_are_marked_every_twelfth_frame_into_the_older_one() {
+        let mut w = ReferenceWindow::with_anchors(4, 2);
+        assert_eq!(w.plan_anchor(true), Some(0), "the key frame is the first anchor");
+        assert_eq!(w.record_marked(0, true, Some(0)), Reference::None);
+        let mut marks = Vec::new();
+        for id in 1..=48u16 {
+            let slot = w.plan_anchor(false);
+            if let Some(slot) = slot {
+                marks.push((id, slot));
+            }
+            assert_eq!(w.record_marked(id, false, slot), Reference::Frame(id - 1), "frame {id}");
+        }
+        assert_eq!(marks, [(12, 1), (24, 0), (36, 1), (48, 0)]);
+        // Two of the four frames are anchors, so two recent frames are held beside them.
+        assert_eq!(w.held().map(|f| f.0).collect::<Vec<_>>(), [36, 46, 47, 48]);
+    }
+
+    #[test]
+    fn one_anchor_takes_every_forty_eighth_frame() {
+        let mut w = ReferenceWindow::with_anchors(4, 1);
+        w.record_marked(0, true, w.plan_anchor(true));
+        let mut marks = Vec::new();
+        for id in 1..=100u16 {
+            let slot = w.plan_anchor(false);
+            if let Some(slot) = slot {
+                marks.push((id, slot));
+            }
+            w.record_marked(id, false, slot);
+        }
+        assert_eq!(marks, [(48, 0), (96, 0)]);
+        // Three recent frames beside the anchor; a loss before the anchor finds nothing older.
+        assert_eq!(w.held().map(|f| f.0).collect::<Vec<_>>(), [96, 98, 99, 100]);
+        assert_eq!(w.invalidate(97), Invalidation::Forget(97));
+        assert_eq!(w.record_marked(101, false, w.plan_anchor(false)), Reference::Frame(96));
+        assert_eq!(w.invalidate(95), Invalidation::KeyFrame);
+    }
+
+    #[test]
+    fn a_loss_older_than_every_recent_frame_is_predicted_past_from_an_anchor() {
+        // Held: anchors 0 and 12, recent frames 19 and 20.
+        let mut w = anchored(20);
+        assert_eq!(w.invalidate(16), Invalidation::Forget(16));
+        assert_eq!(w.record_marked(21, false, w.plan_anchor(false)), Reference::Frame(12));
+        assert_eq!(w.record_marked(22, false, w.plan_anchor(false)), Reference::Frame(21));
+        // A loss before the newer anchor leaves the key frame.
+        let mut w = anchored(20);
+        assert_eq!(w.invalidate(10), Invalidation::Forget(10));
+        assert_eq!(w.record_marked(21, false, w.plan_anchor(false)), Reference::Frame(0));
+        // So does a loss of the newer anchor itself.
+        let mut w = anchored(20);
+        assert_eq!(w.invalidate(12), Invalidation::Forget(12));
+        assert_eq!(w.newest_valid(), Some((0, 0)));
+        // Losing the key frame leaves nothing.
+        let mut w = anchored(20);
+        assert_eq!(w.invalidate(0), Invalidation::KeyFrame);
+        assert!(!w.has_reference());
+        assert_eq!(w.plan_anchor(false), Some(0), "the next frame is a key frame and the first anchor");
+    }
+
+    #[test]
+    fn a_lost_anchor_is_the_one_marked_next() {
+        // Anchors 24 and 12; frame 24 is reported lost at frame 30.
+        let mut w = anchored(30);
+        assert_eq!(w.invalidate(24), Invalidation::Forget(24));
+        assert_eq!(w.record_marked(31, false, w.plan_anchor(false)), Reference::Frame(12));
+        for id in 32..=35u16 {
+            w.record_marked(id, false, w.plan_anchor(false));
+        }
+        // Frame 36 replaces the lost anchor, keeping frame 12, the one the client still has.
+        assert_eq!(w.plan_anchor(false), Some(0));
+    }
+
+    #[test]
+    fn the_wrap_rule_and_unsent_frames_hold_with_anchors() {
+        let mut w = ReferenceWindow::with_anchors(4, 2);
+        w.set_frame_num_range(16);
+        for id in 0..=17u16 {
+            let key = id == 0;
+            let slot = w.plan_anchor(key);
+            w.record_marked(id, key, slot);
+        }
+        // Frame 16 carries frame_num 0 again.
+        assert_eq!(w.invalidate(17), Invalidation::Forget(17));
+        assert_eq!(w.invalidate(15), Invalidation::KeyFrame, "15 to 17 go, and 16 is the wrap");
+        let mut w = anchored(20);
+        assert_eq!(w.invalidate(40), Invalidation::Ignored, "a frame never sent is nothing to forget");
+        w.record_marked(21, true, Some(0));
+        assert_eq!(w.invalidate(20), Invalidation::Ignored, "before the key frame");
+        assert_eq!(w.invalidate(21), Invalidation::KeyFrame, "the key frame was all there was");
+    }
+
+    #[test]
+    fn a_key_frame_the_session_forces_itself_is_marked() {
+        let mut w = anchored(20);
+        // A reconfigure that forces a key frame of its own resets the window first.
+        w.reset();
+        assert!(!w.has_reference(), "the next frame has to be a key frame");
+        assert_eq!(w.plan_anchor(false), Some(0));
+        assert_eq!(w.invalidate(19), Invalidation::Ignored, "nothing is held");
+        // A key frame nobody marked leaves no anchor, so the next frame takes the first.
+        let mut w = anchored(20);
+        w.record_marked(21, true, None);
+        assert_eq!(w.plan_anchor(false), Some(0));
+        w.record_marked(22, false, Some(0));
+        assert_eq!(w.plan_anchor(false), None);
+    }
+
+    #[test]
+    fn anchors_take_their_share_of_the_buffer() {
+        let mut w = ReferenceWindow::with_anchors(8, 2);
+        for id in 0..=30u16 {
+            let key = id == 0;
+            let slot = w.plan_anchor(key);
+            w.record_marked(id, key, slot);
+        }
+        assert_eq!(w.held().count(), 8, "six recent frames and two anchors");
+        w.set_capacity(4);
+        assert_eq!(w.held().count(), 4, "two recent frames and two anchors");
+        assert!(!ReferenceWindow::new(4).anchored() && w.anchored());
     }
 
     #[test]

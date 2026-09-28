@@ -68,10 +68,8 @@ low nibble being the frame kind), the per-codec quantizer domain the shared `vid
 level ladders, and the bitstream reads that label frames. A session advertises its stream's level from the
 shared ladder at the current geometry (`codec.rs`), the lowest a decoder is asked to accept, so a hardware
 decoder that gates on the level — older Apple and Intel parts refuse a level above their ceiling even for a
-picture they could hold — takes the stream; NVENC re-declares it with a forced IDR on each in-place resize
-(reopening the session where the new level admits a larger decoded picture buffer, which the driver lowers in
-place but never raises), and holds AV1 alone at the resize headroom's level, which NVENC validates its session
-against at init. JPEG and
+picture they could hold — takes the stream; NVENC re-declares it with a forced IDR on each in-place resize, and
+holds AV1 alone at the resize headroom's level, which NVENC validates its session against at init. JPEG and
 H.264 may stripe (`encoders/software.rs`);
 every other codec streams whole frames. Every session that can name what a frame predicts from
 does (`encoders/reference.rs`, `StripeFrame.reference_frame_id`), and `invalidate_reference`
@@ -81,7 +79,10 @@ keeps), NVENC where the device reports reference-picture invalidation, VA-API wh
 session's own H.264 or HEVC slice headers or addresses the VP8 buffers and the VP9 and AV1 slots, Tegra for
 H.265 through the vendor's external reference set (L4T R32 and R36), SVT-AV1 at a constant rate where the release
 takes reference commands (4.2 on); and the stream declares the decoded picture buffer its level admits, or for AV1
-a fixed eight whatever the level, four under NVENC, whose AV1 frames predict from no more. A session that does not
+a fixed eight whatever the level, four under NVENC, whose AV1 frames predict from no more. NVENC keeps long-term
+frames of that buffer as anchors where the device offers them (H.264 one, since its fallback takes the first alone,
+H.265 two), so a loss older than every recent frame, or than a buffer a resize left small (the driver lowers the
+buffer in place but never raises it), is still predicted past. A session that does not
 (x265, kvazaar, SVT-AV1 at a constant quantizer or before 4.2, Tegra's H.264 and AV1, a stateful V4L2 device)
 refuses, and the caller forces an IDR instead; an H.264 session answers a loss covering the frame at its `frame_num` wrap with a key frame itself,
 since the FFmpeg decoder of Chromium and Firefox derives the picture order past that gap wrongly and withholds every picture after it. Every full-frame session is chosen by one ladder,

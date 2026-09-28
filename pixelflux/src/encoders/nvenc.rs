@@ -40,7 +40,7 @@ use super::codec::{
     av1_level, h264_dpb_frames, h264_level, h265_dpb_frames, h265_level, h265_tier, push_video_header,
     Codec, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, VIDEO_HEADER_LEN,
 };
-use super::reference::{Invalidation, Reference, ReferenceWindow};
+use super::reference::{Invalidation, Reference, ReferenceWindow, ANCHORS};
 use super::sps::h264_frame_num_range;
 use crate::RustCaptureSettings;
 use nvcodec_sys::cuda::*;
@@ -665,6 +665,13 @@ const HEADROOM_HEIGHT: u32 = 2160;
 /// the common rates keeps the level, as the geometry headroom keeps it across a resize.
 const HEADROOM_FPS: u32 = 60;
 
+/// The frames a reference window holds for a decoded picture buffer of `dpb`: an H.265 session
+/// keeping anchors still reaches the frame the next frame's reference picture set lets go, one
+/// past the buffer it declares.
+fn window_frames(codec: Codec, dpb: u32, anchored: bool) -> u32 {
+    dpb + u32::from(codec == Codec::H265 && anchored)
+}
+
 /// The in-place resize headroom for one axis: the requested size lifted to `floor` but never past
 /// the driver's reported maximum, so initializing with headroom cannot itself exceed what the GPU
 /// supports.
@@ -1223,10 +1230,8 @@ pub struct NvencEncoder {
     /// The 4:2:0 chroma convert, where the driver took the kernel and the session is not 4:4:4.
     /// `None` leaves NVENC's own conversion in place.
     csc: Option<ChromaConvert>,
-    /// The decoded picture buffer the session declares, in frames: what its picture's level
-    /// admits. The driver lowers it in place but never raises it, so a resize to a picture whose
-    /// level admits more reopens a session that predicts past losses, and leaves one that tracks
-    /// no references at the smaller buffer.
+    /// The decoded picture buffer the session declares, in frames, which a resize lowers where
+    /// the new level admits fewer and never raises.
     dpb: u32,
     /// The frames the decoder holds, so a lost one can be left out of the predictions and each
     /// frame can name what it predicts from; None where the device cannot invalidate a
@@ -1838,7 +1843,19 @@ impl NvencEncoder {
                 Codec::Av1 => AV1_REFERENCES,
                 _ => h264_dpb_frames(level, width, height),
             };
-            Self::configure_codec(&mut config, codec, is_444, level, dpb, &tuning);
+            // Long-term frames as anchors where the device keeps them and the buffer leaves two
+            // recent frames beside them, so a loss older than every recent frame is still
+            // predicted past. An H.264 session falls back to the first long-term frame alone, so
+            // it keeps one; AV1 keeps its fixed four references.
+            let anchors = match codec {
+                Codec::H265 => ANCHORS,
+                Codec::Av1 => 0,
+                _ => 1,
+            };
+            let ltr = query_cap(&function_list, encoder_session, codec_guid, NV_ENC_CAPS::NV_ENC_CAPS_NUM_MAX_LTR_FRAMES);
+            let offered = ltr.is_some_and(|n| n >= anchors as i32);
+            let anchors = if invalidation && offered && dpb as usize >= anchors + 2 { anchors } else { 0 };
+            Self::configure_codec(&mut config, codec, is_444, level, dpb, anchors, &tuning);
 
             let mut init_params = NV_ENC_INITIALIZE_PARAMS {
                 version: sv(NvStruct::InitializeParams),
@@ -2024,7 +2041,13 @@ impl NvencEncoder {
                 direct_dmabuf: std::env::var("PIXELFLUX_NVENC_DIRECT").as_deref() != Ok("0"),
                 csc,
                 dpb,
-                references: invalidation.then(|| ReferenceWindow::new(dpb)),
+                references: invalidation.then(|| {
+                    if anchors > 0 {
+                        ReferenceWindow::with_anchors(window_frames(codec, dpb, true), anchors)
+                    } else {
+                        ReferenceWindow::new(dpb)
+                    }
+                }),
                 last_reference: Reference::Untracked,
             })
         }
@@ -2074,6 +2097,7 @@ impl NvencEncoder {
         fullcolor: bool,
         level: u32,
         dpb: u32,
+        anchors: usize,
         tuning: &NvencTuning,
     ) {
         let primaries = NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709;
@@ -2094,6 +2118,11 @@ impl NvencEncoder {
                     let c = &mut config.encodeCodecConfig.hevcConfig;
                     c.level = level;
                     c.maxNumRefFramesInDPB = dpb;
+                    if anchors > 0 {
+                        c.set_enableLTR(1);
+                        c.ltrTrustMode = 0;
+                        c.ltrNumFrames = anchors as u32;
+                    }
                     c.tier = if tuning.hevc_high_tier { h265_tier(level) } else { 0 };
                     c.sliceMode = SLICE_MODE_COUNT;
                     c.sliceModeData = tuning.slices;
@@ -2128,6 +2157,11 @@ impl NvencEncoder {
                     let c = &mut config.encodeCodecConfig.h264Config;
                     c.level = level;
                     c.maxNumRefFrames = dpb;
+                    if anchors > 0 {
+                        c.set_enableLTR(1);
+                        c.ltrTrustMode = 0;
+                        c.ltrNumFrames = anchors as u32;
+                    }
                     c.sliceMode = SLICE_MODE_COUNT;
                     c.sliceModeData = tuning.slices;
                     c.idrPeriod = 0xFFFFFFFF;
@@ -2242,13 +2276,11 @@ impl NvencEncoder {
     ///    the encode path; pinned hosts are dropped because the source shm segments are recreated
     ///    on resize and may reuse the same base addresses.
     /// 4. **Reconfigure the session**: update the level for the new size, the decoded picture
-    ///    buffer that level admits, the CBR bitrate + VBV or the ConstQP, and the new dimensions /
-    ///    DAR / frame rate, then `NvEncReconfigureEncoder` with `resetEncoder` and `forceIDR` so
-    ///    the stream restarts cleanly at the new size. The driver takes a smaller buffer at the
-    ///    forced IDR but refuses a larger one, so where the level admits more frames than a
-    ///    session tracking references holds, the NVENC session is reopened at the new config on
-    ///    the same CUDA context instead (about 100 ms, against a few for the reconfigure), its
-    ///    first frame a key frame. Driver rejection returns `Err`.
+    ///    buffer where that level admits fewer frames (the driver takes a smaller one at the
+    ///    forced IDR and refuses to raise it again), the CBR bitrate + VBV or the ConstQP, and the
+    ///    new dimensions / DAR / frame rate, then `NvEncReconfigureEncoder` with `resetEncoder`
+    ///    and `forceIDR` so the stream restarts cleanly at the new size. Driver rejection returns
+    ///    `Err`.
     /// 5. **Reallocate the packed input** at the new size and register + map it as init does, in
     ///    the byte order the session was last fed.
     ///
@@ -2286,9 +2318,7 @@ impl NvencEncoder {
             self.omit_stripe_headers = settings.omit_stripe_headers;
             return Ok(false);
         }
-        let admitted = self.dpb_frames_at(new_w, new_h, settings.target_fps.max(1.0) as u32);
-        let reopen = admitted > self.dpb && self.references.is_some();
-        let dpb = if reopen { admitted } else { admitted.min(self.dpb) };
+        let dpb = self.dpb_frames_at(new_w, new_h, settings.target_fps.max(1.0) as u32).min(self.dpb);
 
         unsafe {
             let _ = (self.cuda.cuCtxPushCurrent_v2)(self.cuda_context);
@@ -2346,12 +2376,7 @@ impl NvencEncoder {
             self.init_params.darHeight = new_h;
             self.init_params.frameRateNum = (settings.target_fps.max(1.0)) as u32;
             self.init_params.frameRateDen = 1;
-            if reopen {
-                if let Err(e) = self.reopen_session() {
-                    (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
-                    return Err(e);
-                }
-            } else if self.reconfigure(true, true) != NVENCSTATUS::NV_ENC_SUCCESS {
+            if self.reconfigure(true, true) != NVENCSTATUS::NV_ENC_SUCCESS {
                 (self.cuda.cuCtxPopCurrent_v2)(ptr::null_mut());
                 return Err("NvEncReconfigureEncoder rejected the resolution change".into());
             }
@@ -2359,7 +2384,8 @@ impl NvencEncoder {
             self.height = new_h;
             self.dpb = dpb;
             if let Some(references) = &mut self.references {
-                references.set_capacity(dpb);
+                references.set_capacity(window_frames(self.codec, dpb, references.anchored()));
+                references.reset();
             }
 
             let mut input_device_ptr: CUdeviceptr = 0;
@@ -2536,49 +2562,6 @@ impl NvencEncoder {
         Ok(())
     }
 
-    /// Replace the NVENC session with one initialized at the live config, with its bitstream
-    /// buffers, on the same CUDA context, which is current; nothing may be registered on the old
-    /// one.
-    unsafe fn reopen_session(&mut self) -> Result<(), String> {
-        let f = &self.nvenc_funcs;
-        for bs in self.bitstream_buffers.drain(..) {
-            (f.nvEncDestroyBitstreamBuffer.unwrap())(self.encoder_session, bs);
-        }
-        (f.nvEncDestroyEncoder.unwrap())(self.encoder_session);
-        self.encoder_session = ptr::null_mut();
-        let mut session_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
-            version: sv(NvStruct::OpenSessionExParams),
-            deviceType: NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_CUDA,
-            device: self.cuda_context as *mut c_void,
-            apiVersion: neg_api(),
-            ..Default::default()
-        };
-        let status = (f.nvEncOpenEncodeSessionEx.unwrap())(&mut session_params, &mut self.encoder_session);
-        if status != NVENCSTATUS::NV_ENC_SUCCESS {
-            self.encoder_session = ptr::null_mut();
-            return Err(session_refusal(status));
-        }
-        self.init_params.encodeConfig = &mut self.encode_config;
-        let mut init = Negotiated::new(self.init_params);
-        let status = (f.nvEncInitializeEncoder.unwrap())(self.encoder_session, &mut init.value);
-        if status != NVENCSTATUS::NV_ENC_SUCCESS {
-            return Err(format!("Reopening the session failed ({status:?}): {}", last_error(f, self.encoder_session)));
-        }
-        self.current_buffer_idx = 0;
-        for _ in 0..BITSTREAM_BUFFERS {
-            let mut params = NV_ENC_CREATE_BITSTREAM_BUFFER {
-                version: sv(NvStruct::CreateBitstreamBuffer),
-                ..Default::default()
-            };
-            let status = (f.nvEncCreateBitstreamBuffer.unwrap())(self.encoder_session, &mut params);
-            if status != NVENCSTATUS::NV_ENC_SUCCESS {
-                return Err("Failed to create bitstream buffer".into());
-            }
-            self.bitstream_buffers.push(params.bitstreamBuffer);
-        }
-        Ok(())
-    }
-
     /// Hand the live config to `nvEncReconfigureEncoder`, resetting the encoder and forcing an IDR
     /// as asked.
     unsafe fn reconfigure(&mut self, reset: bool, force_idr: bool) -> NVENCSTATUS {
@@ -2721,6 +2704,9 @@ impl NvencEncoder {
                 );
                 return false;
             }
+            if level_raised && let Some(references) = &mut self.references {
+                references.reset();
+            }
             true
         }
     }
@@ -2768,9 +2754,24 @@ impl NvencEncoder {
             ..Default::default()
         };
 
+        let anchor = self.references.as_ref().and_then(|r| r.plan_anchor(force_idr));
+        if let Some(slot) = anchor {
+            match self.codec {
+                Codec::H265 => {
+                    let p = &mut pic_params.codecPicParams.hevcPicParams;
+                    p.set_ltrMarkFrame(1);
+                    p.ltrMarkFrameIdx = slot as u32;
+                }
+                _ => {
+                    let p = &mut pic_params.codecPicParams.h264PicParams;
+                    p.set_ltrMarkFrame(1);
+                    p.ltrMarkFrameIdx = slot as u32;
+                }
+            }
+        }
         let held_qp = self.held_qp.take();
         let held = held_qp.and_then(|crf| self.hold_rate(self.codec.nvenc_quantizer(crf as i32)));
-        let mut result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, held_qp.is_some());
+        let mut result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, held_qp.is_some(), anchor);
         let retry = match (held_qp, held, &result) {
             (Some(crf), Some(rc), Ok(coded))
                 if force_idr && rc.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR =>
@@ -2784,7 +2785,7 @@ impl NvencEncoder {
             && self.hold_rate(self.codec.nvenc_quantizer(coarser as i32)).is_some()
         {
             pic_params.inputTimeStamp = self.references.as_ref().map_or(0, ReferenceWindow::next_pts);
-            result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, true);
+            result = self.encode_picture(&mut pic_params, output_bitstream, frame_number, true, anchor);
         }
         if let Some(rc) = held {
             self.encode_config.rcParams = rc;
@@ -2808,6 +2809,7 @@ impl NvencEncoder {
         output_bitstream: NV_ENC_OUTPUT_PTR,
         frame_number: u64,
         held: bool,
+        anchor: Option<u8>,
     ) -> Result<Vec<u8>, String> {
         let encode_fn = self.nvenc_funcs.nvEncEncodePicture.unwrap();
         let res = encode_fn(self.encoder_session, pic_params);
@@ -2845,7 +2847,7 @@ impl NvencEncoder {
             _ => FRAME_DELTA,
         };
         if let Some(references) = &mut self.references {
-            self.last_reference = references.record(frame_number as u16, frame_type != FRAME_DELTA);
+            self.last_reference = references.record_marked(frame_number as u16, frame_type != FRAME_DELTA, anchor);
         }
 
         if !self.omit_stripe_headers {
@@ -3505,6 +3507,7 @@ mod tests {
                     fullcolor,
                     nvenc_level(codec, 1280, 720, 60, 0, true),
                     1,
+                    0,
                     &NvencTuning::default(),
                 );
                 let got = unsafe {
@@ -3591,13 +3594,36 @@ mod gpu_tests {
                 assert!(lossy.decode(f).expect("decode past the loss"), "{codec:?} frame {i}");
             }
         }
-        let (a, b) = (whole.frame().unwrap(), lossy.frame().unwrap());
+        luma_apart(&whole.frame().unwrap(), &lossy.frame().unwrap())
+    }
+
+    /// Test helper: the mean luma distance between two decoded pictures.
+    fn luma_apart(a: &crate::webcam::convert::I420View<'_>, b: &crate::webcam::convert::I420View<'_>) -> f64 {
         a.y.chunks(a.y_stride)
             .zip(b.y.chunks(b.y_stride))
             .take(a.height)
             .flat_map(|(ra, rb)| ra[..a.width].iter().zip(&rb[..a.width]).map(|(&x, &y)| (x as f64 - y as f64).abs()))
             .sum::<f64>()
             / (a.width * a.height) as f64
+    }
+
+    /// Test helper: the mean luma distance between the last picture decoded from every frame and
+    /// the last one decoded from the frames at the `keep` indices alone; None where those left the
+    /// last one undecodable.
+    fn apart_keeping(codec: Codec, frames: &[Vec<u8>], keep: &[usize]) -> Option<f64> {
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (mut whole, mut part) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
+        let mut got = false;
+        for (i, f) in frames.iter().enumerate() {
+            let _ = whole.decode(f);
+            if keep.contains(&i) {
+                got = part.decode(f).unwrap_or(false) && i == frames.len() - 1;
+            }
+        }
+        if !got {
+            return None;
+        }
+        Some(luma_apart(&whole.frame()?, &part.frame()?))
     }
 
     /// Test helper: the gradient frame with a 256x256 block of another gradient moved `step`
@@ -3856,8 +3882,9 @@ mod gpu_tests {
     /// from the newest frame before it and names it, a decoder that never saw the lost frames
     /// decodes it as one that saw everything does, the stream declares the decoded picture
     /// buffer the level admits, and an in-place resize redeclares it: a loss as deep as the new
-    /// buffer reaches is still predicted past, and a deeper one costs a key frame. A device that
-    /// cannot invalidate a reference tracks none and says so. Ignored by default.
+    /// buffer's recent frames reach is still predicted past, a deeper one from the key frame the
+    /// resize forced, the first anchor, and losing that costs a key frame. A device that cannot
+    /// invalidate a reference tracks none and says so. Ignored by default.
     #[test]
     #[ignore]
     fn gpu_predicts_past_a_lost_frame() {
@@ -3924,7 +3951,7 @@ mod gpu_tests {
             }
             assert!(enc.invalidate_reference(12), "{codec:?}: the device refused the invalidation");
             let (out, reference) = encode(&mut enc, 11 + dpb, 1920, 1080);
-            assert_eq!(reference, Reference::Frame(11), "{codec:?}: the oldest frame the buffer holds");
+            assert_eq!(reference, Reference::Frame(10), "{codec:?}: frame 11 left the recent frames, the anchor is older");
             frames.push(out);
             let (out, reference) = encode(&mut enc, 12 + dpb, 1920, 1080);
             assert_eq!(reference, Reference::Frame(11 + dpb as u16), "{codec:?}");
@@ -3933,17 +3960,102 @@ mod gpu_tests {
             println!("{codec:?}: at 1080p, frame {} without frames 12-{} is {off:.3} off the complete decode", 12 + dpb, 10 + dpb);
             assert!(off < 0.5, "{codec:?}: the decoder that lost frames 12-{} shows {off:.2} off the one that saw them", 10 + dpb);
             assert!(enc.invalidate_reference(11));
-            assert_eq!(encode(&mut enc, 13 + dpb, 1920, 1080).1, Reference::None, "{codec:?}: frame 11 left the buffer");
+            assert_eq!(encode(&mut enc, 13 + dpb, 1920, 1080).1, Reference::Frame(10), "{codec:?}: the anchor is older still");
+            assert!(enc.invalidate_reference(10));
+            assert_eq!(encode(&mut enc, 14 + dpb, 1920, 1080).1, Reference::None, "{codec:?}: nothing older than the key frame");
         }
     }
 
-    /// A session opened at 1080p and resized to 720p takes the larger buffer 720p's level admits,
-    /// reopening the session the driver will not raise it on, so a loss six frames deep is still
-    /// predicted past and decodes as if nothing was lost; a round trip through 1080p ends back at
-    /// it. Ignored by default.
+    /// A loss deeper than the recent frames is predicted past from the newest anchor before it,
+    /// the one the device predicts from, and decodes as the complete stream does; one before every
+    /// anchor costs a key frame. An H.264 session keeps one anchor, a frame every forty-eight, an
+    /// H.265 one two, a frame every twelve by turns, and reaches one recent frame past its buffer.
+    /// Ignored by default.
     #[test]
     #[ignore]
-    fn gpu_a_shrink_takes_the_buffer_its_level_admits() {
+    fn gpu_predicts_past_a_loss_deeper_than_the_recent_frames() {
+        use crate::encoders::reference::Reference;
+        let (w, h) = (1920usize, 1080usize);
+        // (codec, frames sent after the key frame, first frame lost, the anchor predicted from, an
+        // older anchor the device must not have taken)
+        let cases = [
+            (Codec::H264, 60u16, 50u16, Some(48u16), Some(0u16)),
+            (Codec::H264, 60, 57, Some(48), Some(0)),
+            (Codec::H264, 80, 64, Some(48), Some(0)),
+            (Codec::H264, 80, 51, Some(48), Some(0)),
+            (Codec::H264, 60, 40, None, None),
+            (Codec::H265, 30, 28, Some(27), Some(26)),
+            (Codec::H265, 30, 27, Some(24), Some(12)),
+            (Codec::H265, 40, 37, Some(36), Some(24)),
+            (Codec::H265, 40, 30, Some(24), Some(12)),
+            (Codec::H265, 58, 40, Some(36), Some(24)),
+            (Codec::H265, 58, 37, Some(36), Some(24)),
+            (Codec::H265, 40, 20, None, None),
+        ];
+        let fmt = |v: Option<f64>| v.map_or("no picture".to_string(), |x| format!("{x:.3}"));
+        for (codec, sent, lost, from, older) in cases {
+            let mut s = settings(w as i32, h as i32, 60.0);
+            s.codec = codec;
+            s.omit_stripe_headers = true;
+            let mut enc = match host_session(&s) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("{codec:?}: {e}");
+                    continue;
+                }
+            };
+            let mut frames = Vec::new();
+            for i in 0..=sent as usize {
+                frames.push(enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 25, i == 0).expect("encode"));
+                if i == 0 && enc.last_reference() == Reference::Untracked {
+                    break;
+                }
+            }
+            if enc.last_reference() == Reference::Untracked {
+                println!("{codec:?}: this device cannot invalidate a reference");
+                continue;
+            }
+            let normal = frames[sent as usize].len();
+            assert!(enc.invalidate_reference(lost), "{codec:?}: the device refused the invalidation");
+            let next = sent as usize + 1;
+            frames.push(enc.encode_cpu_argb(&moving_frame(w, h, next), w * 4, next as u64, 25, false).expect("encode"));
+            let reference = enc.last_reference();
+            let keeping = |upto: usize| (0..=upto).chain([next]).collect::<Vec<_>>();
+            let without_lost: Vec<usize> = (0..=next).filter(|&i| i < lost as usize || i == next).collect();
+            println!(
+                "{codec:?}: frame {lost} of {sent} lost, frame {next} predicts from {reference:?}, {} B against {normal} B",
+                frames[next].len()
+            );
+            // The frame after an anchor is marked predicts from the anchor itself.
+            if let Some(anchor) = from.filter(|&a| a > 0 && a < sent).map(usize::from) {
+                let skipped: Vec<usize> = (0..=anchor + 1).filter(|&i| i != anchor).collect();
+                let off = apart_keeping(codec, &frames[..=anchor + 1], &skipped);
+                assert!(off.is_none_or(|x| x >= 0.5), "{codec:?}: frame {} decodes without {anchor} ({})", anchor + 1, fmt(off));
+            }
+            match from {
+                Some(anchor) => {
+                    assert_eq!(reference, Reference::Frame(anchor), "{codec:?}: lost {lost}");
+                    let off = apart_keeping(codec, &frames, &without_lost);
+                    assert!(off.is_some_and(|x| x < 0.5), "{codec:?}: without {lost}-{sent} the frame is {} off", fmt(off));
+                    let off = apart_keeping(codec, &frames, &keeping(anchor as usize));
+                    assert!(off.is_some_and(|x| x < 0.5), "{codec:?}: up to the anchor {anchor} the frame is {} off", fmt(off));
+                    if let Some(older) = older {
+                        let off = apart_keeping(codec, &frames, &keeping(older as usize));
+                        assert!(off.is_none_or(|x| x >= 0.5), "{codec:?}: the frame decodes from anchor {older} alone ({})", fmt(off));
+                    }
+                }
+                None => assert_eq!(reference, Reference::None, "{codec:?}: lost {lost}, before every anchor"),
+            }
+        }
+    }
+
+    /// A session opened at 1080p and resized in place to 720p keeps the buffer it declared, which
+    /// the driver never raises, and still predicts past a loss six frames deep from the key frame
+    /// the resize forced, its first anchor, decoding as the complete stream does. Ignored by
+    /// default.
+    #[test]
+    #[ignore]
+    fn gpu_a_shrink_predicts_past_a_loss_deeper_than_its_buffer() {
         use crate::encoders::reference::Reference;
         use crate::encoders::sps::h264_max_num_ref_frames;
         for codec in [Codec::H264, Codec::H265] {
@@ -3967,48 +4079,101 @@ mod gpu_tests {
                 println!("{codec:?}: this device cannot invalidate a reference");
                 continue;
             }
+            let declared = enc.dpb;
             if codec == Codec::H264 {
                 assert_eq!(h264_max_num_ref_frames(&first), Some(4), "1080p at level 4.2 admits four");
             }
-            let admitted = enc.dpb_frames_at(1280, 720, 60);
-            assert_eq!(admitted, REFERENCE_FRAMES, "{codec:?}");
             (s.width, s.height) = (1280, 720);
-            assert!(enc.reconfigure_resolution(&s).expect("shrink"), "{codec:?}");
-            println!("{codec:?}: 1080p -> 720p holds {} frames; 720p admits {admitted}", enc.dpb);
-            assert_eq!(enc.dpb, admitted, "{codec:?}: the shrink kept the 1080p buffer");
+            assert!(enc.reconfigure_resolution(&s).expect("in-place shrink"), "{codec:?}");
+            assert_eq!(enc.dpb, declared, "{codec:?}: the driver never raises the buffer");
             let mut frames = Vec::new();
             for i in 1..=8 {
                 let (out, reference) = encode(&mut enc, i, 1280, 720);
-                if i == 1 {
-                    assert_eq!(reference, Reference::None, "{codec:?}: the resize's IDR");
-                    if codec == Codec::H264 {
-                        assert_eq!(h264_max_num_ref_frames(&out), Some(REFERENCE_FRAMES), "720p declares eight");
-                    }
-                } else {
-                    assert_eq!(reference, Reference::Frame(i as u16 - 1), "{codec:?} frame {i}");
-                }
+                let want = if i == 1 { Reference::None } else { Reference::Frame(i as u16 - 1) };
+                assert_eq!(reference, want, "{codec:?} frame {i}");
                 frames.push(out);
             }
             assert!(enc.invalidate_reference(2), "{codec:?}: the device refused the invalidation");
             let (out, reference) = encode(&mut enc, 9, 1280, 720);
-            assert_eq!(reference, Reference::Frame(1), "{codec:?}: a loss six deep");
+            assert_eq!(reference, Reference::Frame(1), "{codec:?}: a loss six deep, from the resize's key frame");
             frames.push(out);
             let off = apart_without(codec, &frames, 1..8);
-            println!("{codec:?}: at 720p, frame 9 without frames 2-8 is {off:.3} off the complete decode");
+            println!("{codec:?}: at 720p on a {declared}-frame buffer, frame 9 without frames 2-8 is {off:.3} off the complete decode");
             assert!(off < 0.5, "{codec:?}: the decoder that lost frames 2-8 shows {off:.2} off the one that saw them");
-            (s.width, s.height) = (1920, 1080);
-            assert!(enc.reconfigure_resolution(&s).expect("in-place grow"), "{codec:?}");
-            assert_eq!(enc.dpb, enc.dpb_frames_at(1920, 1080, 60), "{codec:?}");
-            let (out, _) = encode(&mut enc, 10, 1920, 1080);
-            if codec == Codec::H264 {
-                assert_eq!(h264_max_num_ref_frames(&out), Some(4), "1080p declares four");
-            }
-            (s.width, s.height) = (1280, 720);
-            assert!(enc.reconfigure_resolution(&s).expect("shrink"), "{codec:?}");
-            assert_eq!(enc.dpb, admitted, "{codec:?}: the round trip kept the 1080p buffer");
-            let (out, _) = encode(&mut enc, 11, 1280, 720);
-            if codec == Codec::H264 {
-                assert_eq!(h264_max_num_ref_frames(&out), Some(REFERENCE_FRAMES), "720p declares eight again");
+        }
+    }
+
+    /// On a real GPU, print what a loss costs the picture at CBR: the frames from one `depth`
+    /// frames deep on never reach the decoder, as a receiver's frame buffer holds back what
+    /// predicts from a lost frame, the loss is reported, and the recovery frame's size and the
+    /// luma PSNR of it and the fourteen frames after it are measured against their sources, over
+    /// losses at scattered phases; depth 0 is the same frames with nothing lost. Prints
+    /// measurements to quote rather than asserting. Ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_bench_loss_recovery() {
+        use crate::encoders::reference::Reference;
+        use crate::webcam::decode::{Decoder as _, VideoDecoder};
+        let (w, h) = (1920usize, 1080usize);
+        for codec in [Codec::H264, Codec::H265] {
+            let mut s = settings(w as i32, h as i32, 60.0);
+            s.codec = codec;
+            s.video_cbr_mode = true;
+            s.video_bitrate_kbps = 8000;
+            for depth in [0usize, 1, 2, 3, 5, 8, 12] {
+                let mut enc = host_session(&s).expect("init");
+                let mut dec = VideoDecoder::new(codec).unwrap();
+                let mut pending: std::collections::VecDeque<Vec<u8>> = Default::default();
+                let mut rng = 0x2545_f491_4f6c_dd1du64 ^ depth as u64;
+                let (mut sizes, mut first, mut after, mut keys) = (Vec::new(), Vec::new(), Vec::new(), 0);
+                let mut i = 0usize;
+                for event in 0..10 {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    let gap = if event == 0 { 60 } else { 20 + (rng % 37) as usize };
+                    for _ in 0..gap {
+                        let out = enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 25, i == 0).expect("encode");
+                        pending.push_back(out);
+                        i += 1;
+                        while pending.len() > depth + 1 {
+                            let out = pending.pop_front().unwrap();
+                            dec.decode(&out[VIDEO_HEADER_LEN..]).expect("decode");
+                        }
+                    }
+                    // The newest `depth + 1` frames, the lost one and those after it, never arrive.
+                    if depth == 0 {
+                        for out in pending.drain(..) {
+                            dec.decode(&out[VIDEO_HEADER_LEN..]).expect("decode");
+                        }
+                    } else {
+                        pending.clear();
+                        enc.invalidate_reference((i - 1 - depth) as u16);
+                    }
+                    let mut row = Vec::new();
+                    for k in 0..15 {
+                        let src = moving_frame(w, h, i);
+                        let out = enc.encode_cpu_argb(&src, w * 4, i as u64, 25, false).expect("encode");
+                        if k == 0 {
+                            sizes.push(out.len() - VIDEO_HEADER_LEN);
+                            keys += usize::from(enc.last_reference() == Reference::None);
+                        }
+                        row.push(luma_psnr(&mut dec, &out, &src, w, h));
+                        i += 1;
+                    }
+                    first.push(row[0]);
+                    after.push(row.iter().sum::<f64>() / row.len() as f64);
+                }
+                sizes.sort();
+                let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+                println!(
+                    "RECOVERY {codec:?} depth {depth}: {keys}/10 key frames, answer {} B median, \
+                     answer PSNR {:.2} dB mean ({:.2} worst), with the 14 after {:.2} dB mean",
+                    sizes[sizes.len() / 2],
+                    mean(&first),
+                    first.iter().cloned().fold(f64::INFINITY, f64::min),
+                    mean(&after),
+                );
             }
         }
     }
