@@ -7649,7 +7649,8 @@ impl ScreenCapture {
     }
     /// Invoke `callback(mimes: list[str])` from a background thread on every
     /// selection change in the app compositor (including the one current at call
-    /// time). A second watch for the same display replaces the first.
+    /// time), with no mimes for a cleared selection. A second watch for the same
+    /// display replaces the first.
     fn clipboard_watch_app(
         &self,
         py: Python<'_>,

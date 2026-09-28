@@ -527,8 +527,8 @@ struct WatchHandle {
 static WATCHERS: Mutex<Option<HashMap<String, WatchHandle>>> = Mutex::new(None);
 
 /// Report every selection change on `socket_path` (including the one current at
-/// start) to `callback(mimes: list[str])` from a background thread. A second
-/// watch on the same socket replaces the first.
+/// start) to `callback(mimes: list[str])` from a background thread, a cleared
+/// selection as no mimes. A second watch on the same socket replaces the first.
 pub(crate) fn watch(socket_path: &str, callback: Py<PyAny>) -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -581,16 +581,14 @@ fn watch_loop(socket_path: &str, callback: Py<PyAny>, stop: &AtomicBool) -> Resu
                 .as_ref()
                 .and_then(|o| state.offer_mimes.get(&o.id()).cloned())
                 .unwrap_or_default();
-            if !mimes.is_empty() {
-                if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-                Python::attach(|py| {
-                    if let Err(e) = callback.call1(py, (mimes,)) {
-                        e.print(py);
-                    }
-                });
+            if crate::PY_SHUTDOWN.load(Ordering::Relaxed) {
+                break;
             }
+            Python::attach(|py| {
+                if let Err(e) = callback.call1(py, (mimes,)) {
+                    e.print(py);
+                }
+            });
         }
         queue.flush().map_err(|e| format!("flush: {e}"))?;
         if let Some(guard) = conn.prepare_read() {
