@@ -81,8 +81,7 @@ pub fn set_size_cap(cap: i32) {
 }
 
 /// An X11 capture started: the first one in spawns the monitor.
-pub fn acquire(size_cap: i32) {
-    SIZE_CAP.store(size_cap, Ordering::Relaxed);
+pub fn acquire() {
     let mut slot = SLOT.lock().unwrap();
     slot.users += 1;
     if slot.monitor.is_none() {

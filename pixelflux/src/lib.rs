@@ -6716,6 +6716,12 @@ struct ScState {
     /// window today; the pairing must not depend on it.
     cursor_ref: bool,
     controls: Option<Arc<crate::x11::Controls>>,
+    /// The controls of an X11 capture whose threads already run while `start_capture` has not
+    /// published it: its first frames can reach a consumer before the start returns, and what
+    /// that consumer asks for in reply (a lost frame, a key frame, a rate) has to reach the
+    /// capture. A stop or a newer start in that window ends that capture, which is then never
+    /// published.
+    starting: Option<Arc<crate::x11::Controls>>,
     handle: Option<thread::JoinHandle<()>>,
     cap_thread_id: Option<thread::ThreadId>,
     /// The internal encode thread's id, so a re-entrant stop arriving on it is
@@ -6743,6 +6749,18 @@ struct ScState {
     err: Option<Arc<Mutex<Option<String>>>>,
 }
 
+impl ScState {
+    /// The X11 controls a request reaches: the published capture's, else those of one still
+    /// starting.
+    fn x11_controls(&self) -> Option<Arc<crate::x11::Controls>> {
+        match self.backend {
+            1 => self.controls.clone(),
+            0 => self.starting.clone(),
+            _ => None,
+        }
+    }
+}
+
 /// Unified capture handle exposed to Python. Drives the X11 capture directly or delegates to the
 /// shared Wayland backend, chosen at `start_capture` time. Exposes start_capture / stop_capture /
 /// request_idr_frame / update_* / is_capturing, plus the Wayland input-injection methods.
@@ -6762,10 +6780,14 @@ impl ScreenCapture {
     /// releasing the GIL first because the deliver thread runs the Python callback and holding the
     /// GIL across the joins would deadlock. A re-entrant stop arriving on the capture, encode, or
     /// deliver thread cannot join itself, so it detaches and lets the threads exit on the stop flag.
+    /// An X11 capture still starting is only signaled: its start joins it and publishes nothing.
     fn stop_internal(&self, py: Python<'_>) -> PyResult<()> {
         let (handle, deliver_handle, same_thread, backend, controls, wl_display, cursor_ref) = {
             let mut st = self.inner.lock().unwrap();
             if let Some(c) = &st.controls {
+                c.stop.store(true, Ordering::Relaxed);
+            }
+            if let Some(c) = st.starting.take() {
                 c.stop.store(true, Ordering::Relaxed);
             }
             let cur = Some(thread::current().id());
@@ -6858,6 +6880,7 @@ impl ScreenCapture {
                 backend: 0,
                 cursor_ref: false,
                 controls: None,
+                starting: None,
                 handle: None,
                 cap_thread_id: None,
                 encode_thread_id: None,
@@ -6876,11 +6899,15 @@ impl ScreenCapture {
     /// the shared backend, distinguishing the compositor RENDER node from the ENCODER node and
     /// resolving an AUTO_GPU request; restarting this instance's own live Wayland capture skips the
     /// stop so the calloop can reconfigure the running session in place — keeping a compatible NVENC
-    /// session alive — instead of destroying it and forcing a full rebuild. An **X11** start
-    /// resolves AUTO_GPU to an encoder device when none was chosen explicitly, then spawns the
-    /// capture thread (which internally spawns the encode+deliver thread). The per-frame delivery
-    /// closure makes one GIL acquisition per frame with all stripes batched, and a failed start
-    /// surfaces as a `PyErr` rather than a silent, forever-"capturing" state.
+    /// session alive — instead of destroying it and forcing a full rebuild; it publishes the
+    /// display id with the GIL held since the command, so no frame reaches Python before a
+    /// control request can find the capture. An **X11** start resolves AUTO_GPU to an encoder
+    /// device when none was chosen explicitly, then spawns the capture thread (which internally
+    /// spawns the encode+deliver thread). Its first frames can reach `callback` before it returns,
+    /// so the control methods reach the capture from the moment its threads spawn (`starting`).
+    /// The per-frame delivery closure makes one GIL acquisition per frame with all stripes
+    /// batched, and a failed start surfaces as a `PyErr` rather than a silent,
+    /// forever-"capturing" state.
     fn start_capture(
         &self,
         py: Python<'_>,
@@ -6968,8 +6995,11 @@ impl ScreenCapture {
         );
 
         let controls = Arc::new(crate::x11::Controls::new(&rs));
-        let cursor_cap = rs.cursor_size_cap;
+        crate::x11::cursor::set_size_cap(rs.cursor_size_cap);
         live_x11().lock().unwrap().push(controls.clone());
+        if let Some(other) = self.inner.lock().unwrap().starting.replace(controls.clone()) {
+            other.stop.store(true, Ordering::Relaxed);
+        }
         let c2 = controls.clone();
         let c3 = controls.clone();
         let cb = callback;
@@ -7052,6 +7082,12 @@ impl ScreenCapture {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = handle.join();
                 live_x11().lock().unwrap().retain(|x| !Arc::ptr_eq(x, &controls));
+                let mut st = self.inner.lock().unwrap();
+                if !st.starting.as_ref().is_some_and(|c| Arc::ptr_eq(c, &controls)) {
+                    return Ok(());
+                }
+                st.starting = None;
+                drop(st);
                 let msg = err_slot
                     .lock()
                     .ok()
@@ -7067,10 +7103,20 @@ impl ScreenCapture {
                 None
             }
         };
+        let mut st = self.inner.lock().unwrap();
+        if !st.starting.as_ref().is_some_and(|c| Arc::ptr_eq(c, &controls)) {
+            drop(st);
+            live_x11().lock().unwrap().retain(|x| !Arc::ptr_eq(x, &controls));
+            py.detach(|| {
+                join_within(handle, "capture");
+                join_within(deliver_handle, "delivery");
+            });
+            return Ok(());
+        }
+        st.starting = None;
         // Take the monitor reference BEFORE publishing the capture: a stop that
         // observes this capture must always find the reference it is to release.
-        crate::x11::cursor::acquire(cursor_cap);
-        let mut st = self.inner.lock().unwrap();
+        crate::x11::cursor::acquire();
         st.backend = 1;
         st.cursor_ref = true;
         st.controls = Some(controls);
@@ -7177,10 +7223,10 @@ impl ScreenCapture {
     fn request_idr_frame(&self, py: Python<'_>) -> PyResult<()> {
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = controls {
                     c.force_idr.store(true, Ordering::Relaxed);
                 }
@@ -7202,10 +7248,10 @@ impl ScreenCapture {
     fn invalidate_reference(&self, py: Python<'_>, frame_id: u16) -> PyResult<()> {
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = controls {
                     c.invalid_frames.lock().unwrap().push(frame_id);
                 }
@@ -7228,10 +7274,10 @@ impl ScreenCapture {
     fn update_video_bitrate(&self, py: Python<'_>, kbps: i32) -> PyResult<()> {
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = &controls {
                     c.bitrate_kbps.store(kbps, Ordering::Relaxed);
                     c.rate_dirty.store(true, Ordering::Release);
@@ -7246,15 +7292,15 @@ impl ScreenCapture {
     fn update_framerate(&self, py: Python<'_>, fps: f64) -> PyResult<()> {
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = &controls {
                     c.fps_milli.store((fps.max(1.0) * 1000.0) as u64, Ordering::Relaxed);
                     c.rate_dirty.store(true, Ordering::Release);
+                    py.detach(crate::x11::follow_frame_rate);
                 }
-                py.detach(crate::x11::follow_frame_rate);
             }
             2 => wayland_update_rate(py, did, None, None, Some(fps)),
             _ => {}
@@ -7266,10 +7312,10 @@ impl ScreenCapture {
     fn update_vbv_multiplier(&self, py: Python<'_>, multiplier: f64) -> PyResult<()> {
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = &controls {
                     c.vbv_mult_milli
                         .store((multiplier * 1000.0).round() as i32, Ordering::Relaxed);
@@ -7290,16 +7336,16 @@ impl ScreenCapture {
         let t = LiveTunables::from_settings(&rs);
         let (backend, controls, did) = {
             let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone(), st.wl_display)
+            (st.backend, st.x11_controls(), st.wl_display)
         };
         match backend {
-            1 => {
+            0 | 1 => {
                 if let Some(c) = &controls {
                     c.capture_cursor.store(t.capture_cursor, Ordering::Relaxed);
                     *c.tunables.lock().unwrap() = Some(t);
                     c.tunables_dirty.store(true, Ordering::Release);
+                    crate::x11::cursor::set_size_cap(rs.cursor_size_cap);
                 }
-                crate::x11::cursor::set_size_cap(rs.cursor_size_cap);
             }
             2 => wayland_update_tunables(py, did, t),
             _ => {}
@@ -7320,7 +7366,7 @@ impl ScreenCapture {
                     "update_capture_region is X11-only; on Wayland restart the capture with new dimensions",
                 ));
             }
-            st.controls.clone()
+            st.x11_controls()
         };
         if let Some(c) = &controls {
             *c.region.lock().unwrap() = (x.max(0), y.max(0), width, height);
@@ -7631,14 +7677,9 @@ impl ScreenCapture {
     /// out-of-band cursor callback): the X11 grab re-reads the flag per frame, Wayland
     /// forwards to the compositor.
     fn set_cursor_rendering(&self, py: Python<'_>, enabled: bool) -> PyResult<()> {
-        let (backend, controls) = {
-            let st = self.inner.lock().unwrap();
-            (st.backend, st.controls.clone())
-        };
-        if backend == 1 {
-            if let Some(c) = &controls {
-                c.capture_cursor.store(enabled, Ordering::Relaxed);
-            }
+        let controls = self.inner.lock().unwrap().x11_controls();
+        if let Some(c) = &controls {
+            c.capture_cursor.store(enabled, Ordering::Relaxed);
             return Ok(());
         }
         wayland_backend_running(py).map_or(Ok(()), |be| be.bind(py).borrow().set_cursor_rendering(enabled))
