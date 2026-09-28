@@ -2749,6 +2749,36 @@ fn cursor_surface_hotspot(
 /// Longest a render tick waits for the GPU to finish a frame before giving that frame up.
 const RENDER_FENCE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Reads `target` back as RGBA into `dst`. The read runs in a frame of the target: a dmabuf
+/// bound as a texture gets a framebuffer of its own on each bind, which only a frame makes
+/// current, so a bare read on a tick that drew nothing would read another framebuffer.
+fn read_back_rgba(
+    renderer: &mut GlesRenderer,
+    target: &mut smithay::backend::renderer::gles::GlesTarget<'_>,
+    width: i32,
+    height: i32,
+    dst: &mut [u8],
+) {
+    let read = renderer
+        .render(target, (width, height).into(), Transform::Normal)
+        .and_then(|mut frame| {
+            frame.with_context(|gl| unsafe {
+                gl.ReadPixels(
+                    0,
+                    0,
+                    width,
+                    height,
+                    smithay::backend::renderer::gles::ffi::RGBA,
+                    smithay::backend::renderer::gles::ffi::UNSIGNED_BYTE,
+                    dst.as_mut_ptr() as *mut std::ffi::c_void,
+                );
+            })
+        });
+    if let Err(e) = read {
+        eprintln!("[Wayland] Readback failed: {e:?}");
+    }
+}
+
 /// Wait, bounded, for a render's fence to signal before the tick reuses or releases the
 /// buffers it sampled.
 ///
@@ -3315,33 +3345,13 @@ fn render_node_tick(
                                 // other slot across a tick; one catch-up readback keeps
                                 // every published buffer current.
                                 if render_success && c.pool_content_gen[id] != c.content_gen {
-                                    let _ = renderer.with_context(|gl| unsafe {
-                                        gl.ReadPixels(
-                                            0,
-                                            0,
-                                            width,
-                                            height,
-                                            smithay::backend::renderer::gles::ffi::RGBA,
-                                            smithay::backend::renderer::gles::ffi::UNSIGNED_BYTE,
-                                            buf.as_mut_ptr() as *mut std::ffi::c_void,
-                                        );
-                                    });
+                                    read_back_rgba(renderer, &mut frame, width, height, buf);
                                     c.pool_content_gen[id] = c.content_gen;
                                 }
                             }
                         }
                         if pool_slot.is_none() && take_screenshot {
-                            let _ = renderer.with_context(|gl| unsafe {
-                                gl.ReadPixels(
-                                    0,
-                                    0,
-                                    width,
-                                    height,
-                                    smithay::backend::renderer::gles::ffi::RGBA,
-                                    smithay::backend::renderer::gles::ffi::UNSIGNED_BYTE,
-                                    node.frame_buffer.as_mut_ptr() as *mut std::ffi::c_void,
-                                );
-                            });
+                            read_back_rgba(renderer, &mut frame, width, height, &mut node.frame_buffer);
                         }
                     },
                     Err(e) => eprintln!("Failed to bind buffer: {:?}", e)
