@@ -1618,7 +1618,8 @@ mod tests {
     }
 
     /// On a VA-API device (`cargo test vaapi_ -- --ignored --nocapture`): whichever sequence
-    /// parameter set the driver writes, the key frame bounds reordering at zero and decodes.
+    /// parameter set the driver writes, the key frame bounds reordering at zero, and every
+    /// picture decodes as it arrives, past the decoder's pool of references plus two.
     #[test]
     #[ignore]
     fn vaapi_h264_bounds_reordering_at_zero() {
@@ -1640,5 +1641,10 @@ mod tests {
         assert_no_reorder(&key, enc.vendor());
         let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
         assert!(dec.decode(&key).expect("the bounded key frame decodes"), "no picture");
+        for n in 1..12u64 {
+            let frame: Vec<u8> = (0..w * h).flat_map(|i| [((i % w) as u64 + n * 8) as u8, (i / w) as u8, 0x80, 0xff]).collect();
+            let unit = enc.encode_host(&frame, w * 4, false, n, 25, false).expect("encode");
+            assert!(dec.decode(&unit).unwrap_or_else(|e| panic!("frame {n}: {e:?}")), "frame {n}: no picture");
+        }
     }
 }
