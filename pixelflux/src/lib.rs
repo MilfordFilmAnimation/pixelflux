@@ -2942,6 +2942,8 @@ fn render_node_tick(
             }
         });
 
+    // The picture's capture time for the stats: compositing is this path's capture.
+    let composite_ns = wayland::host::now_ns();
     let mut render_success = false;
     let mut render_sync = None;
     let mut damage_rects: Vec<Rectangle<i32, Physical>> = Vec::new();
@@ -3561,7 +3563,7 @@ fn render_node_tick(
                         frame_id: cap.frame_counter,
                         damage: std::mem::take(&mut damage_rects),
                         is_animated: node.overlay_state.is_animated(),
-                        captured_ns: wayland::host::now_ns(),
+                        captured_ns: new_stamp.unwrap_or(composite_ns),
                     };
                     if let Some(pool) = cap.encode_pool.as_ref() {
                         pool.publish(frame);
@@ -3656,7 +3658,7 @@ fn render_node_tick(
                                     data: Arc::new(data), codec: cap.settings.codec, stripe_y_start: 0,
                                     stripe_height: height, frame_id: cap.frame_counter as i32,
                                     timing: FrameTiming {
-                                        capture_ns: new_stamp.unwrap_or(encode_start_ns),
+                                        capture_ns: new_stamp.unwrap_or(composite_ns),
                                         encode_start_ns,
                                         encode_end_ns: wayland::host::now_ns(),
                                     },
