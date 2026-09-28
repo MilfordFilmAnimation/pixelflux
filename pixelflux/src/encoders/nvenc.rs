@@ -1202,6 +1202,8 @@ pub struct NvencEncoder {
     /// The quality index the rate control last coded a frame at (held frames aside), from the
     /// driver's average quantizer.
     last_quality: Option<u32>,
+    /// Bytes of the last frame the rate control coded, held frames aside.
+    last_bytes: Option<usize>,
     encode_config: NV_ENC_CONFIG,
     init_params: NV_ENC_INITIALIZE_PARAMS,
     input_device_ptr: CUdeviceptr,
@@ -2019,6 +2021,7 @@ impl NvencEncoder {
                 held_qp: None,
                 hold_refused: false,
                 last_quality: None,
+                last_bytes: None,
                 encode_config: config,
                 init_params,
                 input_device_ptr,
@@ -2609,6 +2612,11 @@ impl NvencEncoder {
         self.last_quality
     }
 
+    /// The bytes of the last frame the rate control coded; a held frame leaves it.
+    pub fn last_size(&self) -> Option<usize> {
+        self.last_bytes
+    }
+
     /// Encode the next frame at the constant quantizer the quality index `crf` selects, whatever
     /// the rate control, and leave the session's own rate control and quantizer as they were
     /// for the frame after: the cleanup of a still screen. A held key frame of a constant-rate
@@ -2840,6 +2848,7 @@ impl NvencEncoder {
                 q if self.codec == Codec::Av1 => Some(self.codec.nvenc_quality_index(q)),
                 q => Some(q),
             };
+            self.last_bytes = Some(data_size);
         }
         let frame_type = match lock_params.pictureType {
             NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_IDR => FRAME_KEY,

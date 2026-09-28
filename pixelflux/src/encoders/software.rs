@@ -659,7 +659,10 @@ impl H264EncoderWrapper {
 ///   paint-over quantizer where `burst_held`), and `dirty_run`, `change_mass`, `unclean_frames`,
 ///   and `motion` (the share of recent frames in motion) are what `pipeline::cleanup_due` weighs
 ///   to pick the cleanup's moment and kind; `clean_quality` keeps a constant-quality session at
-///   the paint-over quality from a cleanup until the region changes again.
+///   the paint-over quality from a cleanup until the region changes again; `rc_bytes` (the bytes
+///   of the stripe's last frame under its rate control) and `idle_frames` (a constant-rate
+///   cleanup's run of small frames short of the paint-over quality) tell a cleanup that runs
+///   through the rate control when it has converged or stalled.
 /// - **Content-hash damage** (only for sources without external damage, i.e. X11): `last_hash` is
 ///   the previous frame's content hash, `consecutive_changes` counts changed frames toward the
 ///   damage-block threshold, and `in_damage_block` / `damage_block_frames_remaining` drive the
@@ -674,6 +677,8 @@ pub struct StripeState {
     pub motion: f32,
     pub burst_held: bool,
     pub clean_quality: bool,
+    pub rc_bytes: usize,
+    pub idle_frames: u32,
     #[cfg(feature = "gpl")]
     pub h264_encoder: Option<H264EncoderWrapper>,
     #[cfg(not(feature = "gpl"))]
@@ -877,9 +882,11 @@ pub fn stripes_hold_quantizer(settings: &RustCaptureSettings) -> bool {
 /// 4. **Per-stripe cleanup** (`pipeline::cleanup_due`, one region per stripe): a stripe that
 ///    changed is cleaned up once it has held still for `paint_over_trigger_frames`, or has kept
 ///    changing only a little for four times that, at the paint-over JPEG quality or, for H.264,
-///    at the paint-over quality: under CBR held for the frame where the stripe's last quantizer
-///    is coarser (`H264EncoderWrapper::hold_quantizer`), under CRF as the stripe's rate factor
-///    until it changes again, as main's paint-over was; as a key frame after a run of changes and
+///    at the paint-over quality: under CBR through libx264's rate control, the stripe sent until
+///    it codes at the paint-over quantizer or finer in a small frame (`pipeline::convergence`),
+///    with no key frame, and where the stripe's encoder reports no quantizer (OpenH264) as a
+///    refresh and burst at its rate control's quality; under CRF as the stripe's rate factor
+///    until it changes again, as main's paint-over was, as a key frame after a run of changes and
 ///    a refresh otherwise, then a burst. The stripes whose cleanups fall due on one
 ///    frame are spread over `CLEANUP_STAGGER_FRAMES` frames, so a screen going still costs no
 ///    one frame the whole screen's cleanup. A stripe is otherwise sent when it is dirty, while
@@ -958,12 +965,13 @@ pub fn encode_cpu(
         }
     };
     let holds = stripes_hold_quantizer(settings);
-    let keys = codec.is_video() && holds;
+    let converges = codec.is_video() && settings.video_cbr_mode && cfg!(feature = "gpl");
+    let keys = codec.is_video() && holds && !converges;
     let paint_over_armed = |st: &StripeState| {
         if !codec.is_video() {
             return settings.use_paint_over_quality && settings.paint_over_jpeg_quality > settings.jpeg_quality;
         }
-        crate::pipeline::paint_over_improves(settings, crate::pipeline::EncoderQuality { last: coded_quality(st), holds, reopens: false })
+        crate::pipeline::paint_over_improves(settings, crate::pipeline::EncoderQuality { last: coded_quality(st), bytes: None, holds, reopens: false })
     };
     let trigger_frames = settings.paint_over_trigger_frames;
     let idle_candidate = damage_rects.is_empty()
@@ -1105,21 +1113,33 @@ pub fn encode_cpu(
             let mut quality_or_crf = if !video { jpeg_q } else { video_crf };
             let mut force_idr = video && (force_idr_all || cleanup == Cleanup::Key);
             let mut hold = None;
-            let quality = crate::pipeline::EncoderQuality { last: coded_quality(stripe_state), holds, reopens: false };
+            let quality = crate::pipeline::EncoderQuality { last: coded_quality(stripe_state), bytes: None, holds, reopens: false };
             let refresh_crf = crate::pipeline::held_refresh_quality(settings, quality) as i32;
             if cleanup != Cleanup::None {
                 if !video {
                     quality_or_crf = paint_q;
                 } else if cleanup == Cleanup::Key {
                     hold = Some(video_po_crf);
-                } else if holds {
+                } else if holds && !converges {
                     hold = Some(refresh_crf);
                 }
             } else if force_idr_all && !is_dirty && !video && armed && stripe_state.paint_over_sent {
                 quality_or_crf = paint_q;
             }
+            if converges && stripe_state.h264_burst_frames_remaining > 0 && !is_dirty && cleanup == Cleanup::None {
+                let budget = crate::pipeline::frame_budget(video_bitrate, target_fps);
+                let bytes = (stripe_state.rc_bytes > 0).then_some(stripe_state.rc_bytes);
+                if crate::pipeline::convergence(quality.last, bytes, video_po_crf.max(0) as u32, budget)
+                    == crate::pipeline::Convergence::Converged
+                {
+                    stripe_state.h264_burst_frames_remaining = 0;
+                }
+            }
             if is_dirty {
                 stripe_state.h264_burst_frames_remaining = 0;
+            } else if video && converges && (cleanup != Cleanup::None || (force_idr && video_burst > 0 && armed)) {
+                stripe_state.h264_burst_frames_remaining = crate::pipeline::converge_frames(settings);
+                stripe_state.burst_held = false;
             } else if video && (force_idr || cleanup != Cleanup::None) && video_burst > 0 {
                 stripe_state.h264_burst_frames_remaining = video_burst;
                 stripe_state.burst_held = holds && (cleanup != Cleanup::None || (armed && !settings.video_cbr_mode));
@@ -1280,6 +1300,9 @@ pub fn encode_cpu(
                             omit_headers,
                             &mut stripe_state.packet_buf,
                         ) {
+                            if hold.is_none() || !video_cbr {
+                                stripe_state.rc_bytes = stripe_state.packet_buf.len();
+                            }
                             Some(EncodedStripe {
                                 data: Arc::new(std::mem::take(&mut stripe_state.packet_buf)),
                                 codec: Codec::H264,

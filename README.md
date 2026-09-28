@@ -238,7 +238,7 @@ settings.paint_over_jpeg_quality = 90   # Quality for static "paint-over" stripe
 
 # --- Video Settings ---
 settings.video_crf = 25                            # Quality index on the H.264 QP scale (0-51, lower is better quality); mapped onto each codec's own quantizer range
-settings.video_paintover_crf = 18                  # Quality index a still screen is cleaned up at, held whatever the rate control. Acts under CRF when lower than video_crf, under CBR when finer than what the rate control reached.
+settings.video_paintover_crf = 18                  # Quality index a still screen is cleaned up at. Acts under CRF when lower than video_crf, under CBR when finer than what the rate control reached.
 settings.video_paintover_burst_frames = 5          # Frames sent after a cleanup or a key frame on a still screen, so rate control settles.
 settings.video_fullcolor = False                   # Use 4:4:4 chroma instead of 4:2:0 where the codec carries it (H.264 and H.265): software x264/x265 and NVENC take it, VA-API negotiates it per device.
 settings.video_fullframe = True                    # H.264 only: encode full frames instead of changed stripes (every other video codec is full-frame)
@@ -749,10 +749,14 @@ asked for.
     *   **Paint-Over:** Cleans up a still screen once its content stops changing, even while
         `video_streaming_mode` encodes every frame: a refresh at the paint-over quality, and after
         a large change a key frame at it once the screen holds still. Under CRF the session moves
-        to the paint-over quality for them on every encoder that takes a quality from the caller;
-        under CBR the frame is held at it where the encoder holds a quantizer, and one that does
-        not sends the refresh at the rate control's own quality, never a key frame. A screen that
-        keeps changing only a little (a blinking caret) is cleaned up all the same.
+        to the paint-over quality for them on every encoder that takes a quality from the caller.
+        Under CBR, NVENC and software H.264 are cleaned up through their rate control: the frames
+        keep flowing, each within its budget, until it codes the screen at the paint-over quality,
+        with no key frame, and NVENC holds one frame at that quality only where its rate control
+        stops short of it (a low rate for the resolution). Other encoders that hold a quantizer
+        hold the cleanup frames at it; one that does not sends the refresh at the rate control's
+        own quality, never a key frame. A screen that keeps changing only a little (a blinking
+        caret) is cleaned up all the same.
     *   **Damage Throttling:** Limits processing during high-motion scenes.
     *   **On-demand keyframes:** `request_idr_frame()` forces an IDR for reconnecting clients.
     *   **Reference invalidation:** `invalidate_reference(frame_id)` has the encoder predict past a

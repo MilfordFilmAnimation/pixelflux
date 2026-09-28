@@ -790,6 +790,17 @@ impl FrameEncoder {
         }
     }
 
+    /// The bytes of the last frame the rate control coded, held frames aside, where the session
+    /// reports them with its quantizer (NVENC): with `last_quality`, what tells a constant-rate
+    /// cleanup that runs through the rate control whether it has converged on a still screen
+    /// (`pipeline::decide_hw_fullframe`).
+    pub fn last_size(&self) -> Option<usize> {
+        match self {
+            FrameEncoder::Nvenc(enc) => enc.last_size(),
+            _ => None,
+        }
+    }
+
     /// Whether `hold_quantizer` holds a frame at the quantizer asked for under the session's rate
     /// control: NVENC, libvpx, and SVT-AV1 at a constant rate (where the release takes a new
     /// target with a picture) do; x265 and VA-API only at a constant quantizer (their

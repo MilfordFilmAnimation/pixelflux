@@ -51,6 +51,24 @@ const KEY_STILL_TRIGGERS: u32 = 4;
 const LOW_MOTION_TRIGGERS: u32 = 4;
 const LOW_MOTION_SHARE: f32 = 0.25;
 
+/// A constant-rate cleanup that runs through the rate control keeps the frames flowing until the
+/// rate control codes the region at the paint-over quantizer or finer in a frame under this share
+/// of the frame budget: it has nothing left to refine.
+const CONVERGED_SHARE: f64 = 0.25;
+
+/// Trigger periods of such small frames at a quantizer still coarser than the paint-over one after
+/// which the rate control counts as stalled: it stopped refining short of the paint-over quality,
+/// as NVENC's does at 2 Mbit/s at 1080p.
+const STALL_TRIGGERS: u32 = 2;
+
+/// Trigger periods a constant-rate cleanup through the rate control has to converge before it
+/// falls back to a held refresh: at 8 Mbit/s NVENC converges on a 1080p screen of text within
+/// four, and where the rate is low for the resolution it crawls for seconds.
+const FALLBACK_TRIGGERS: u32 = 6;
+
+/// Seconds a constant-rate cleanup through the rate control flows at most.
+const CONVERGE_S: f64 = 10.0;
+
 impl Damage {
     /// The damage a set of rectangles on a `width` x `height` frame reports: their summed area,
     /// clipped to the frame, overlaps counted twice.
@@ -94,7 +112,8 @@ pub enum Cleanup {
 
 /// The still-screen cleanup of one region (a whole frame, or a stripe): track how long and how
 /// much it has been changing, and say when it is due a cleanup and of which kind. `keys` false
-/// (JPEG, whose every stripe is a picture of its own) never answers `Cleanup::Key`.
+/// (JPEG, whose every stripe is a picture of its own, and a constant-rate session cleaned up
+/// through its rate control) never answers `Cleanup::Key`.
 ///
 /// Static is read from the content (`damage`), never from what was sent, so a stream that
 /// encodes every frame (Turbo) sees the screen go still exactly like one that sends only changes.
@@ -183,12 +202,13 @@ pub fn cleanup_pending(st: &StripeState, trigger: u32, enabled: bool, keys: bool
 
 /// What an encoder says about the frames it codes, which the cleanup reads: the quality index
 /// its rate control last coded a frame at, where it reports one (`FrameEncoder::last_quality`),
-/// whether it holds a frame at a quantizer it is asked for (`FrameEncoder::holds_quantizer`),
-/// and whether a change of its constant quality re-opens it on a key frame
-/// (`FrameEncoder::reopens_on_quality`).
+/// the bytes of that frame, where it reports them too (`FrameEncoder::last_size`), whether it
+/// holds a frame at a quantizer it is asked for (`FrameEncoder::holds_quantizer`), and whether a
+/// change of its constant quality re-opens it on a key frame (`FrameEncoder::reopens_on_quality`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EncoderQuality {
     pub last: Option<u32>,
+    pub bytes: Option<usize>,
     pub holds: bool,
     pub reopens: bool,
 }
@@ -196,8 +216,52 @@ pub struct EncoderQuality {
 impl EncoderQuality {
     /// What `encoder` says.
     pub fn of(encoder: &FrameEncoder) -> Self {
-        Self { last: encoder.last_quality(), holds: encoder.holds_quantizer(), reopens: encoder.reopens_on_quality() }
+        Self {
+            last: encoder.last_quality(),
+            bytes: encoder.last_size(),
+            holds: encoder.holds_quantizer(),
+            reopens: encoder.reopens_on_quality(),
+        }
     }
+
+    /// Whether a constant-rate cleanup runs through this encoder's rate control: it says both
+    /// the quantizer and the bytes of its frames, so the cleanup can tell when it has refined a
+    /// still screen to the paint-over quality and when it has stopped short of it.
+    pub fn converges(&self) -> bool {
+        self.last.is_some() && self.bytes.is_some()
+    }
+}
+
+/// Where a rate control that the cleanup runs through stands after its last frame, of `bytes`
+/// at quality index `last`, against the paint-over quantizer and `budget` bytes a frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Convergence {
+    /// Still refining: its last frame carried a share of the budget.
+    Refining,
+    /// A small frame at the paint-over quantizer or finer: nothing left to refine.
+    Converged,
+    /// A small frame at a coarser quantizer: refining nothing more this frame.
+    Idle,
+}
+
+/// Where the rate control stands (`Convergence`).
+pub fn convergence(last: Option<u32>, bytes: Option<usize>, paint: u32, budget: f64) -> Convergence {
+    match (last, bytes) {
+        (Some(q), Some(b)) if (b as f64) <= budget * CONVERGED_SHARE => {
+            if q <= paint { Convergence::Converged } else { Convergence::Idle }
+        }
+        _ => Convergence::Refining,
+    }
+}
+
+/// Bytes a frame of the constant-rate target, at `kbps` and `fps`.
+pub fn frame_budget(kbps: i32, fps: f64) -> f64 {
+    kbps.max(1) as f64 * 125.0 / fps.max(1.0)
+}
+
+/// Frames a constant-rate cleanup through the rate control flows at most (`CONVERGE_S`).
+pub fn converge_frames(settings: &RustCaptureSettings) -> i32 {
+    (CONVERGE_S * settings.target_fps.max(1.0)).round() as i32
 }
 
 /// Whether a cleanup improves the picture at all: at a constant quality where the paint-over
@@ -282,11 +346,26 @@ pub fn held_refresh_quality(settings: &RustCaptureSettings, encoder: EncoderQual
 ///    the paint-over quantizer held for it (`hold_qp`, which the encoder applies under any rate
 ///    control; a refresh of a constant-rate session coarsened to `held_refresh_quality`, a key
 ///    frame capped by the encoder at `HELD_KEY_BUDGET_S`) and followed by a recovery burst. A
-///    constant-rate session that holds no quantizer gets the refresh and burst at its rate
-///    control's own quality, which it refines, and no key frame.
+///    constant-rate session whose rate control reports its frames' quantizer and bytes
+///    (`EncoderQuality::converges`: NVENC) is cleaned up through that rate control instead:
+///    the frames keep flowing, each within the rate control's budget, until it codes the screen
+///    at the paint-over quantizer or finer in a frame under `CONVERGED_SHARE` of the budget
+///    (`convergence`), for `CONVERGE_S` at most. A frame held at the paint-over quantizer the
+///    size of a whole refresh would otherwise queue for up to half a second on a link near the
+///    stream's rate; the rate control reaches the same picture in about a second at the
+///    default rate with every frame within its budget. Only where it has not converged within
+///    `FALLBACK_TRIGGERS` periods, or stalls short of the paint-over quality (`STALL_TRIGGERS`
+///    periods of small frames at a coarser quantizer), as where the rate is low for the
+///    resolution, is one refresh held at `held_refresh_quality`, which ends the cleanup: at
+///    2 Mbit/s at 1080p a key frame capped to `HELD_KEY_BUDGET_S` of the target came out coarser
+///    than the picture it cleaned (35.9 dB), where the refresh reached 44.2. A constant-rate session that holds no quantizer
+///    gets the refresh and burst at its rate control's own quality, which it refines, and no key
+///    frame. A change of more than a small area ends that cleanup; a caret blinking or a clock
+///    ticking on the screen does not, so constant low motion is cleaned up the same way.
 /// 2. **Recovery keyframe**: a requested or scheduled IDR, at the rate control's own quality: it
 ///    answers a join or a loss, often on a link that just fell behind, where a key frame the
-///    size of a cleanup would only fall behind again. On a still screen it opens the burst.
+///    size of a cleanup would only fall behind again. On a still screen it opens the burst,
+///    which lasts until the rate control converges where the cleanup runs through it.
 /// 3. **Recovery burst**: the frames after a keyframe or cleanup on a still screen keep flowing
 ///    so rate control settles, until motion resumes: after a cleanup held at the refresh's
 ///    quantizer where the paint-over one still improves on the rate control's, so they go on
@@ -328,16 +407,20 @@ pub fn decide_hw_fullframe(
     let burst = settings.video_paintover_burst_frames;
     let improves = paint_over_improves(settings, encoder);
     let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
-    let cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, encoder.holds, damage);
+    let converges = encoder.converges();
+    let holds = encoder.holds && !converges;
+    let cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, holds, damage);
     let refresh_qp = held_refresh_quality(settings, encoder);
     let cleanup_qp = match cleanup {
-        Cleanup::Refresh if encoder.holds => Some(refresh_qp),
+        Cleanup::Refresh if holds => Some(refresh_qp),
         Cleanup::Key => Some(paint_qp),
         _ => None,
     };
     let mut d = HwFrameDecision { send: false, force_idr: false, target_qp: normal_qp, hold_qp: None };
     if damage.is_dirty() {
-        st.h264_burst_frames_remaining = 0;
+        if !converges || damage.is_motion() {
+            st.h264_burst_frames_remaining = 0;
+        }
         d.send = true;
         d.force_idr = recovery_idr || cleanup == Cleanup::Key;
         d.hold_qp = cleanup_qp;
@@ -347,16 +430,38 @@ pub fn decide_hw_fullframe(
         d.send = true;
         d.force_idr = recovery_idr || cleanup == Cleanup::Key;
         d.hold_qp = cleanup_qp;
-        if burst > 0 && (d.force_idr || cleanup != Cleanup::None) {
+        if converges && (cleanup != Cleanup::None || (burst > 0 && recovery_idr)) {
+            if st.h264_burst_frames_remaining <= 0 || recovery_idr {
+                st.h264_burst_frames_remaining = converge_frames(settings);
+                st.idle_frames = 0;
+            }
+            st.burst_held = false;
+        } else if burst > 0 && (d.force_idr || cleanup != Cleanup::None) {
             st.h264_burst_frames_remaining = burst;
-            st.burst_held = encoder.holds && (cleanup != Cleanup::None || (improves && !settings.video_cbr_mode));
+            st.burst_held = holds && (cleanup != Cleanup::None || (improves && !settings.video_cbr_mode));
         }
         return d;
+    }
+    if converges && st.h264_burst_frames_remaining > 0 {
+        match convergence(encoder.last, encoder.bytes, paint_qp, frame_budget(settings.video_bitrate_kbps, settings.target_fps)) {
+            Convergence::Converged => {
+                st.h264_burst_frames_remaining = 0;
+                st.change_mass = 0.0;
+            }
+            Convergence::Idle => st.idle_frames = st.idle_frames.saturating_add(1),
+            Convergence::Refining => st.idle_frames = 0,
+        }
     }
     if st.h264_burst_frames_remaining > 0 {
         st.h264_burst_frames_remaining -= 1;
         d.send = true;
         d.hold_qp = (st.burst_held && improves).then_some(refresh_qp);
+        let trigger = settings.paint_over_trigger_frames.max(1);
+        let elapsed = (converge_frames(settings) - st.h264_burst_frames_remaining).max(0) as u32;
+        if converges && improves && (st.idle_frames >= STALL_TRIGGERS * trigger || elapsed >= FALLBACK_TRIGGERS * trigger) {
+            d.hold_qp = Some(refresh_qp);
+            st.h264_burst_frames_remaining = 0;
+        }
         return d;
     }
     d.send = settings.video_streaming_mode || is_animated;
@@ -918,7 +1023,7 @@ mod tests {
     use super::*;
 
     /// An encoder that holds a quantizer and reports no quality of its own.
-    const HOLDS: EncoderQuality = EncoderQuality { last: None, holds: true, reopens: false };
+    const HOLDS: EncoderQuality = EncoderQuality { last: None, bytes: None, holds: true, reopens: false };
 
     /// A settings block for the hardware full-frame policy: a constant rate, whose cleanup holds
     /// its frames (`HOLDS` reports no quality of its own, so the cleanup always improves),
@@ -985,7 +1090,7 @@ mod tests {
     #[test]
     fn a_constant_rate_cleanup_keeps_to_its_budget() {
         let s = RustCaptureSettings { video_cbr_mode: true, ..hw_settings() };
-        let coarse = EncoderQuality { last: Some(40), holds: true, reopens: false };
+        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false };
         let mut st = StripeState::default();
         for i in 0..3u16 {
             decide_hw_fullframe(&mut st, &s, i, Damage::Area(1.0), false, false, coarse);
@@ -1020,10 +1125,107 @@ mod tests {
     /// window opening) go out at the session quality, and the key frame waits for the screen to
     /// hold still after it.
     #[test]
+    fn a_constant_rate_cleanup_runs_through_a_rate_control_that_converges() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
+        let refining = EncoderQuality { last: Some(40), bytes: Some(budget), holds: true, reopens: false };
+        let converged = EncoderQuality { last: Some(8), bytes: Some(budget / 8), holds: true, reopens: false };
+        let trigger = s.paint_over_trigger_frames as u16;
+        let window = trigger + (FALLBACK_TRIGGERS as u16) * trigger;
+        let mut st = StripeState::default();
+        decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, refining);
+        let still: Vec<HwFrameDecision> =
+            (1..window).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, refining)).collect();
+        assert!(still.iter().all(|d| d.hold_qp.is_none() && !d.force_idr), "no frame held, no key frame");
+        let first = still.iter().position(|d| d.send).expect("a cleanup");
+        assert_eq!(first + 1, trigger as usize, "due at the trigger");
+        assert!(still[first..].iter().all(|d| d.send), "the frames keep flowing while it refines");
+        let d = decide_hw_fullframe(&mut st, &s, window, Damage::None, false, false, converged);
+        assert!(!d.send, "and stop once it codes a small frame at the paint-over quality");
+        assert!((window + 1..window + 100).all(|i| !decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, converged).send));
+    }
+
+    #[test]
+    fn a_rate_control_that_does_not_converge_gets_one_held_refresh() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
+        let crawling = EncoderQuality { last: Some(38), bytes: Some(budget / 2), holds: true, reopens: false };
+        let mut st = StripeState::default();
+        decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, crawling);
+        let still: Vec<HwFrameDecision> =
+            (1..=200).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, crawling)).collect();
+        assert!(still.iter().all(|d| !d.force_idr), "no key frame");
+        let held: Vec<usize> = still.iter().enumerate().filter(|(_, d)| d.hold_qp.is_some()).map(|(i, _)| i).collect();
+        assert_eq!(held.len(), 1, "{held:?}");
+        let trigger = s.paint_over_trigger_frames as usize;
+        assert_eq!(held[0] + 1, trigger + (FALLBACK_TRIGGERS as usize) * trigger, "after the window");
+        assert_eq!(still[held[0]].hold_qp, Some(held_refresh_quality(&s, crawling)));
+        assert!(still[held[0] + 1..].iter().all(|d| !d.send));
+    }
+
+    #[test]
+    fn a_blinking_caret_does_not_hold_off_a_converging_cleanup() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
+        let crawling = EncoderQuality { last: Some(38), bytes: Some(budget / 2), holds: true, reopens: false };
+        let mut st = StripeState::default();
+        decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, crawling);
+        let trigger = s.paint_over_trigger_frames as u16;
+        let decisions: Vec<HwFrameDecision> = (1..300)
+            .map(|i| {
+                let damage = if i % 3 == 0 { Damage::Area(0.001) } else { Damage::None };
+                decide_hw_fullframe(&mut st, &s, i, damage, false, false, crawling)
+            })
+            .collect();
+        assert!(decisions.iter().all(|d| !d.force_idr), "no key frame");
+        let first = decisions.iter().position(|d| d.hold_qp.is_some()).expect("a held refresh") as u16 + 1;
+        let bound = trigger * (LOW_MOTION_TRIGGERS + 2 * FALLBACK_TRIGGERS) as u16 * 3 / 2;
+        assert!(first <= bound, "the caret does not hold it off: {first} > {bound}");
+        let held = decisions.iter().filter(|d| d.hold_qp.is_some()).count();
+        assert!(held <= 300 / (trigger as usize * LOW_MOTION_TRIGGERS as usize), "{held} held refreshes");
+    }
+
+    #[test]
+    fn a_stalled_rate_control_is_held_once_at_the_paint_over_quantizer() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
+        let idle = EncoderQuality { last: Some(38), bytes: Some(budget / 10), holds: true, reopens: false };
+        let mut st = StripeState::default();
+        decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, idle);
+        let still: Vec<HwFrameDecision> =
+            (1..=200).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle)).collect();
+        let held: Vec<usize> = still.iter().enumerate().filter(|(_, d)| d.hold_qp.is_some()).map(|(i, _)| i).collect();
+        assert_eq!(held.len(), 1, "one held frame: {held:?}");
+        assert_eq!(still[held[0]].hold_qp, Some(held_refresh_quality(&s, idle)));
+        assert!(!still[held[0]].force_idr, "a refresh, not a key frame");
+        let stall = (STALL_TRIGGERS * s.paint_over_trigger_frames) as usize;
+        assert!(held[0] + 1 >= s.paint_over_trigger_frames as usize + stall, "after the stall, not at the trigger");
+        assert!(still[held[0] + 1..].iter().all(|d| !d.send), "which ends the cleanup");
+    }
+
+    #[test]
+    fn a_recovery_key_frame_is_refined_until_the_rate_control_converges() {
+        let s = hw_settings();
+        let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
+        let coarse = EncoderQuality { last: Some(40), bytes: Some(budget), holds: true, reopens: false };
+        let clean = EncoderQuality { last: Some(8), bytes: Some(budget / 8), holds: true, reopens: false };
+        let mut st = StripeState::default();
+        assert!((0..200).all(|i| !decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, clean).send));
+        let join = decide_hw_fullframe(&mut st, &s, 200, Damage::None, false, true, clean);
+        assert!(join.send && join.force_idr && join.hold_qp.is_none());
+        let past_burst = 201 + s.video_paintover_burst_frames as u16 + 3;
+        assert!((201..past_burst).all(|i| {
+            let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, coarse);
+            d.send && !d.force_idr && d.hold_qp.is_none()
+        }), "the rate control keeps refining the key frame past the configured burst");
+        assert!(!decide_hw_fullframe(&mut st, &s, past_burst, Damage::None, false, false, clean).send, "until it converges");
+    }
+
+    #[test]
     fn a_large_change_after_a_clean_still_screen_is_not_keyed_as_it_lands() {
         let s = RustCaptureSettings { video_paintover_burst_frames: 0, ..hw_settings() };
-        let fine = EncoderQuality { last: Some(5), holds: true, reopens: false };
-        let coarse = EncoderQuality { last: Some(40), holds: true, reopens: false };
+        let fine = EncoderQuality { last: Some(5), bytes: None, holds: true, reopens: false };
+        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false };
         let mut st = StripeState::default();
         let mut frame = 0u16;
         let mut step = |st: &mut StripeState, damage: Damage, q: EncoderQuality| {
@@ -1139,7 +1341,7 @@ mod tests {
         assert_eq!(burst.target_qp, paint);
 
         let cbr = RustCaptureSettings { video_cbr_mode: true, paint_over_trigger_frames: 30, ..hw_settings() };
-        let coarse = EncoderQuality { last: Some(40), holds: true, reopens: false };
+        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &cbr, 1, Damage::Area(1.0), false, false, coarse);
         let join = decide_hw_fullframe(&mut st, &cbr, 2, Damage::None, false, true, coarse);
@@ -1187,7 +1389,7 @@ mod tests {
             let mut got = Seen::Nothing;
             for i in 0..40u16 {
                 let damage = if i == 0 { Damage::Area(1.0) } else { Damage::None };
-                let d = decide_hw_fullframe(&mut st, &s, i, damage, false, false, EncoderQuality { last, holds, reopens: false });
+                let d = decide_hw_fullframe(&mut st, &s, i, damage, false, false, EncoderQuality { last, bytes: None, holds, reopens: false });
                 if i > 0 && d.send {
                     assert!(!cbr || holds || !d.force_idr, "a key frame where no quantizer is held: last={last:?}");
                     if d.hold_qp.is_some() {
@@ -1239,7 +1441,7 @@ mod tests {
     #[test]
     fn a_reopening_encoder_counts_its_refresh_as_the_key_frame() {
         let s = crf_settings();
-        let reopens = EncoderQuality { last: None, holds: true, reopens: true };
+        let reopens = EncoderQuality { last: None, bytes: None, holds: true, reopens: true };
         let mut st = StripeState::default();
         for i in 0..3u16 {
             decide_hw_fullframe(&mut st, &s, i, Damage::Area(1.0), false, false, reopens);
@@ -1520,7 +1722,7 @@ mod tests {
     #[test]
     fn a_held_refresh_fits_the_budget_a_constant_rate_leaves() {
         let cbr = RustCaptureSettings { video_cbr_mode: true, video_paintover_crf: 18, target_fps: 30.0, ..hw_settings() };
-        let q = |s: &RustCaptureSettings, last| held_refresh_quality(s, EncoderQuality { last, holds: true, reopens: false });
+        let q = |s: &RustCaptureSettings, last| held_refresh_quality(s, EncoderQuality { last, bytes: None, holds: true, reopens: false });
         assert_eq!(q(&cbr, Some(51)), 22, "thirty frames of budget are 29 steps finer than the rate control");
         assert_eq!(q(&cbr, Some(45)), 18);
         assert_eq!(q(&cbr, Some(30)), 18);
