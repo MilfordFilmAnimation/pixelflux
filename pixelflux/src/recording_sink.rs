@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crossbeam_channel::{bounded, Sender, TrySendError};
+use crossbeam_channel::{Sender, TrySendError, bounded};
 
 use crate::encoders::codec::{Codec, VIDEO_HEADER_LEN, WIRE_VIDEO};
 use crate::encoders::frame_rate::FrameRate;
@@ -125,7 +125,12 @@ impl RecordingSink {
                         let stop_writer = stop.clone();
                         thread::spawn(move || {
                             let mut stream = stream;
-                            for QueuedFrame { prefix, data, offset } in rx.iter() {
+                            for QueuedFrame {
+                                prefix,
+                                data,
+                                offset,
+                            } in rx.iter()
+                            {
                                 if stop_writer.load(Ordering::Relaxed) {
                                     break;
                                 }
@@ -133,7 +138,13 @@ impl RecordingSink {
                                     write_all_frame(&mut stream, &data[offset..], &stop_writer)
                                 } else {
                                     write_all_frame(&mut stream, &prefix, &stop_writer).and_then(
-                                        |()| write_all_frame(&mut stream, &data[offset..], &stop_writer),
+                                        |()| {
+                                            write_all_frame(
+                                                &mut stream,
+                                                &data[offset..],
+                                                &stop_writer,
+                                            )
+                                        },
                                     )
                                 };
                                 if let Err(e) = written {
@@ -147,7 +158,11 @@ impl RecordingSink {
                         });
 
                         let mut guard = clients_acc.lock().unwrap();
-                        guard.push(ClientHandle { tx, stop, frames: 0 });
+                        guard.push(ClientHandle {
+                            tx,
+                            stop,
+                            frames: 0,
+                        });
                         client_connected_acc.store(true, Ordering::Relaxed);
                         eprintln!("[recording_sink] client connected; total {}", guard.len());
                     }
@@ -196,7 +211,9 @@ impl RecordingSink {
             .iter()
             .filter(|s| s.codec.is_video() && !s.data.is_empty());
         let Some(stripe) = video.next() else { return };
-        if video.next().is_some() || stripe.stripe_y_start != 0 || stripe.stripe_height != full_height
+        if video.next().is_some()
+            || stripe.stripe_y_start != 0
+            || stripe.stripe_height != full_height
         {
             if !self.warned_unrecordable.swap(true, Ordering::Relaxed) {
                 eprintln!(
@@ -231,7 +248,11 @@ impl RecordingSink {
                 self.fps,
             );
             client.frames += 1;
-            let queued = QueuedFrame { prefix, data: stripe.data.clone(), offset };
+            let queued = QueuedFrame {
+                prefix,
+                data: stripe.data.clone(),
+                offset,
+            };
             match client.tx.try_send(queued) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -269,7 +290,13 @@ impl Drop for RecordingSink {
 /// header (on the first frame) and frame header for VP8 and VP9, a temporal delimiter for an
 /// AV1 unit that does not open with one, nothing for the Annex-B codecs. The IVF header's time
 /// base is one frame at `fps`, which the frame index counts in.
-fn stream_prefix(codec: Codec, payload: &[u8], index: u64, size: (u16, u16), fps: FrameRate) -> Vec<u8> {
+fn stream_prefix(
+    codec: Codec,
+    payload: &[u8],
+    index: u64,
+    size: (u16, u16),
+    fps: FrameRate,
+) -> Vec<u8> {
     match codec {
         Codec::Vp8 | Codec::Vp9 => {
             let mut prefix = Vec::with_capacity(44);
@@ -277,7 +304,11 @@ fn stream_prefix(codec: Codec, payload: &[u8], index: u64, size: (u16, u16), fps
                 prefix.extend_from_slice(b"DKIF");
                 prefix.extend_from_slice(&0u16.to_le_bytes());
                 prefix.extend_from_slice(&32u16.to_le_bytes());
-                prefix.extend_from_slice(if codec == Codec::Vp8 { b"VP80" } else { b"VP90" });
+                prefix.extend_from_slice(if codec == Codec::Vp8 {
+                    b"VP80"
+                } else {
+                    b"VP90"
+                });
                 prefix.extend_from_slice(&size.0.to_le_bytes());
                 prefix.extend_from_slice(&size.1.to_le_bytes());
                 prefix.extend_from_slice(&fps.num.to_le_bytes());
@@ -331,30 +362,97 @@ mod prefix_tests {
     /// frame index; an AV1 unit is opened with a temporal delimiter only when it lacks one.
     #[test]
     fn prefixes_follow_the_codec() {
-        assert!(stream_prefix(Codec::H264, &[0, 0, 1, 0x65], 0, (1280, 720), FrameRate::of(60.0)).is_empty());
-        assert!(stream_prefix(Codec::H265, &[0, 0, 1, 0x26, 1], 3, (1280, 720), FrameRate::of(60.0)).is_empty());
+        assert!(
+            stream_prefix(
+                Codec::H264,
+                &[0, 0, 1, 0x65],
+                0,
+                (1280, 720),
+                FrameRate::of(60.0)
+            )
+            .is_empty()
+        );
+        assert!(
+            stream_prefix(
+                Codec::H265,
+                &[0, 0, 1, 0x26, 1],
+                3,
+                (1280, 720),
+                FrameRate::of(60.0)
+            )
+            .is_empty()
+        );
 
-        let first = stream_prefix(Codec::Vp9, &[0x82, 0x49, 0x83], 0, (1280, 720), FrameRate::of(60.0));
+        let first = stream_prefix(
+            Codec::Vp9,
+            &[0x82, 0x49, 0x83],
+            0,
+            (1280, 720),
+            FrameRate::of(60.0),
+        );
         assert_eq!(first.len(), 44);
         assert_eq!(&first[..4], b"DKIF");
         assert_eq!(&first[8..12], b"VP90");
         assert_eq!(u16::from_le_bytes([first[12], first[13]]), 1280);
         assert_eq!(u16::from_le_bytes([first[14], first[15]]), 720);
-        assert_eq!(u32::from_le_bytes([first[16], first[17], first[18], first[19]]), 60);
-        assert_eq!(u32::from_le_bytes([first[20], first[21], first[22], first[23]]), 1);
-        assert_eq!(u32::from_le_bytes([first[32], first[33], first[34], first[35]]), 3);
+        assert_eq!(
+            u32::from_le_bytes([first[16], first[17], first[18], first[19]]),
+            60
+        );
+        assert_eq!(
+            u32::from_le_bytes([first[20], first[21], first[22], first[23]]),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes([first[32], first[33], first[34], first[35]]),
+            3
+        );
         assert_eq!(u64::from_le_bytes(first[36..44].try_into().unwrap()), 0);
         let later = stream_prefix(Codec::Vp8, &[0u8; 100], 7, (1280, 720), FrameRate::of(60.0));
         assert_eq!(later.len(), 12);
         assert_eq!(u32::from_le_bytes(later[..4].try_into().unwrap()), 100);
         assert_eq!(u64::from_le_bytes(later[4..].try_into().unwrap()), 7);
-        assert_eq!(&stream_prefix(Codec::Vp8, &[], 0, (64, 64), FrameRate::of(30.0))[8..12], b"VP80");
+        assert_eq!(
+            &stream_prefix(Codec::Vp8, &[], 0, (64, 64), FrameRate::of(30.0))[8..12],
+            b"VP80"
+        );
 
-        assert!(stream_prefix(Codec::Av1, &[0x12, 0x00, 0x32, 0x01, 0x10], 0, (64, 64), FrameRate::of(30.0)).is_empty());
-        assert_eq!(stream_prefix(Codec::Av1, &[0x32, 0x01, 0x10], 0, (64, 64), FrameRate::of(30.0)), vec![0x12, 0x00]);
-        assert_eq!(stream_prefix(Codec::Av1, &[], 0, (64, 64), FrameRate::of(30.0)), vec![0x12, 0x00]);
-        let ntsc = stream_prefix(Codec::Vp8, &[], 0, (64, 64), FrameRate::of(60000.0 / 1001.0));
-        assert_eq!(u32::from_le_bytes(ntsc[16..20].try_into().unwrap()), 60000, "59.94 fps is 1001/60000 s a frame");
+        assert!(
+            stream_prefix(
+                Codec::Av1,
+                &[0x12, 0x00, 0x32, 0x01, 0x10],
+                0,
+                (64, 64),
+                FrameRate::of(30.0)
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            stream_prefix(
+                Codec::Av1,
+                &[0x32, 0x01, 0x10],
+                0,
+                (64, 64),
+                FrameRate::of(30.0)
+            ),
+            vec![0x12, 0x00]
+        );
+        assert_eq!(
+            stream_prefix(Codec::Av1, &[], 0, (64, 64), FrameRate::of(30.0)),
+            vec![0x12, 0x00]
+        );
+        let ntsc = stream_prefix(
+            Codec::Vp8,
+            &[],
+            0,
+            (64, 64),
+            FrameRate::of(60000.0 / 1001.0),
+        );
+        assert_eq!(
+            u32::from_le_bytes(ntsc[16..20].try_into().unwrap()),
+            60000,
+            "59.94 fps is 1001/60000 s a frame"
+        );
         assert_eq!(u32::from_le_bytes(ntsc[20..24].try_into().unwrap()), 1001);
     }
 }
@@ -430,14 +528,30 @@ mod cost_tests {
 
         let median = |us: &[f64]| us[us.len() / 2];
         let p99 = |us: &[f64]| us[us.len() * 99 / 100];
-        for (phase, us) in [("idle   ", &idle), ("healthy", &healthy), ("stalled", &stalled)] {
-            println!("[sink-cost] {phase} median {:.3}us p99 {:.3}us", median(us), p99(us));
+        for (phase, us) in [
+            ("idle   ", &idle),
+            ("healthy", &healthy),
+            ("stalled", &stalled),
+        ] {
+            println!(
+                "[sink-cost] {phase} median {:.3}us p99 {:.3}us",
+                median(us),
+                p99(us)
+            );
         }
         drop(sink);
         let _ = drain.join();
 
-        assert!(median(&idle) < 5.0, "idle feed should be sub-5us, was {:.3}us", median(&idle));
-        assert!(median(&healthy) < 100.0, "healthy feed should be tens of us, was {:.3}us", median(&healthy));
+        assert!(
+            median(&idle) < 5.0,
+            "idle feed should be sub-5us, was {:.3}us",
+            median(&idle)
+        );
+        assert!(
+            median(&healthy) < 100.0,
+            "healthy feed should be tens of us, was {:.3}us",
+            median(&healthy)
+        );
         assert!(
             p99(&stalled) < 10_000.0,
             "a stalled recorder must never block the tap >10ms, was {:.3}us",

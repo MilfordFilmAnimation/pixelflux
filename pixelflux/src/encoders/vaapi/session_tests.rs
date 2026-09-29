@@ -4,9 +4,12 @@
 
 use super::mock::{self, Driver};
 use super::*;
-use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY};
-use crate::encoders::sps::fixtures::{assert_no_reorder, VCE_SPS};
-use crate::encoders::sps::{h264_frame_num_range, h264_max_num_ref_frames, h264_reorder, h264_timing, read_color, ColorSignal};
+use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, parse_video_type};
+use crate::encoders::sps::fixtures::{VCE_SPS, assert_no_reorder};
+use crate::encoders::sps::{
+    ColorSignal, h264_frame_num_range, h264_max_num_ref_frames, h264_reorder, h264_timing,
+    read_color,
+};
 
 const W: i32 = 320;
 const H: i32 = 240;
@@ -43,7 +46,8 @@ fn frame() -> Vec<u8> {
 }
 
 fn encode(enc: &mut VaapiEncoder, t: u64, key: bool) -> Vec<u8> {
-    enc.encode_host(&frame(), (W * 4) as usize, false, t, 25, key).unwrap_or_else(|e| panic!("frame {t}: {e}"))
+    enc.encode_host(&frame(), (W * 4) as usize, false, t, 25, key)
+        .unwrap_or_else(|e| panic!("frame {t}: {e}"))
 }
 
 /// A most-significant-bit-first reader for the headers the checks parse back.
@@ -78,7 +82,13 @@ impl Reader<'_> {
 /// The RBSP of one NAL unit of `kind` in an Annex-B stream, unescaped.
 fn nal(stream: &[u8], kind: u8, h265: bool) -> Vec<u8> {
     let unit = crate::encoders::codec::annexb_nals(stream)
-        .find(|n| (if h265 { (n[0] >> 1) & 0x3f } else { n[0] & 0x1f }) == kind)
+        .find(|n| {
+            (if h265 {
+                (n[0] >> 1) & 0x3f
+            } else {
+                n[0] & 0x1f
+            }) == kind
+        })
         .unwrap_or_else(|| panic!("no NAL unit of type {kind}"));
     let payload = &unit[if h265 { 2 } else { 1 }..];
     let mut out = Vec::new();
@@ -101,13 +111,21 @@ fn nal(stream: &[u8], kind: u8, h265: bool) -> Vec<u8> {
 fn every_codec_comes_up_and_asks_for_what_it_needs() {
     for codec in Codec::VIDEO {
         mock::reset(Driver::generous());
-        let (served, fullcolor): (Vec<Codec>, Vec<bool>) = probe_codecs_on(&device()).unwrap().into_iter().unzip();
+        let (served, fullcolor): (Vec<Codec>, Vec<bool>) =
+            probe_codecs_on(&device()).unwrap().into_iter().unzip();
         assert_eq!(served, Codec::VIDEO.to_vec());
-        assert_eq!(fullcolor, [false, false, true, false, true], "HEVC Main 4:4:4 and VP9 profile 1 carry 4:4:4");
+        assert_eq!(
+            fullcolor,
+            [false, false, true, false, true],
+            "HEVC Main 4:4:4 and VP9 profile 1 carry 4:4:4"
+        );
         let enc = session(codec, false);
         assert_eq!(enc.codec(), codec);
         assert!(!enc.is_fullcolor() && !enc.is_full_range());
-        assert!(enc.low_power(), "{codec:?} takes the low-power entry point offered");
+        assert!(
+            enc.low_power(),
+            "{codec:?} takes the low-power entry point offered"
+        );
         mock::with(|d| {
             let (profile, entrypoint, attribs) = &d.configs[0];
             assert_eq!(*entrypoint, VAEntrypointEncSliceLP);
@@ -116,15 +134,32 @@ fn every_codec_comes_up_and_asks_for_what_it_needs() {
             assert_eq!(value(VAConfigAttribRTFormat), Some(VA_RT_FORMAT_YUV420));
             assert_eq!(value(VAConfigAttribRateControl), Some(VA_RC_CQP));
             let packed = match codec {
-                Codec::H264 | Codec::H265 => Some(VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_SLICE),
+                Codec::H264 | Codec::H265 => {
+                    Some(VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_SLICE)
+                }
                 Codec::Av1 => Some(VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE),
                 _ => None,
             };
             assert_eq!(value(VAConfigAttribEncPackedHeaders), packed, "{codec:?}");
-            assert_eq!(d.configs[1].0, VAProfileNone, "the video processor's configuration");
-            let recon = if codec == Codec::Vp8 { 4 } else { REFERENCE_FRAMES as usize + 1 };
-            assert_eq!(d.contexts[0].1.len(), recon + 1, "{codec:?}: the encode context over the reconstruction and converted surfaces");
-            assert_eq!(d.contexts[1].1.len(), 1, "the processing context over the converted surface");
+            assert_eq!(
+                d.configs[1].0, VAProfileNone,
+                "the video processor's configuration"
+            );
+            let recon = if codec == Codec::Vp8 {
+                4
+            } else {
+                REFERENCE_FRAMES as usize + 1
+            };
+            assert_eq!(
+                d.contexts[0].1.len(),
+                recon + 1,
+                "{codec:?}: the encode context over the reconstruction and converted surfaces"
+            );
+            assert_eq!(
+                d.contexts[1].1.len(),
+                1,
+                "the processing context over the converted surface"
+            );
         });
     }
 }
@@ -139,23 +174,56 @@ fn the_frame_rate_reaches_every_codec_as_its_fraction() {
         let fit = FrameRate { num, den }.within(0xffff);
         for codec in Codec::VIDEO {
             mock::reset(Driver::generous());
-            let mut enc = open(codec, &RustCaptureSettings { target_fps: fps, ..settings(codec, true) })
-                .unwrap_or_else(|e| panic!("{codec:?}: {e}"));
+            let mut enc = open(
+                codec,
+                &RustCaptureSettings {
+                    target_fps: fps,
+                    ..settings(codec, true)
+                },
+            )
+            .unwrap_or_else(|e| panic!("{codec:?}: {e}"));
             encode(&mut enc, 0, true);
             mock::with(|d| {
-                let (_, bytes) = d.last_misc().into_iter().find(|m| m.0 == VAEncMiscParameterTypeFrameRate).expect("a frame rate");
-                let fr: VAEncMiscParameterFrameRate = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                assert_eq!((fr.framerate & 0xffff, fr.framerate >> 16), (fit.num, fit.den), "{codec:?} at {num}/{den}");
-                let headers = || d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSequence).unwrap().1;
+                let (_, bytes) = d
+                    .last_misc()
+                    .into_iter()
+                    .find(|m| m.0 == VAEncMiscParameterTypeFrameRate)
+                    .expect("a frame rate");
+                let fr: VAEncMiscParameterFrameRate =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                assert_eq!(
+                    (fr.framerate & 0xffff, fr.framerate >> 16),
+                    (fit.num, fit.den),
+                    "{codec:?} at {num}/{den}"
+                );
+                let headers = || {
+                    d.last_packed()
+                        .into_iter()
+                        .find(|p| p.0 == VAEncPackedHeaderSequence)
+                        .unwrap()
+                        .1
+                };
                 match codec {
                     Codec::H264 => {
-                        let s: VAEncSequenceParameterBufferH264 = d.last_param(VAEncSequenceParameterBufferType).unwrap();
-                        assert_eq!((s.num_units_in_tick, s.time_scale), (den, 2 * num), "{num}/{den}");
-                        assert_eq!(h264_timing(&headers()), Some((den, 2 * num)), "{num}/{den}: the packed SPS");
+                        let s: VAEncSequenceParameterBufferH264 =
+                            d.last_param(VAEncSequenceParameterBufferType).unwrap();
+                        assert_eq!(
+                            (s.num_units_in_tick, s.time_scale),
+                            (den, 2 * num),
+                            "{num}/{den}"
+                        );
+                        assert_eq!(
+                            h264_timing(&headers()),
+                            Some((den, 2 * num)),
+                            "{num}/{den}: the packed SPS"
+                        );
                     }
                     Codec::H265 => {
                         let vps = nal(&headers(), 32, true);
-                        let mut r = Reader { bytes: &vps, pos: 0 };
+                        let mut r = Reader {
+                            bytes: &vps,
+                            pos: 0,
+                        };
                         for _ in 0..4 {
                             r.u(32);
                         }
@@ -184,55 +252,112 @@ fn a_key_frame_carries_the_sequence_and_a_delta_does_not() {
             mock::reset(Driver::generous());
             let mut enc = session(codec, cbr);
             let first = encode(&mut enc, 0, true);
-            assert_eq!(parse_video_type(first[1]), Some((codec, FRAME_KEY)), "{codec:?}");
+            assert_eq!(
+                parse_video_type(first[1]),
+                Some((codec, FRAME_KEY)),
+                "{codec:?}"
+            );
             mock::with(|d| {
                 assert_eq!(d.pictures.len(), 2, "{codec:?}: a convert and an encode");
-                assert_ne!(d.pictures[0].0, d.pictures[1].0, "the convert and the encode render on their own contexts");
-                assert!(d.contexts[1].1.contains(&d.pictures[0].1), "the convert targets the converted surface");
-                assert!(d.contexts[0].1.contains(&d.pictures[1].1), "the encode targets a reconstruction surface");
-                assert_eq!(d.last_buffers(VAEncSequenceParameterBufferType).len(), 1, "{codec:?}");
+                assert_ne!(
+                    d.pictures[0].0, d.pictures[1].0,
+                    "the convert and the encode render on their own contexts"
+                );
+                assert!(
+                    d.contexts[1].1.contains(&d.pictures[0].1),
+                    "the convert targets the converted surface"
+                );
+                assert!(
+                    d.contexts[0].1.contains(&d.pictures[1].1),
+                    "the encode targets a reconstruction surface"
+                );
+                assert_eq!(
+                    d.last_buffers(VAEncSequenceParameterBufferType).len(),
+                    1,
+                    "{codec:?}"
+                );
                 let misc: Vec<u32> = d.last_misc().into_iter().map(|m| m.0).collect();
-                let mut wanted = if cbr { vec![VAEncMiscParameterTypeRateControl, VAEncMiscParameterTypeHRD] } else { vec![] };
-                wanted.extend([VAEncMiscParameterTypeFrameRate, VAEncMiscParameterTypeQualityLevel]);
+                let mut wanted = if cbr {
+                    vec![VAEncMiscParameterTypeRateControl, VAEncMiscParameterTypeHRD]
+                } else {
+                    vec![]
+                };
+                wanted.extend([
+                    VAEncMiscParameterTypeFrameRate,
+                    VAEncMiscParameterTypeQualityLevel,
+                ]);
                 assert_eq!(misc, wanted, "{codec:?} cbr={cbr}");
                 for (kind, bytes) in d.last_misc() {
                     if kind == VAEncMiscParameterTypeRateControl {
-                        let rc: VAEncMiscParameterRateControl = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                        let rc: VAEncMiscParameterRateControl =
+                            unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
                         assert_eq!((rc.bits_per_second, rc.target_percentage), (4_000_000, 100));
                         assert_eq!(rc.window_size, 50, "1.5 frames of VBV at 30 fps, in ms");
                         assert_eq!(unsafe { rc.rc_flags.bits.mb_rate_control() }, 2);
-                        assert_eq!(unsafe { rc.rc_flags.bits.disable_bit_stuffing() }, 1, "no filler data");
+                        assert_eq!(
+                            unsafe { rc.rc_flags.bits.disable_bit_stuffing() },
+                            1,
+                            "no filler data"
+                        );
                     }
                     if kind == VAEncMiscParameterTypeHRD {
-                        let hrd: VAEncMiscParameterHRD = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                        assert_eq!((hrd.buffer_size, hrd.initial_buffer_fullness), (200_000, 200_000));
+                        let hrd: VAEncMiscParameterHRD =
+                            unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                        assert_eq!(
+                            (hrd.buffer_size, hrd.initial_buffer_fullness),
+                            (200_000, 200_000)
+                        );
                     }
                     if kind == VAEncMiscParameterTypeFrameRate {
-                        let fr: VAEncMiscParameterFrameRate = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                        let fr: VAEncMiscParameterFrameRate =
+                            unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
                         assert_eq!(fr.framerate, (1 << 16) | 30);
                     }
                     if kind == VAEncMiscParameterTypeQualityLevel {
-                        let q: VAEncMiscParameterBufferQualityLevel = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                        let q: VAEncMiscParameterBufferQualityLevel =
+                            unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
                         assert_eq!(q.quality_level, 7, "the driver's fastest level");
                     }
                 }
                 let packed: Vec<u32> = d.last_packed().into_iter().map(|p| p.0).collect();
                 let wanted: Vec<u32> = match codec {
-                    Codec::H264 | Codec::H265 => [vec![VAEncPackedHeaderSequence], vec![VAEncPackedHeaderSlice; 4]].concat(),
+                    Codec::H264 | Codec::H265 => [
+                        vec![VAEncPackedHeaderSequence],
+                        vec![VAEncPackedHeaderSlice; 4],
+                    ]
+                    .concat(),
                     Codec::Av1 => vec![VAEncPackedHeaderSequence, VAEncPackedHeaderPicture],
                     _ => vec![],
                 };
                 assert_eq!(packed, wanted, "{codec:?}");
                 assert_eq!(d.last_buffers(VAEncPictureParameterBufferType).len(), 1);
                 let slices = d.last_buffers(VAEncSliceParameterBufferType).len();
-                assert_eq!(slices, match codec { Codec::H264 | Codec::H265 => 4, Codec::Av1 => 1, _ => 0 }, "{codec:?}");
+                assert_eq!(
+                    slices,
+                    match codec {
+                        Codec::H264 | Codec::H265 => 4,
+                        Codec::Av1 => 1,
+                        _ => 0,
+                    },
+                    "{codec:?}"
+                );
             });
             let second = encode(&mut enc, 1, false);
-            assert_eq!(parse_video_type(second[1]), Some((codec, FRAME_DELTA)), "{codec:?}");
+            assert_eq!(
+                parse_video_type(second[1]),
+                Some((codec, FRAME_DELTA)),
+                "{codec:?}"
+            );
             mock::with(|d| {
                 assert_eq!(d.pictures.len(), 4);
-                assert!(d.last_buffers(VAEncSequenceParameterBufferType).is_empty(), "{codec:?}: a delta repeats no sequence");
-                assert!(d.last_misc().is_empty(), "{codec:?}: a delta repeats no rate control");
+                assert!(
+                    d.last_buffers(VAEncSequenceParameterBufferType).is_empty(),
+                    "{codec:?}: a delta repeats no sequence"
+                );
+                assert!(
+                    d.last_misc().is_empty(),
+                    "{codec:?}: a delta repeats no rate control"
+                );
                 assert_eq!(d.last_buffers(VAEncPictureParameterBufferType).len(), 1);
             });
         }
@@ -253,15 +378,35 @@ fn a_key_frame_forced_mid_stream_restarts_the_count() {
             encode(&mut enc, t, t == 0);
         }
         let out = encode(&mut enc, 6, true);
-        assert_eq!(parse_video_type(out[1]), Some((codec, FRAME_KEY)), "{codec:?}");
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((codec, FRAME_KEY)),
+            "{codec:?}"
+        );
         assert_eq!(enc.last_reference(), Reference::None);
         mock::with(|d| match codec {
             Codec::H264 => {
-                let pic: VAEncPictureParameterBufferH264 = d.last_param(VAEncPictureParameterBufferType).unwrap();
-                assert_eq!((pic.CurrPic.frame_idx, pic.CurrPic.TopFieldOrderCnt, pic.frame_num), (0, 0, 0));
-                let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+                let pic: VAEncPictureParameterBufferH264 =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
+                assert_eq!(
+                    (
+                        pic.CurrPic.frame_idx,
+                        pic.CurrPic.TopFieldOrderCnt,
+                        pic.frame_num
+                    ),
+                    (0, 0, 0)
+                );
+                let header = d
+                    .last_packed()
+                    .into_iter()
+                    .find(|p| p.0 == VAEncPackedHeaderSlice)
+                    .unwrap()
+                    .1;
                 let rbsp = nal(&header, 5, false);
-                let mut r = Reader { bytes: &rbsp, pos: 0 };
+                let mut r = Reader {
+                    bytes: &rbsp,
+                    pos: 0,
+                };
                 assert_eq!(r.ue(), 0, "first_mb_in_slice");
                 assert_eq!(r.ue(), 7, "slice_type I");
                 assert_eq!(r.ue(), 0, "pps id");
@@ -269,26 +414,46 @@ fn a_key_frame_forced_mid_stream_restarts_the_count() {
                 assert_eq!(r.ue(), 1, "idr_pic_id of the second IDR");
             }
             Codec::H265 => {
-                let pic: VAEncPictureParameterBufferHEVC = d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferHEVC =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!(pic.decoded_curr_pic.pic_order_cnt, 0);
             }
             _ => {
-                let pic: VAEncPictureParameterBufferAV1 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferAV1 =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!(pic.order_hint, 0);
             }
         });
         let out = encode(&mut enc, 7, false);
-        assert_eq!(parse_video_type(out[1]), Some((codec, FRAME_DELTA)), "{codec:?}");
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((codec, FRAME_DELTA)),
+            "{codec:?}"
+        );
         assert_eq!(enc.last_reference(), Reference::Frame(6));
         mock::with(|d| match codec {
             Codec::H264 => {
-                let pic: VAEncPictureParameterBufferH264 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferH264 =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!((pic.CurrPic.frame_idx, pic.frame_num), (1, 1));
-                let held: Vec<u32> = pic.ReferenceFrames.iter().filter(|r| r.flags != VA_PICTURE_H264_INVALID).map(|r| r.frame_idx).collect();
+                let held: Vec<u32> = pic
+                    .ReferenceFrames
+                    .iter()
+                    .filter(|r| r.flags != VA_PICTURE_H264_INVALID)
+                    .map(|r| r.frame_idx)
+                    .collect();
                 assert_eq!(held, [0], "only the new IDR is held");
-                let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+                let header = d
+                    .last_packed()
+                    .into_iter()
+                    .find(|p| p.0 == VAEncPackedHeaderSlice)
+                    .unwrap()
+                    .1;
                 let rbsp = nal(&header, 1, false);
-                let mut r = Reader { bytes: &rbsp, pos: 0 };
+                let mut r = Reader {
+                    bytes: &rbsp,
+                    pos: 0,
+                };
                 assert_eq!(r.ue(), 0, "first_mb_in_slice");
                 assert_eq!(r.ue(), 5, "slice_type P");
                 assert_eq!(r.ue(), 0, "pps id");
@@ -297,13 +462,20 @@ fn a_key_frame_forced_mid_stream_restarts_the_count() {
                 assert_eq!(r.u(1), 0, "the IDR is the newest frame, so the list stands");
             }
             Codec::H265 => {
-                let pic: VAEncPictureParameterBufferHEVC = d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferHEVC =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!(pic.decoded_curr_pic.pic_order_cnt, 1);
-                let kept: Vec<i32> = pic.reference_frames.iter().filter(|r| r.flags != VA_PICTURE_HEVC_INVALID).map(|r| r.pic_order_cnt).collect();
+                let kept: Vec<i32> = pic
+                    .reference_frames
+                    .iter()
+                    .filter(|r| r.flags != VA_PICTURE_HEVC_INVALID)
+                    .map(|r| r.pic_order_cnt)
+                    .collect();
                 assert_eq!(kept, [0]);
             }
             _ => {
-                let pic: VAEncPictureParameterBufferAV1 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferAV1 =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
                 assert_eq!(pic.order_hint, 1);
             }
         });
@@ -323,7 +495,14 @@ fn h264_names_the_newest_surviving_frame_in_its_slice_header() {
     assert_eq!(h264_max_num_ref_frames(stream), Some(REFERENCE_FRAMES));
     assert_eq!(h264_frame_num_range(stream), Some(65536));
     assert_no_reorder(stream, "the session's own SPS");
-    assert_eq!(read_color(crate::encoders::codec::annexb_nals(stream).find(|n| n[0] & 0x1f == 7).unwrap()), Some(ColorSignal::BT709_LIMITED));
+    assert_eq!(
+        read_color(
+            crate::encoders::codec::annexb_nals(stream)
+                .find(|n| n[0] & 0x1f == 7)
+                .unwrap()
+        ),
+        Some(ColorSignal::BT709_LIMITED)
+    );
     assert_eq!(enc.last_reference(), Reference::None);
     for t in 1..8u64 {
         encode(&mut enc, t, false);
@@ -334,18 +513,40 @@ fn h264_names_the_newest_surviving_frame_in_its_slice_header() {
     assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_DELTA)));
     assert_eq!(enc.last_reference(), Reference::Frame(4));
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferH264 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let pic: VAEncPictureParameterBufferH264 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(pic.CurrPic.frame_idx, 8);
-        let held: Vec<u32> = pic.ReferenceFrames.iter().filter(|r| r.flags != VA_PICTURE_H264_INVALID).map(|r| r.frame_idx).collect();
-        assert_eq!(held, [7, 6, 5, 4, 3, 2, 1, 0], "every frame the decoder holds, newest first");
+        let held: Vec<u32> = pic
+            .ReferenceFrames
+            .iter()
+            .filter(|r| r.flags != VA_PICTURE_H264_INVALID)
+            .map(|r| r.frame_idx)
+            .collect();
+        assert_eq!(
+            held,
+            [7, 6, 5, 4, 3, 2, 1, 0],
+            "every frame the decoder holds, newest first"
+        );
         let slices = d.last_buffers(VAEncSliceParameterBufferType);
         assert_eq!(slices.len(), 4);
-        let slice: VAEncSliceParameterBufferH264 = unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
-        assert_eq!(slice.RefPicList0[0].frame_idx, 4, "the slice predicts from frame 4");
+        let slice: VAEncSliceParameterBufferH264 =
+            unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
+        assert_eq!(
+            slice.RefPicList0[0].frame_idx, 4,
+            "the slice predicts from frame 4"
+        );
         assert_eq!(slice.slice_type, 0);
-        let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+        let header = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderSlice)
+            .unwrap()
+            .1;
         let rbsp = nal(&header, 1, false);
-        let mut r = Reader { bytes: &rbsp, pos: 0 };
+        let mut r = Reader {
+            bytes: &rbsp,
+            pos: 0,
+        };
         assert_eq!(r.ue(), 0, "first_mb_in_slice");
         assert_eq!(r.ue(), 5, "slice_type P");
         assert_eq!(r.ue(), 0, "pps id");
@@ -362,9 +563,17 @@ fn h264_names_the_newest_surviving_frame_in_its_slice_header() {
     encode(&mut enc, 9, false);
     assert_eq!(enc.last_reference(), Reference::Frame(8));
     mock::with(|d| {
-        let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+        let header = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderSlice)
+            .unwrap()
+            .1;
         let rbsp = nal(&header, 1, false);
-        let mut r = Reader { bytes: &rbsp, pos: 0 };
+        let mut r = Reader {
+            bytes: &rbsp,
+            pos: 0,
+        };
         r.ue();
         r.ue();
         r.ue();
@@ -377,9 +586,19 @@ fn h264_names_the_newest_surviving_frame_in_its_slice_header() {
     }
     assert!(enc.invalidate_reference(9));
     let out = encode(&mut enc, 20, false);
-    assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)), "a loss past the buffer costs a key frame");
+    assert_eq!(
+        parse_video_type(out[1]),
+        Some((Codec::H264, FRAME_KEY)),
+        "a loss past the buffer costs a key frame"
+    );
     assert_eq!(enc.last_reference(), Reference::None);
-    mock::with(|d| assert_eq!(d.last_buffers(VAEncSequenceParameterBufferType).len(), 1, "the key frame repeats the sequence"));
+    mock::with(|d| {
+        assert_eq!(
+            d.last_buffers(VAEncSequenceParameterBufferType).len(),
+            1,
+            "the key frame repeats the sequence"
+        )
+    });
 }
 
 /// HEVC lists the frames the decoder keeps in every slice header's reference picture set,
@@ -390,23 +609,51 @@ fn hevc_lists_the_kept_frames_in_its_reference_picture_set() {
     let mut enc = session(Codec::H265, false);
     for t in 0..8u64 {
         let out = encode(&mut enc, t, t == 0);
-        assert_eq!(parse_video_type(out[1]), Some((Codec::H265, if t == 0 { FRAME_KEY } else { FRAME_DELTA })));
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((Codec::H265, if t == 0 { FRAME_KEY } else { FRAME_DELTA }))
+        );
     }
     assert!(enc.invalidate_reference(5));
     encode(&mut enc, 8, false);
     assert_eq!(enc.last_reference(), Reference::Frame(4));
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferHEVC = d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let pic: VAEncPictureParameterBufferHEVC =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(pic.decoded_curr_pic.pic_order_cnt, 8);
-        let kept: Vec<(i32, u32)> = pic.reference_frames.iter().filter(|r| r.flags != VA_PICTURE_HEVC_INVALID).map(|r| (r.pic_order_cnt, r.flags)).collect();
-        assert_eq!(kept, [(4, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE), (3, 0), (2, 0), (1, 0), (0, 0)], "the lost frames are not kept");
+        let kept: Vec<(i32, u32)> = pic
+            .reference_frames
+            .iter()
+            .filter(|r| r.flags != VA_PICTURE_HEVC_INVALID)
+            .map(|r| (r.pic_order_cnt, r.flags))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (4, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE),
+                (3, 0),
+                (2, 0),
+                (1, 0),
+                (0, 0)
+            ],
+            "the lost frames are not kept"
+        );
         let slices = d.last_buffers(VAEncSliceParameterBufferType);
-        let slice: VAEncSliceParameterBufferHEVC = unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
+        let slice: VAEncSliceParameterBufferHEVC =
+            unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
         assert_eq!(slice.ref_pic_list0[0].pic_order_cnt, 4);
         assert_eq!(slice.slice_type, 1);
-        let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+        let header = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderSlice)
+            .unwrap()
+            .1;
         let rbsp = nal(&header, 1, true);
-        let mut r = Reader { bytes: &rbsp, pos: 0 };
+        let mut r = Reader {
+            bytes: &rbsp,
+            pos: 0,
+        };
         assert_eq!(r.u(1), 1, "first_slice_segment_in_pic_flag");
         assert_eq!(r.ue(), 0, "pps id");
         assert_eq!(r.ue(), 1, "slice_type P");
@@ -416,7 +663,11 @@ fn hevc_lists_the_kept_frames_in_its_reference_picture_set() {
         assert_eq!(r.ue(), 0, "num_positive_pics");
         let mut previous = 8;
         for (poc, used) in [(4, 1), (3, 0), (2, 0), (1, 0), (0, 0)] {
-            assert_eq!(r.ue(), (previous - poc - 1) as u32, "delta_poc_s0_minus1 of {poc}");
+            assert_eq!(
+                r.ue(),
+                (previous - poc - 1) as u32,
+                "delta_poc_s0_minus1 of {poc}"
+            );
             assert_eq!(r.u(1), used, "used_by_curr_pic_s0_flag of {poc}");
             previous = poc;
         }
@@ -432,8 +683,13 @@ fn vp9_addresses_its_slots_by_timestamp() {
     for t in 0..8u64 {
         encode(&mut enc, t, t == 0);
         mock::with(|d| {
-            let pic: VAEncPictureParameterBufferVP9 = d.last_param(VAEncPictureParameterBufferType).unwrap();
-            assert_eq!(pic.refresh_frame_flags, if t == 0 { 0xff } else { 1 << t }, "frame {t}");
+            let pic: VAEncPictureParameterBufferVP9 =
+                d.last_param(VAEncPictureParameterBufferType).unwrap();
+            assert_eq!(
+                pic.refresh_frame_flags,
+                if t == 0 { 0xff } else { 1 << t },
+                "frame {t}"
+            );
             assert_eq!(unsafe { pic.pic_flags.bits.error_resilient_mode() }, 1);
             if t > 0 {
                 assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, t as u32 - 1);
@@ -445,7 +701,8 @@ fn vp9_addresses_its_slots_by_timestamp() {
     encode(&mut enc, 8, false);
     assert_eq!(enc.last_reference(), Reference::Frame(4));
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferVP9 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let pic: VAEncPictureParameterBufferVP9 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(unsafe { pic.ref_flags.bits.ref_last_idx() }, 4);
         assert_eq!(pic.refresh_frame_flags, 1 << 0, "timestamp 8 takes slot 0");
         assert_eq!(pic.luma_ac_qindex, Codec::Vp9.quantizer(25) as u8);
@@ -462,35 +719,69 @@ fn vp8_follows_the_slot_plan() {
     for t in 0..25u64 {
         encode(&mut enc, t, t == 0);
         mock::with(|d| {
-            let pic: VAEncPictureParameterBufferVP8 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+            let pic: VAEncPictureParameterBufferVP8 =
+                d.last_param(VAEncPictureParameterBufferType).unwrap();
             let p = unsafe { pic.pic_flags.bits };
             assert_eq!(p.refresh_entropy_probs(), 0, "frame {t}");
-            refreshes.push((p.refresh_last(), p.refresh_golden_frame(), p.refresh_alternate_frame()));
+            refreshes.push((
+                p.refresh_last(),
+                p.refresh_golden_frame(),
+                p.refresh_alternate_frame(),
+            ));
             if t > 0 {
                 let r = unsafe { pic.ref_flags.bits };
-                assert_eq!((r.no_ref_last(), r.no_ref_gf(), r.no_ref_arf()), (0, 1, 1), "frame {t} predicts from LAST");
+                assert_eq!(
+                    (r.no_ref_last(), r.no_ref_gf(), r.no_ref_arf()),
+                    (0, 1, 1),
+                    "frame {t} predicts from LAST"
+                );
             }
         });
     }
-    assert_eq!(refreshes[0], (1, 1, 1), "the key frame refreshes every buffer");
+    assert_eq!(
+        refreshes[0],
+        (1, 1, 1),
+        "the key frame refreshes every buffer"
+    );
     assert_eq!(refreshes[1], (1, 0, 0));
     assert_eq!(refreshes[12], (1, 0, 1), "frame 12 is an altref anchor");
     assert_eq!(refreshes[24], (1, 1, 0), "frame 24 is a golden anchor");
     assert!(enc.invalidate_reference(12));
     let out = encode(&mut enc, 25, false);
-    assert_eq!(parse_video_type(out[1]), Some((Codec::Vp8, FRAME_KEY)), "a loss from frame 12 on takes LAST and GOLDEN (24) and ALTREF (12)");
+    assert_eq!(
+        parse_video_type(out[1]),
+        Some((Codec::Vp8, FRAME_KEY)),
+        "a loss from frame 12 on takes LAST and GOLDEN (24) and ALTREF (12)"
+    );
     for t in 26..40u64 {
         encode(&mut enc, t, false);
     }
     assert!(enc.invalidate_reference(38));
     encode(&mut enc, 40, false);
-    assert_eq!(enc.last_reference(), Reference::Frame(37), "the altref anchor of frame 37, older than the loss");
+    assert_eq!(
+        enc.last_reference(),
+        Reference::Frame(37),
+        "the altref anchor of frame 37, older than the loss"
+    );
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferVP8 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let pic: VAEncPictureParameterBufferVP8 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
         let r = unsafe { pic.ref_flags.bits };
         let p = unsafe { pic.pic_flags.bits };
-        assert_eq!((r.no_ref_last(), r.no_ref_gf(), r.no_ref_arf()), (1, 1, 0), "the recovery predicts from ALTREF alone");
-        assert_eq!((p.refresh_last(), p.refresh_golden_frame(), p.refresh_alternate_frame()), (1, 1, 1), "the recovery refreshes every buffer");
+        assert_eq!(
+            (r.no_ref_last(), r.no_ref_gf(), r.no_ref_arf()),
+            (1, 1, 0),
+            "the recovery predicts from ALTREF alone"
+        );
+        assert_eq!(
+            (
+                p.refresh_last(),
+                p.refresh_golden_frame(),
+                p.refresh_alternate_frame()
+            ),
+            (1, 1, 1),
+            "the recovery refreshes every buffer"
+        );
     });
 }
 
@@ -502,22 +793,38 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
     let mut enc = session(Codec::Av1, true);
     for t in 0..8u64 {
         let out = encode(&mut enc, t, t == 0);
-        assert_eq!(parse_video_type(out[1]), Some((Codec::Av1, if t == 0 { FRAME_KEY } else { FRAME_DELTA })), "frame {t}");
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((Codec::Av1, if t == 0 { FRAME_KEY } else { FRAME_DELTA })),
+            "frame {t}"
+        );
     }
     assert!(enc.invalidate_reference(5));
     encode(&mut enc, 8, false);
     assert_eq!(enc.last_reference(), Reference::Frame(4));
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferAV1 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let pic: VAEncPictureParameterBufferAV1 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
         assert_eq!(pic.ref_frame_idx, [4; 7]);
         assert_eq!(pic.primary_ref_frame, 0);
         assert_eq!(pic.refresh_frame_flags, 1 << 0);
         assert_eq!(pic.order_hint, 8);
         assert_ne!(pic.reference_frames[4], VA_INVALID_SURFACE);
-        assert_eq!(pic.byte_offset_frame_hdr_obu_size, 1, "a delta's frame header is first in its picture");
-        let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderPicture).unwrap().1;
+        assert_eq!(
+            pic.byte_offset_frame_hdr_obu_size, 1,
+            "a delta's frame header is first in its picture"
+        );
+        let header = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderPicture)
+            .unwrap()
+            .1;
         assert_eq!(header[0], 0x1a, "a frame header OBU with a size field");
-        let mut r = Reader { bytes: &header, pos: 8 * (1 + 4) };
+        let mut r = Reader {
+            bytes: &header,
+            pos: 8 * (1 + 4),
+        };
         assert_eq!(r.u(1), 0, "show_existing_frame");
         assert_eq!(r.u(2), 1, "frame_type inter");
         assert_eq!(r.u(1), 1, "show_frame");
@@ -539,16 +846,30 @@ fn av1_names_its_reference_slot_in_the_frame_header() {
              columns and rows, with no use_ref_frame_mvs in a sequence without reference motion vectors"
         );
         r.pos = pic.bit_offset_qindex as usize;
-        assert_eq!(r.u(8), 128, "a constant-rate session's quantizer, which the driver rewrites");
+        assert_eq!(
+            r.u(8),
+            128,
+            "a constant-rate session's quantizer, which the driver rewrites"
+        );
         assert_eq!(pic.size_in_bits_frame_hdr_obu as usize, 8 * header.len());
     });
     mock::reset(Driver::generous());
     let mut enc = session(Codec::Av1, true);
     encode(&mut enc, 0, true);
     mock::with(|d| {
-        let pic: VAEncPictureParameterBufferAV1 = d.last_param(VAEncPictureParameterBufferType).unwrap();
-        let sequence = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSequence).unwrap().1;
-        assert_eq!(pic.byte_offset_frame_hdr_obu_size as usize, sequence.len() + 1, "a key frame's header follows the sequence header");
+        let pic: VAEncPictureParameterBufferAV1 =
+            d.last_param(VAEncPictureParameterBufferType).unwrap();
+        let sequence = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderSequence)
+            .unwrap()
+            .1;
+        assert_eq!(
+            pic.byte_offset_frame_hdr_obu_size as usize,
+            sequence.len() + 1,
+            "a key frame's header follows the sequence header"
+        );
         assert_eq!(sequence[0], 0x0a, "a sequence header OBU with a size field");
         assert_eq!(pic.refresh_frame_flags, 0xff);
         assert_eq!(pic.primary_ref_frame, 7);
@@ -568,25 +889,53 @@ fn the_video_processor_is_told_the_declared_color() {
             let convert = &d.pictures[0];
             let bytes = &d.buffers[convert.2[0]];
             assert_eq!(bytes.1, VAProcPipelineParameterBufferType);
-            let p: VAProcPipelineParameterBuffer = unsafe { ptr::read_unaligned(bytes.2.as_ptr() as *const _) };
-            assert_eq!((p.surface_color_standard, p.output_color_standard), (VAProcColorStandardExplicit, VAProcColorStandardExplicit));
-            assert_eq!((p.input_color_properties.color_range, p.input_color_properties.matrix_coefficients), (VA_SOURCE_RANGE_FULL as u8, 0));
+            let p: VAProcPipelineParameterBuffer =
+                unsafe { ptr::read_unaligned(bytes.2.as_ptr() as *const _) };
+            assert_eq!(
+                (p.surface_color_standard, p.output_color_standard),
+                (VAProcColorStandardExplicit, VAProcColorStandardExplicit)
+            );
+            assert_eq!(
+                (
+                    p.input_color_properties.color_range,
+                    p.input_color_properties.matrix_coefficients
+                ),
+                (VA_SOURCE_RANGE_FULL as u8, 0)
+            );
             assert_eq!(p.input_color_properties.colour_primaries, 1);
-            assert_eq!(p.output_color_properties.color_range, VA_SOURCE_RANGE_REDUCED as u8);
-            assert_eq!(p.output_color_properties.matrix_coefficients, if codec == Codec::Vp8 { 6 } else { 1 }, "{codec:?}");
-            assert_eq!(p.output_color_properties.chroma_sample_location, (VA_CHROMA_SITING_VERTICAL_CENTER | VA_CHROMA_SITING_HORIZONTAL_CENTER) as u8);
+            assert_eq!(
+                p.output_color_properties.color_range,
+                VA_SOURCE_RANGE_REDUCED as u8
+            );
+            assert_eq!(
+                p.output_color_properties.matrix_coefficients,
+                if codec == Codec::Vp8 { 6 } else { 1 },
+                "{codec:?}"
+            );
+            assert_eq!(
+                p.output_color_properties.chroma_sample_location,
+                (VA_CHROMA_SITING_VERTICAL_CENTER | VA_CHROMA_SITING_HORIZONTAL_CENTER) as u8
+            );
             assert_eq!(p.filter_flags, VA_FRAME_PICTURE);
         });
     }
     let mut classic = Driver::generous();
-    classic.color_standards = vec![VAProcColorStandardBT601, VAProcColorStandardBT709, VAProcColorStandardSMPTE170M];
+    classic.color_standards = vec![
+        VAProcColorStandardBT601,
+        VAProcColorStandardBT709,
+        VAProcColorStandardSMPTE170M,
+    ];
     mock::reset(classic);
     let mut enc = session(Codec::Vp8, false);
     encode(&mut enc, 0, true);
     mock::with(|d| {
         let bytes = &d.buffers[d.pictures[0].2[0]];
-        let p: VAProcPipelineParameterBuffer = unsafe { ptr::read_unaligned(bytes.2.as_ptr() as *const _) };
-        assert_eq!((p.surface_color_standard, p.output_color_standard), (VAProcColorStandardBT709, VAProcColorStandardBT601));
+        let p: VAProcPipelineParameterBuffer =
+            unsafe { ptr::read_unaligned(bytes.2.as_ptr() as *const _) };
+        assert_eq!(
+            (p.surface_color_standard, p.output_color_standard),
+            (VAProcColorStandardBT709, VAProcColorStandardBT601)
+        );
     });
 }
 
@@ -604,19 +953,35 @@ fn a_rate_change_restarts_the_sequence_and_a_quality_change_does_not() {
     let out = encode(&mut enc, 2, false);
     assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)));
     mock::with(|d| {
-        let rc = d.last_misc().into_iter().find(|m| m.0 == VAEncMiscParameterTypeRateControl).unwrap().1;
-        let rc: VAEncMiscParameterRateControl = unsafe { ptr::read_unaligned(rc.as_ptr() as *const _) };
+        let rc = d
+            .last_misc()
+            .into_iter()
+            .find(|m| m.0 == VAEncMiscParameterTypeRateControl)
+            .unwrap()
+            .1;
+        let rc: VAEncMiscParameterRateControl =
+            unsafe { ptr::read_unaligned(rc.as_ptr() as *const _) };
         assert_eq!(rc.bits_per_second, 8_000_000);
     });
     mock::reset(Driver::generous());
     let mut enc = session(Codec::H264, false);
     encode(&mut enc, 0, true);
-    let out = enc.encode_host(&frame(), (W * 4) as usize, false, 1, 40, false).unwrap();
+    let out = enc
+        .encode_host(&frame(), (W * 4) as usize, false, 1, 40, false)
+        .unwrap();
     assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_DELTA)));
     mock::with(|d| {
-        let header = d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSlice).unwrap().1;
+        let header = d
+            .last_packed()
+            .into_iter()
+            .find(|p| p.0 == VAEncPackedHeaderSlice)
+            .unwrap()
+            .1;
         let rbsp = nal(&header, 1, false);
-        let mut r = Reader { bytes: &rbsp, pos: 0 };
+        let mut r = Reader {
+            bytes: &rbsp,
+            pos: 0,
+        };
         r.ue();
         r.ue();
         r.ue();
@@ -639,7 +1004,11 @@ fn host_frames_upload_through_the_derived_image_or_a_put() {
     encode(&mut enc, 1, false);
     mock::with(|d| {
         assert_eq!(d.puts, 0);
-        assert_eq!(d.images.len(), 3, "the derive probe and one derived image per frame");
+        assert_eq!(
+            d.images.len(),
+            3,
+            "the derive probe and one derived image per frame"
+        );
     });
     let mut copying = Driver::generous();
     copying.derive = false;
@@ -659,7 +1028,9 @@ fn host_frames_upload_through_the_derived_image_or_a_put() {
 #[test]
 fn a_driver_writing_its_own_headers_tracks_no_reference() {
     let mut own_headers = Driver::generous();
-    own_headers.attributes.retain(|a| a.0 != VAConfigAttribEncPackedHeaders);
+    own_headers
+        .attributes
+        .retain(|a| a.0 != VAConfigAttribEncPackedHeaders);
     mock::reset(own_headers);
     for codec in [Codec::H264, Codec::H265] {
         let mut enc = session(codec, false);
@@ -669,19 +1040,32 @@ fn a_driver_writing_its_own_headers_tracks_no_reference() {
         assert_eq!(parse_video_type(second[1]), Some((codec, FRAME_DELTA)));
         assert_eq!(enc.last_reference(), Reference::Untracked);
         assert!(!enc.invalidate_reference(0));
-        mock::with(|d| assert!(d.last_packed().is_empty(), "no packed header goes to a driver that takes none"));
+        mock::with(|d| {
+            assert!(
+                d.last_packed().is_empty(),
+                "no packed header goes to a driver that takes none"
+            )
+        });
     }
     let mut enc = session(Codec::Vp9, false);
     encode(&mut enc, 0, true);
     encode(&mut enc, 1, false);
-    assert_eq!(enc.last_reference(), Reference::Frame(0), "VP9's references need no packed header");
+    assert_eq!(
+        enc.last_reference(),
+        Reference::Frame(0),
+        "VP9's references need no packed header"
+    );
 
     let mut no_av1 = Driver::generous();
     no_av1.profiles.retain(|&p| p != VAProfileAV1Profile0);
     mock::reset(no_av1);
     let refused = open(Codec::Av1, &settings(Codec::Av1, false));
     assert!(refused.err().unwrap().contains("encodes no AV1"));
-    let served: Vec<Codec> = probe_codecs_on(&device()).unwrap().into_iter().map(|(codec, _)| codec).collect();
+    let served: Vec<Codec> = probe_codecs_on(&device())
+        .unwrap()
+        .into_iter()
+        .map(|(codec, _)| codec)
+        .collect();
     assert_eq!(served, [Codec::H264, Codec::Vp8, Codec::Vp9, Codec::H265]);
 }
 
@@ -690,8 +1074,19 @@ fn a_driver_writing_its_own_headers_tracks_no_reference() {
 #[test]
 fn fullcolor_takes_the_surface_the_driver_renders() {
     for (rendered, wanted) in [
-        (vec![VA_FOURCC_NV12, VA_FOURCC_444P, VA_FOURCC_XYUV, VA_FOURCC_BGRA], Some("yuv444p")),
-        (vec![VA_FOURCC_NV12, VA_FOURCC_XYUV, VA_FOURCC_BGRA], Some("vuyx")),
+        (
+            vec![
+                VA_FOURCC_NV12,
+                VA_FOURCC_444P,
+                VA_FOURCC_XYUV,
+                VA_FOURCC_BGRA,
+            ],
+            Some("yuv444p"),
+        ),
+        (
+            vec![VA_FOURCC_NV12, VA_FOURCC_XYUV, VA_FOURCC_BGRA],
+            Some("vuyx"),
+        ),
         (vec![VA_FOURCC_NV12, VA_FOURCC_BGRA], None),
     ] {
         let mut driver = Driver::generous();
@@ -712,12 +1107,18 @@ fn fullcolor_takes_the_surface_the_driver_renders() {
 
 /// A session at `width` x `height` and `fps` on the stood-in driver.
 fn sized(codec: Codec, cbr: bool, width: i32, height: i32, fps: f64) -> RustCaptureSettings {
-    RustCaptureSettings { width, height, target_fps: fps, ..settings(codec, cbr) }
+    RustCaptureSettings {
+        width,
+        height,
+        target_fps: fps,
+        ..settings(codec, cbr)
+    }
 }
 
 fn encode_sized(enc: &mut VaapiEncoder, width: i32, height: i32, t: u64, key: bool) -> Vec<u8> {
     let pixels = vec![0x40; (width * height * 4) as usize];
-    enc.encode_host(&pixels, (width * 4) as usize, false, t, 25, key).unwrap_or_else(|e| panic!("frame {t}: {e}"))
+    enc.encode_host(&pixels, (width * 4) as usize, false, t, 25, key)
+        .unwrap_or_else(|e| panic!("frame {t}: {e}"))
 }
 
 /// A driver that writes its own slice headers still takes each picture's number, order count,
@@ -730,39 +1131,87 @@ fn encode_sized(enc: &mut VaapiEncoder, width: i32, height: i32, t: u64, key: bo
 fn a_session_tracking_no_references_counts_its_frames() {
     for codec in [Codec::H264, Codec::H265] {
         let mut own_slices = Driver::generous();
-        own_slices.attributes.retain(|a| a.0 != VAConfigAttribEncPackedHeaders);
-        own_slices.attributes.push((VAConfigAttribEncPackedHeaders, VA_ENC_PACKED_HEADER_SEQUENCE));
+        own_slices
+            .attributes
+            .retain(|a| a.0 != VAConfigAttribEncPackedHeaders);
+        own_slices.attributes.push((
+            VAConfigAttribEncPackedHeaders,
+            VA_ENC_PACKED_HEADER_SEQUENCE,
+        ));
         mock::reset(own_slices);
         let mut enc = session(codec, false);
         let mut recon: Vec<VASurfaceID> = Vec::new();
         for t in 0..24u64 {
             let key = t == 0 || t == 20;
             let out = encode(&mut enc, t, key);
-            assert_eq!(parse_video_type(out[1]), Some((codec, if key { FRAME_KEY } else { FRAME_DELTA })), "{codec:?} frame {t}");
+            assert_eq!(
+                parse_video_type(out[1]),
+                Some((codec, if key { FRAME_KEY } else { FRAME_DELTA })),
+                "{codec:?} frame {t}"
+            );
             let count = if t >= 20 { t - 20 } else { t };
             let (current, reference) = mock::with(|d| {
                 let slices = d.last_buffers(VAEncSliceParameterBufferType);
                 if codec == Codec::H264 {
-                    let pic: VAEncPictureParameterBufferH264 = d.last_param(VAEncPictureParameterBufferType).unwrap();
-                    let slice: VAEncSliceParameterBufferH264 = unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
-                    assert_eq!((pic.frame_num as u64, pic.CurrPic.TopFieldOrderCnt as u64), (count, 2 * count), "frame {t}: frame_num and order count");
-                    (pic.CurrPic.picture_id, (!key).then(|| (slice.RefPicList0[0].picture_id, slice.RefPicList0[0].frame_idx as u64)))
+                    let pic: VAEncPictureParameterBufferH264 =
+                        d.last_param(VAEncPictureParameterBufferType).unwrap();
+                    let slice: VAEncSliceParameterBufferH264 =
+                        unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
+                    assert_eq!(
+                        (pic.frame_num as u64, pic.CurrPic.TopFieldOrderCnt as u64),
+                        (count, 2 * count),
+                        "frame {t}: frame_num and order count"
+                    );
+                    (
+                        pic.CurrPic.picture_id,
+                        (!key).then(|| {
+                            (
+                                slice.RefPicList0[0].picture_id,
+                                slice.RefPicList0[0].frame_idx as u64,
+                            )
+                        }),
+                    )
                 } else {
-                    let pic: VAEncPictureParameterBufferHEVC = d.last_param(VAEncPictureParameterBufferType).unwrap();
-                    let slice: VAEncSliceParameterBufferHEVC = unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
-                    assert_eq!(pic.decoded_curr_pic.pic_order_cnt as u64, count, "frame {t}: order count");
-                    (pic.decoded_curr_pic.picture_id, (!key).then(|| (slice.ref_pic_list0[0].picture_id, slice.ref_pic_list0[0].pic_order_cnt as u64)))
+                    let pic: VAEncPictureParameterBufferHEVC =
+                        d.last_param(VAEncPictureParameterBufferType).unwrap();
+                    let slice: VAEncSliceParameterBufferHEVC =
+                        unsafe { ptr::read_unaligned(slices[0].as_ptr() as *const _) };
+                    assert_eq!(
+                        pic.decoded_curr_pic.pic_order_cnt as u64, count,
+                        "frame {t}: order count"
+                    );
+                    (
+                        pic.decoded_curr_pic.picture_id,
+                        (!key).then(|| {
+                            (
+                                slice.ref_pic_list0[0].picture_id,
+                                slice.ref_pic_list0[0].pic_order_cnt as u64,
+                            )
+                        }),
+                    )
                 }
             });
             if let Some(reference) = reference {
-                assert_eq!(reference, (recon[t as usize - 1], count - 1), "{codec:?} frame {t} predicts from the previous frame");
+                assert_eq!(
+                    reference,
+                    (recon[t as usize - 1], count - 1),
+                    "{codec:?} frame {t} predicts from the previous frame"
+                );
             }
-            assert_ne!(recon.last(), Some(&current), "{codec:?} frame {t} reconstructs into a surface of its own");
+            assert_ne!(
+                recon.last(),
+                Some(&current),
+                "{codec:?} frame {t} reconstructs into a surface of its own"
+            );
             recon.push(current);
             assert_eq!(enc.last_reference(), Reference::Untracked);
         }
         let pool: std::collections::HashSet<_> = recon.iter().collect();
-        assert_eq!(pool.len(), 2, "{codec:?}: two reconstruction surfaces alternate");
+        assert_eq!(
+            pool.len(),
+            2,
+            "{codec:?}: two reconstruction surfaces alternate"
+        );
         assert_eq!(enc.negotiated.dpb, 1, "{codec:?}: a one-frame buffer");
     }
 }
@@ -771,21 +1220,44 @@ fn a_session_tracking_no_references_counts_its_frames() {
 /// decoder takes each picture's size from it; a field a bit short wraps to another size.
 #[test]
 fn av1_sequence_header_carries_the_frame_size() {
-    for (w, h) in [(1920, 1080), (1280, 720), (1366, 768), (1024, 512), (320, 240)] {
+    for (w, h) in [
+        (1920, 1080),
+        (1280, 720),
+        (1366, 768),
+        (1024, 512),
+        (320, 240),
+    ] {
         mock::reset(Driver::generous());
         let mut enc = open(Codec::Av1, &sized(Codec::Av1, false, w, h, 30.0)).unwrap();
         encode_sized(&mut enc, w, h, 0, true);
-        let sequence = mock::with(|d| d.last_packed().into_iter().find(|p| p.0 == VAEncPackedHeaderSequence).unwrap().1);
-        let mut r = Reader { bytes: &sequence, pos: 8 * (1 + 4) };
+        let sequence = mock::with(|d| {
+            d.last_packed()
+                .into_iter()
+                .find(|p| p.0 == VAEncPackedHeaderSequence)
+                .unwrap()
+                .1
+        });
+        let mut r = Reader {
+            bytes: &sequence,
+            pos: 8 * (1 + 4),
+        };
         assert_eq!(r.u(3), 0, "seq_profile");
-        assert_eq!(r.u(4), 0, "still picture, reduced header, timing info, and display delay");
+        assert_eq!(
+            r.u(4),
+            0,
+            "still picture, reduced header, timing info, and display delay"
+        );
         assert_eq!(r.u(5), 0, "operating_points_cnt_minus_1");
         assert_eq!(r.u(12), 0, "operating_point_idc");
         if r.u(5) > 7 {
             r.u(1);
         }
         let (wbits, hbits) = (r.u(4) + 1, r.u(4) + 1);
-        assert_eq!((r.u(wbits) + 1, r.u(hbits) + 1), (w as u32, h as u32), "{w}x{h}");
+        assert_eq!(
+            (r.u(wbits) + 1, r.u(hbits) + 1),
+            (w as u32, h as u32),
+            "{w}x{h}"
+        );
     }
 }
 
@@ -805,19 +1277,34 @@ fn vp8_never_reconstructs_into_a_buffer_it_holds() {
         }
         encode(&mut enc, t, t == 0);
         mock::with(|d| {
-            let pic: VAEncPictureParameterBufferVP8 = d.last_param(VAEncPictureParameterBufferType).unwrap();
+            let pic: VAEncPictureParameterBufferVP8 =
+                d.last_param(VAEncPictureParameterBufferType).unwrap();
             let p = unsafe { pic.pic_flags.bits };
             let key = p.frame_type() == 0;
             if !key {
                 let named = [pic.ref_last_frame, pic.ref_gf_frame, pic.ref_arf_frame];
                 for (b, &(surface, frame)) in holds.iter().enumerate() {
-                    assert_eq!(named[b], surface, "frame {t}: buffer {b} is named by the surface frame {frame} was reconstructed into");
-                    assert_eq!(content.get(&surface), Some(&frame), "frame {t}: buffer {b}'s surface still holds frame {frame}");
+                    assert_eq!(
+                        named[b], surface,
+                        "frame {t}: buffer {b} is named by the surface frame {frame} was reconstructed into"
+                    );
+                    assert_eq!(
+                        content.get(&surface),
+                        Some(&frame),
+                        "frame {t}: buffer {b}'s surface still holds frame {frame}"
+                    );
                 }
-                assert!(!named.contains(&pic.reconstructed_frame), "frame {t} reconstructs into a surface a buffer holds");
+                assert!(
+                    !named.contains(&pic.reconstructed_frame),
+                    "frame {t} reconstructs into a surface a buffer holds"
+                );
             }
             content.insert(pic.reconstructed_frame, t);
-            let refresh = [p.refresh_last(), p.refresh_golden_frame(), p.refresh_alternate_frame()];
+            let refresh = [
+                p.refresh_last(),
+                p.refresh_golden_frame(),
+                p.refresh_alternate_frame(),
+            ];
             for (b, held) in holds.iter_mut().enumerate() {
                 if key || refresh[b] == 1 {
                     *held = (pic.reconstructed_frame, t);
@@ -825,7 +1312,11 @@ fn vp8_never_reconstructs_into_a_buffer_it_holds() {
             }
         });
         if t == 30 {
-            assert_eq!(enc.last_reference(), Reference::Frame(24), "the recovery predicts from the golden anchor");
+            assert_eq!(
+                enc.last_reference(),
+                Reference::Frame(24),
+                "the recovery predicts from the golden anchor"
+            );
         }
     }
 }
@@ -839,9 +1330,16 @@ fn the_video_processor_writes_the_picture_unscaled() {
     let mut enc = open(Codec::H264, &sized(Codec::H264, false, w, h, 30.0)).unwrap();
     encode_sized(&mut enc, w, h, 0, true);
     mock::with(|d| {
-        assert!(d.surfaces.iter().any(|s| s.3 == 240), "the surfaces align to whole macroblocks");
+        assert!(
+            d.surfaces.iter().any(|s| s.3 == 240),
+            "the surfaces align to whole macroblocks"
+        );
         let whole = Some((0, 0, w as u16, h as u16));
-        assert_eq!(d.regions, [(whole, whole)], "the source and output rectangles");
+        assert_eq!(
+            d.regions,
+            [(whole, whole)],
+            "the source and output rectangles"
+        );
     });
 }
 
@@ -853,19 +1351,32 @@ fn a_session_falls_back_to_the_full_entry_point_for_its_rate_control() {
     let driver = || {
         let mut d = Driver::generous();
         d.entrypoints = vec![VAEntrypointEncSliceLP, VAEntrypointEncSlice];
-        d.entrypoint_attributes = vec![(VAEntrypointEncSliceLP, VAConfigAttribRateControl, VA_RC_CQP)];
+        d.entrypoint_attributes =
+            vec![(VAEntrypointEncSliceLP, VAConfigAttribRateControl, VA_RC_CQP)];
         d
     };
     mock::reset(driver());
     let enc = session(Codec::H264, true);
-    assert!(!enc.low_power(), "the constant-rate session takes the full entry point");
+    assert!(
+        !enc.low_power(),
+        "the constant-rate session takes the full entry point"
+    );
     mock::with(|d| {
         let (_, entrypoint, attribs) = &d.configs[0];
         assert_eq!(*entrypoint, VAEntrypointEncSlice);
-        assert_eq!(attribs.iter().find(|a| a.type_ == VAConfigAttribRateControl).map(|a| a.value), Some(VA_RC_CBR));
+        assert_eq!(
+            attribs
+                .iter()
+                .find(|a| a.type_ == VAConfigAttribRateControl)
+                .map(|a| a.value),
+            Some(VA_RC_CBR)
+        );
     });
     mock::reset(driver());
-    assert!(session(Codec::H264, false).low_power(), "the constant-quantizer session stays on the low-power entry point");
+    assert!(
+        session(Codec::H264, false).low_power(),
+        "the constant-quantizer session stays on the low-power entry point"
+    );
 }
 
 /// HEVC Main 4:4:4 declares the constraint flags Table A.2 gives the profile: at most 8 bits,
@@ -879,11 +1390,22 @@ fn hevc_main_444_declares_its_profile_constraints() {
     assert!(enc.is_fullcolor());
     let first = encode(&mut enc, 0, true);
     let rbsp = nal(&first[VIDEO_HEADER_LEN..], 33, true);
-    let mut r = Reader { bytes: &rbsp, pos: 8 };
-    assert_eq!((r.u(2), r.u(1), r.u(5)), (0, 1, 4), "profile space, tier, and Main 4:4:4");
+    let mut r = Reader {
+        bytes: &rbsp,
+        pos: 8,
+    };
+    assert_eq!(
+        (r.u(2), r.u(1), r.u(5)),
+        (0, 1, 4),
+        "profile space, tier, and Main 4:4:4"
+    );
     r.pos += 32 + 4;
     let flags: Vec<u32> = (0..9).map(|_| r.u(1)).collect();
-    assert_eq!(flags, [1, 1, 1, 0, 0, 0, 0, 0, 1], "max 12-bit, 10-bit, 8-bit, 4:2:2, 4:2:0, monochrome, intra, one picture, lower bit rate");
+    assert_eq!(
+        flags,
+        [1, 1, 1, 0, 0, 0, 0, 0, 1],
+        "max 12-bit, 10-bit, 8-bit, 4:2:2, 4:2:0, monochrome, intra, one picture, lower bit rate"
+    );
 }
 
 /// A frame-rate change re-declares the stream at the level its new rate asks for, never below
@@ -896,17 +1418,28 @@ fn a_rate_change_keeps_the_level_the_buffer_needs() {
         mock::reset(Driver::generous());
         let mut enc = open(codec, &sized(codec, false, w, h, 120.0)).unwrap();
         encode_sized(&mut enc, w, h, 0, true);
-        enc.reconfigure_rate(&sized(codec, false, w, h, 60.0)).unwrap();
+        enc.reconfigure_rate(&sized(codec, false, w, h, 60.0))
+            .unwrap();
         let out = encode_sized(&mut enc, w, h, 1, false);
-        assert_eq!(parse_video_type(out[1]), Some((codec, FRAME_KEY)), "{codec:?}: the new rate opens a sequence");
+        assert_eq!(
+            parse_video_type(out[1]),
+            Some((codec, FRAME_KEY)),
+            "{codec:?}: the new rate opens a sequence"
+        );
         let stream = &out[VIDEO_HEADER_LEN..];
         if codec == Codec::H264 {
             let level = nal(stream, 7, false)[2] as u32;
             let refs = h264_max_num_ref_frames(stream).unwrap();
-            assert!(crate::encoders::codec::h264_dpb_frames(level, w as u32, h as u32) >= refs, "level_idc {level} admits {refs} reference frames");
+            assert!(
+                crate::encoders::codec::h264_dpb_frames(level, w as u32, h as u32) >= refs,
+                "level_idc {level} admits {refs} reference frames"
+            );
         } else {
             let rbsp = nal(stream, 33, true);
-            let mut r = Reader { bytes: &rbsp, pos: 8 + 88 };
+            let mut r = Reader {
+                bytes: &rbsp,
+                pos: 8 + 88,
+            };
             let level = r.u(8);
             r.ue();
             assert_eq!(r.ue(), 1, "chroma_format_idc");
@@ -922,7 +1455,10 @@ fn a_rate_change_keeps_the_level_the_buffer_needs() {
             r.ue();
             assert_eq!(r.u(1), 0, "sps_sub_layer_ordering_info_present_flag");
             let buffered = r.ue() + 1;
-            assert!(crate::encoders::codec::h265_dpb_frames(level, w as u32, h as u32) + 1 >= buffered, "general_level_idc {level} admits {buffered} buffered pictures");
+            assert!(
+                crate::encoders::codec::h265_dpb_frames(level, w as u32, h as u32) + 1 >= buffered,
+                "general_level_idc {level} admits {buffered} buffered pictures"
+            );
         }
     }
 }
@@ -936,7 +1472,12 @@ fn a_session_that_fails_to_open_frees_its_surfaces() {
     mock::reset(copying);
     assert!(open(Codec::H264, &settings(Codec::H264, false)).is_err());
     mock::with(|d| {
-        let leaked: Vec<VASurfaceID> = d.surfaces.iter().map(|s| s.0).filter(|id| !d.destroyed.contains(id)).collect();
+        let leaked: Vec<VASurfaceID> = d
+            .surfaces
+            .iter()
+            .map(|s| s.0)
+            .filter(|id| !d.destroyed.contains(id))
+            .collect();
         assert!(leaked.is_empty(), "surfaces {leaked:?} outlive the session");
     });
 }
@@ -948,10 +1489,21 @@ fn a_session_without_headers_returns_the_coded_bytes_alone() {
     for codec in Codec::VIDEO {
         mock::reset(Driver::generous());
         let mut framed = session(codec, false);
-        let mut bare = open(codec, &RustCaptureSettings { omit_stripe_headers: true, ..settings(codec, false) }).unwrap();
+        let mut bare = open(
+            codec,
+            &RustCaptureSettings {
+                omit_stripe_headers: true,
+                ..settings(codec, false)
+            },
+        )
+        .unwrap();
         for t in 0..3u64 {
             let with_header = encode(&mut framed, t, t == 0);
-            assert_eq!(encode(&mut bare, t, t == 0), with_header[VIDEO_HEADER_LEN..], "{codec:?} frame {t}");
+            assert_eq!(
+                encode(&mut bare, t, t == 0),
+                with_header[VIDEO_HEADER_LEN..],
+                "{codec:?} frame {t}"
+            );
         }
     }
 }
@@ -964,13 +1516,22 @@ fn a_loss_across_the_wrap_of_the_drivers_frame_num_costs_a_key_frame() {
     mock::reset(Driver::generous());
     let mut enc = session(Codec::H264, false);
     let radeonsi_key = [
-        &[0, 0, 0, 1, 0x67, 0x64, 0x0c, 0x2a, 0xac, 0x23, 0x28, 0x0f, 0x00, 0x44, 0xfc, 0xb3, 0x50, 0x10, 0x10, 0x14, 0x00, 0x00, 0x03][..],
-        &[0x00, 0x04, 0x00, 0x00, 0x03, 0x01, 0xe2, 0x3c, 0x22, 0x11, 0x96],
+        &[
+            0, 0, 0, 1, 0x67, 0x64, 0x0c, 0x2a, 0xac, 0x23, 0x28, 0x0f, 0x00, 0x44, 0xfc, 0xb3,
+            0x50, 0x10, 0x10, 0x14, 0x00, 0x00, 0x03,
+        ][..],
+        &[
+            0x00, 0x04, 0x00, 0x00, 0x03, 0x01, 0xe2, 0x3c, 0x22, 0x11, 0x96,
+        ],
         &[0, 0, 0, 1, 0x68, 0xee, 0x38, 0x30],
         &[0, 0, 0, 1, 0x65, 0x88, 0x80, 0x43],
     ]
     .concat();
-    assert_eq!(h264_frame_num_range(&radeonsi_key), Some(128), "radeonsi's SPS: log2_max_frame_num_minus4 3");
+    assert_eq!(
+        h264_frame_num_range(&radeonsi_key),
+        Some(128),
+        "radeonsi's SPS: log2_max_frame_num_minus4 3"
+    );
     mock::with(|d| d.coded = Some(radeonsi_key));
     encode(&mut enc, 0, true);
     mock::with(|d| d.coded = None);
@@ -979,7 +1540,11 @@ fn a_loss_across_the_wrap_of_the_drivers_frame_num_costs_a_key_frame() {
     }
     assert!(enc.invalidate_reference(127));
     let out = encode(&mut enc, 130, false);
-    assert_eq!(parse_video_type(out[1]), Some((Codec::H264, FRAME_KEY)), "frame 128 carried frame_num 0");
+    assert_eq!(
+        parse_video_type(out[1]),
+        Some((Codec::H264, FRAME_KEY)),
+        "frame 128 carried frame_num 0"
+    );
 }
 
 /// A driver that writes its own SPS in place of the session's, as radeonsi's VCE firmware did
@@ -989,17 +1554,33 @@ fn a_loss_across_the_wrap_of_the_drivers_frame_num_costs_a_key_frame() {
 fn a_bound_the_driver_drops_is_written_back() {
     mock::reset(Driver::generous());
     let mut enc = session(Codec::H264, false);
-    let rest = [&[0, 0, 0, 1, 0x68, 0xee, 0x38, 0x30][..], &[0, 0, 0, 1, 0x65, 0x88, 0x80, 0x43]].concat();
+    let rest = [
+        &[0, 0, 0, 1, 0x68, 0xee, 0x38, 0x30][..],
+        &[0, 0, 0, 1, 0x65, 0x88, 0x80, 0x43],
+    ]
+    .concat();
     let driver_key = [&[0, 0, 0, 1][..], VCE_SPS, &rest].concat();
-    assert_eq!(h264_reorder(&driver_key), None, "the driver's SPS declares no bound");
+    assert_eq!(
+        h264_reorder(&driver_key),
+        None,
+        "the driver's SPS declares no bound"
+    );
     mock::with(|d| d.coded = Some(driver_key));
     let key = encode(&mut enc, 0, true);
     assert_no_reorder(&key[VIDEO_HEADER_LEN..], "the driver's SPS, bounded");
     assert!(key.ends_with(&rest), "the PPS and the slice changed");
-    assert_eq!(h264_frame_num_range(&key[VIDEO_HEADER_LEN..]), Some(128), "the driver's frame_num range");
+    assert_eq!(
+        h264_frame_num_range(&key[VIDEO_HEADER_LEN..]),
+        Some(128),
+        "the driver's frame_num range"
+    );
     let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x02, 0x04];
     mock::with(|d| d.coded = Some(delta.to_vec()));
-    assert_eq!(encode(&mut enc, 1, false)[VIDEO_HEADER_LEN..], delta, "a delta came back changed");
+    assert_eq!(
+        encode(&mut enc, 1, false)[VIDEO_HEADER_LEN..],
+        delta,
+        "a delta came back changed"
+    );
     mock::with(|d| d.coded = None);
 }
 
@@ -1007,15 +1588,32 @@ fn a_bound_the_driver_drops_is_written_back() {
 /// four; its HEVC, and every other device, keep four.
 #[test]
 fn an_h264_picture_on_vce_is_one_slice() {
-    for (vce, codec, wanted) in [(true, Codec::H264, 1), (true, Codec::H265, 4), (false, Codec::H264, 4)] {
+    for (vce, codec, wanted) in [
+        (true, Codec::H264, 1),
+        (true, Codec::H265, 4),
+        (false, Codec::H264, 4),
+    ] {
         mock::reset(Driver::generous());
         let node = std::fs::File::open("/dev/null").unwrap();
         let mut device = Device::on(mock::api(), node.into(), "stand-in").unwrap();
-        assert!(!device.vce, "a node the kernel does not answer for is not VCE");
+        assert!(
+            !device.vce,
+            "a node the kernel does not answer for is not VCE"
+        );
         device.vce = vce;
-        let mut enc = VaapiEncoder::on_device(Arc::new(device), &settings(codec, false), codec, Input::Host { rgba: false }).unwrap();
+        let mut enc = VaapiEncoder::on_device(
+            Arc::new(device),
+            &settings(codec, false),
+            codec,
+            Input::Host { rgba: false },
+        )
+        .unwrap();
         encode(&mut enc, 0, true);
-        assert_eq!(mock::with(|d| d.last_buffers(VAEncSliceParameterBufferType).len()), wanted, "{codec:?} on VCE {vce}");
+        assert_eq!(
+            mock::with(|d| d.last_buffers(VAEncSliceParameterBufferType).len()),
+            wanted,
+            "{codec:?} on VCE {vce}"
+        );
     }
 }
 
@@ -1029,9 +1627,14 @@ fn a_session_cuts_no_more_slices_than_the_driver_takes() {
             few.attributes.retain(|a| a.0 != VAConfigAttribEncMaxSlices);
             few.attributes.push((VAConfigAttribEncMaxSlices, max));
             mock::reset(few);
-            let mut enc = open(codec, &settings(codec, false)).unwrap_or_else(|e| panic!("{codec:?} at most {max}: {e}"));
+            let mut enc = open(codec, &settings(codec, false))
+                .unwrap_or_else(|e| panic!("{codec:?} at most {max}: {e}"));
             encode(&mut enc, 0, true);
-            assert_eq!(mock::with(|d| d.last_buffers(VAEncSliceParameterBufferType).len()), max as usize, "{codec:?}");
+            assert_eq!(
+                mock::with(|d| d.last_buffers(VAEncSliceParameterBufferType).len()),
+                max as usize,
+                "{codec:?}"
+            );
         }
     }
 }
@@ -1040,23 +1643,45 @@ fn a_session_cuts_no_more_slices_than_the_driver_takes() {
 /// constant quantizer and as the bound of a constant rate; HEVC keeps the quantizer asked.
 #[test]
 fn an_h264_picture_is_coded_no_finer_than_the_floor() {
-    for (codec, cbr, wanted) in [(Codec::H264, false, 7), (Codec::H264, true, 7), (Codec::H265, false, 5)] {
+    for (codec, cbr, wanted) in [
+        (Codec::H264, false, 7),
+        (Codec::H264, true, 7),
+        (Codec::H265, false, 5),
+    ] {
         mock::reset(Driver::generous());
         let mut enc = session(codec, cbr);
-        enc.encode_host(&frame(), (W * 4) as usize, false, 0, 5, true).unwrap();
+        enc.encode_host(&frame(), (W * 4) as usize, false, 0, 5, true)
+            .unwrap();
         mock::with(|d| {
             if cbr {
-                let (_, bytes) = d.last_misc().into_iter().find(|m| m.0 == VAEncMiscParameterTypeRateControl).unwrap();
-                let rc: VAEncMiscParameterRateControl = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                let (_, bytes) = d
+                    .last_misc()
+                    .into_iter()
+                    .find(|m| m.0 == VAEncMiscParameterTypeRateControl)
+                    .unwrap();
+                let rc: VAEncMiscParameterRateControl =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
                 assert_eq!(rc.min_qp, wanted, "{codec:?} constant rate");
             } else if codec == Codec::H264 {
-                let pic: VAEncPictureParameterBufferH264 = d.last_param(VAEncPictureParameterBufferType).unwrap();
-                let slice: VAEncSliceParameterBufferH264 = d.last_param(VAEncSliceParameterBufferType).unwrap();
-                assert_eq!(pic.pic_init_qp as i32 + slice.slice_qp_delta as i32, wanted as i32, "{codec:?}");
+                let pic: VAEncPictureParameterBufferH264 =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
+                let slice: VAEncSliceParameterBufferH264 =
+                    d.last_param(VAEncSliceParameterBufferType).unwrap();
+                assert_eq!(
+                    pic.pic_init_qp as i32 + slice.slice_qp_delta as i32,
+                    wanted as i32,
+                    "{codec:?}"
+                );
             } else {
-                let slice: VAEncSliceParameterBufferHEVC = d.last_param(VAEncSliceParameterBufferType).unwrap();
-                let pic: VAEncPictureParameterBufferHEVC = d.last_param(VAEncPictureParameterBufferType).unwrap();
-                assert_eq!(pic.pic_init_qp as i32 + slice.slice_qp_delta as i32, wanted as i32, "{codec:?}");
+                let slice: VAEncSliceParameterBufferHEVC =
+                    d.last_param(VAEncSliceParameterBufferType).unwrap();
+                let pic: VAEncPictureParameterBufferHEVC =
+                    d.last_param(VAEncPictureParameterBufferType).unwrap();
+                assert_eq!(
+                    pic.pic_init_qp as i32 + slice.slice_qp_delta as i32,
+                    wanted as i32,
+                    "{codec:?}"
+                );
             }
         });
     }
@@ -1075,12 +1700,19 @@ fn a_constant_rate_session_caps_each_frame_at_its_buffer() {
         let mut enc = session(Codec::H264, true);
         encode(&mut enc, 0, true);
         mock::with(|d| {
-            let cap = d.last_misc().into_iter().find(|m| m.0 == VAEncMiscParameterTypeMaxFrameSize);
+            let cap = d
+                .last_misc()
+                .into_iter()
+                .find(|m| m.0 == VAEncMiscParameterTypeMaxFrameSize);
             match cap {
                 Some((_, bytes)) => {
                     assert!(offered, "a cap the driver does not take");
-                    let cap: VAEncMiscParameterBufferMaxFrameSize = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                    assert_eq!(cap.max_frame_size, 200_000, "the buffer, 1.5 frames at 4 Mbps and 30 fps, in bits");
+                    let cap: VAEncMiscParameterBufferMaxFrameSize =
+                        unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                    assert_eq!(
+                        cap.max_frame_size, 200_000,
+                        "the buffer, 1.5 frames at 4 Mbps and 30 fps, in bits"
+                    );
                 }
                 None => assert!(!offered, "no cap where the driver takes one"),
             }
@@ -1097,10 +1729,17 @@ fn the_hevc_sequence_declares_a_finite_intra_period() {
     let mut enc = session(Codec::H265, false);
     encode(&mut enc, 0, true);
     mock::with(|d| {
-        let seq: VAEncSequenceParameterBufferHEVC = d.last_param(VAEncSequenceParameterBufferType).unwrap();
+        let seq: VAEncSequenceParameterBufferHEVC =
+            d.last_param(VAEncSequenceParameterBufferType).unwrap();
         let poc_lsb = 1u32 << (4 + 8);
-        assert_eq!(seq.intra_period, poc_lsb, "the intra period is the picture-order-count range");
+        assert_eq!(
+            seq.intra_period, poc_lsb,
+            "the intra period is the picture-order-count range"
+        );
         assert_eq!(seq.intra_idr_period, poc_lsb);
-        assert!((seq.intra_period as u64).next_power_of_two() <= u32::MAX as u64, "its next power of two does not overflow");
+        assert!(
+            (seq.intra_period as u64).next_power_of_two() <= u32::MAX as u64,
+            "its next power of two does not overflow"
+        );
     });
 }

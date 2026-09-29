@@ -23,7 +23,7 @@ pub enum Codec {
     H265 = 5,
 }
 
-use super::reference::{Reference, REFERENCE_FRAMES};
+use super::reference::{REFERENCE_FRAMES, Reference};
 
 /// Wire tag of a JPEG stripe: `u8 reserved`, `u16 frame id`, `u16 stripe Y`, JPEG data.
 pub const WIRE_JPEG: u8 = 0x03;
@@ -52,9 +52,16 @@ impl Codec {
 
     /// The codec a numeric id names.
     pub fn from_id(id: u32) -> Option<Codec> {
-        [Codec::Jpeg, Codec::H264, Codec::Vp8, Codec::Vp9, Codec::Av1, Codec::H265]
-            .into_iter()
-            .find(|c| c.id() == id)
+        [
+            Codec::Jpeg,
+            Codec::H264,
+            Codec::Vp8,
+            Codec::Vp9,
+            Codec::Av1,
+            Codec::H265,
+        ]
+        .into_iter()
+        .find(|c| c.id() == id)
     }
 
     /// The codec a settings name selects; `None` for a name no backend serves.
@@ -215,26 +222,65 @@ impl Codec {
 
 /// The quality index in `0..=51` whose quantizer is nearest `q`, the lowest on a tie.
 fn nearest_index(q: u32, quantizer: impl Fn(i32) -> u32) -> u32 {
-    (0..=51).min_by_key(|&crf| (quantizer(crf) as i64 - q as i64).abs()).unwrap_or(0) as u32
+    (0..=51)
+        .min_by_key(|&crf| (quantizer(crf) as i64 - q as i64).abs())
+        .unwrap_or(0) as u32
 }
 
 /// Session quality index → VP8 quantizer index (0..=127) breakpoints.
-const VP8_QINDEX: [(u32, u32); 10] =
-    [(0, 0), (10, 2), (15, 9), (20, 21), (25, 47), (30, 71), (35, 97), (40, 120), (42, 127), (51, 127)];
+const VP8_QINDEX: [(u32, u32); 10] = [
+    (0, 0),
+    (10, 2),
+    (15, 9),
+    (20, 21),
+    (25, 47),
+    (30, 71),
+    (35, 97),
+    (40, 120),
+    (42, 127),
+    (51, 127),
+];
 /// Session quality index → VP9 `base_q_idx` (0..=255) breakpoints.
 const VP9_QINDEX: [(u32, u32); 10] = [
-    (0, 0), (10, 18), (15, 39), (20, 77), (25, 120), (30, 149), (35, 168), (40, 194), (45, 237),
+    (0, 0),
+    (10, 18),
+    (15, 39),
+    (20, 77),
+    (25, 120),
+    (30, 149),
+    (35, 168),
+    (40, 194),
+    (45, 237),
     (51, 255),
 ];
 /// Session quality index → AV1 `base_q_idx` (0..=255) breakpoints.
 const AV1_QINDEX: [(u32, u32); 10] = [
-    (0, 0), (10, 12), (15, 43), (20, 88), (25, 134), (30, 168), (35, 190), (40, 215), (45, 253),
+    (0, 0),
+    (10, 12),
+    (15, 43),
+    (20, 88),
+    (25, 134),
+    (30, 168),
+    (35, 190),
+    (40, 215),
+    (45, 253),
     (51, 255),
 ];
 /// Session quality index → NVENC AV1 `base_q_idx` breakpoints.
 const AV1_NVENC_QINDEX: [(u32, u32); 13] = [
-    (0, 1), (10, 1), (15, 4), (20, 31), (22, 44), (25, 65), (28, 109), (30, 126), (35, 156),
-    (40, 182), (45, 210), (50, 251), (51, 255),
+    (0, 1),
+    (10, 1),
+    (15, 4),
+    (20, 31),
+    (22, 44),
+    (25, 65),
+    (28, 109),
+    (30, 126),
+    (35, 156),
+    (40, 182),
+    (45, 210),
+    (50, 251),
+    (51, 255),
 ];
 
 /// Piecewise-linear lookup of `x` in ascending `(x, y)` breakpoints, clamped at both ends.
@@ -269,14 +315,18 @@ pub const VPX_QINDEX: [u8; 64] = [
 /// VP8 quantizer index of each libvpx VP8 quantizer level 0..=63.
 pub const VP8_LEVEL_QINDEX: [u8; 64] = [
     0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30,
-    31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 64, 67, 70, 73, 76, 79, 82,
-    85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127,
+    31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 64, 67, 70, 73, 76, 79, 82, 85,
+    88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127,
 ];
 
 /// The libvpx / SVT-AV1 quantizer level (0..=63) closest to a quantizer index of
 /// `codec`'s domain: the software encoders take the level, the hardware ones the index.
 pub fn vpx_level(codec: Codec, qindex: u32) -> u32 {
-    let table: &[u8; 64] = if codec == Codec::Vp8 { &VP8_LEVEL_QINDEX } else { &VPX_QINDEX };
+    let table: &[u8; 64] = if codec == Codec::Vp8 {
+        &VP8_LEVEL_QINDEX
+    } else {
+        &VPX_QINDEX
+    };
     let target = qindex.min(codec.quantizer_max()) as i64;
     let mut best = 0usize;
     for (level, &q) in table.iter().enumerate() {
@@ -403,7 +453,8 @@ pub fn h265_level(width: u32, height: u32, fps: u32, bitrate_bps: u64, high_tier
         (186, 35_651_584, 4_278_190_080, 240_000_000, 800_000_000),
     ];
     for &(level, max_ps, max_sr, main_br, high_br) in &LEVELS {
-        if ps <= max_ps && sr <= max_sr && bitrate_bps <= if high_tier { high_br } else { main_br } {
+        if ps <= max_ps && sr <= max_sr && bitrate_bps <= if high_tier { high_br } else { main_br }
+        {
             return level;
         }
     }
@@ -468,7 +519,12 @@ pub fn av1_level(width: u32, height: u32, fps: u32, bitrate_bps: u64) -> u32 {
         (19, 35_651_584, 16384, 8704, 4_278_190_080, 160_000_000),
     ];
     for &(level, max_ps, max_w, max_h, max_rate, max_br) in &LEVELS {
-        if ps <= max_ps && width <= max_w && height <= max_h && rate <= max_rate && bitrate_bps <= max_br {
+        if ps <= max_ps
+            && width <= max_w
+            && height <= max_h
+            && rate <= max_rate
+            && bitrate_bps <= max_br
+        {
             return level;
         }
     }
@@ -517,12 +573,18 @@ pub fn vp8_is_key(frame: &[u8]) -> bool {
 /// Whether a VP9 frame is a key frame, read from its uncompressed header: not a shown existing
 /// frame, and `frame_type` KEY_FRAME. Profile 3 carries one reserved bit ahead of those two.
 pub fn vp9_is_key(frame: &[u8]) -> bool {
-    let Some(&b) = frame.first() else { return false };
+    let Some(&b) = frame.first() else {
+        return false;
+    };
     if b >> 6 != 0b10 {
         return false;
     }
     let profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
-    let (show_existing, frame_type) = if profile == 3 { (b & 0x04, b & 0x02) } else { (b & 0x08, b & 0x04) };
+    let (show_existing, frame_type) = if profile == 3 {
+        (b & 0x04, b & 0x02)
+    } else {
+        (b & 0x08, b & 0x04)
+    };
     show_existing == 0 && frame_type == 0
 }
 
@@ -557,7 +619,9 @@ pub fn av1_is_key(tu: &[u8]) -> bool {
             tu.len().saturating_sub(i)
         };
         if matches!(obu_type, 3 | 6) {
-            let Some(&first) = tu.get(i) else { return false };
+            let Some(&first) = tu.get(i) else {
+                return false;
+            };
             let show_existing_frame = first & 0x80 != 0;
             let frame_type = (first >> 5) & 0x03;
             return !show_existing_frame && frame_type == 0;
@@ -659,7 +723,14 @@ mod tests {
     /// Names round-trip through the parser, and the aliases land on the same codec.
     #[test]
     fn names_round_trip() {
-        for codec in [Codec::Jpeg, Codec::H264, Codec::H265, Codec::Vp8, Codec::Vp9, Codec::Av1] {
+        for codec in [
+            Codec::Jpeg,
+            Codec::H264,
+            Codec::H265,
+            Codec::Vp8,
+            Codec::Vp9,
+            Codec::Av1,
+        ] {
             assert_eq!(Codec::parse(codec.name()), Some(codec));
         }
         assert_eq!(Codec::parse("HEVC"), Some(Codec::H265));
@@ -677,16 +748,45 @@ mod tests {
             assert!(seen.insert(codec.wire_id()));
             assert_eq!(Codec::from_wire_id(codec.wire_id()), Some(codec));
             let mut out = Vec::new();
-            push_video_header(&mut out, codec, FRAME_KEY, 0x1234, 7, 1920, 1080, Reference::None);
+            push_video_header(
+                &mut out,
+                codec,
+                FRAME_KEY,
+                0x1234,
+                7,
+                1920,
+                1080,
+                Reference::None,
+            );
             assert_eq!(out.len(), VIDEO_HEADER_LEN);
             assert_eq!(out[0], WIRE_VIDEO);
             assert_eq!(parse_video_type(out[1]), Some((codec, FRAME_KEY)));
-            assert_eq!(&out[2..], &[0x12, 0x34, 0, 7, 0x07, 0x80, 0x04, 0x38, 0x12, 0x34]);
+            assert_eq!(
+                &out[2..],
+                &[0x12, 0x34, 0, 7, 0x07, 0x80, 0x04, 0x38, 0x12, 0x34]
+            );
             out.clear();
-            push_video_header(&mut out, codec, FRAME_DELTA, 0x1235, 7, 1920, 1080, Reference::Frame(0x1230));
-            assert_eq!(&out[10..], &[0x12, 0x30], "a predicted frame names its reference");
+            push_video_header(
+                &mut out,
+                codec,
+                FRAME_DELTA,
+                0x1235,
+                7,
+                1920,
+                1080,
+                Reference::Frame(0x1230),
+            );
+            assert_eq!(
+                &out[10..],
+                &[0x12, 0x30],
+                "a predicted frame names its reference"
+            );
         }
-        assert_eq!(Codec::from_wire_id(0), None, "JPEG never rides the video tag");
+        assert_eq!(
+            Codec::from_wire_id(0),
+            None,
+            "JPEG never rides the video tag"
+        );
         assert_eq!(Codec::from_wire_id(9), None);
         for id in 0..6 {
             assert_eq!(Codec::from_id(id).map(|c| c.id()), Some(id));
@@ -747,10 +847,20 @@ mod tests {
         assert_eq!(vpx_level(Codec::Av1, 249), 62);
         assert_eq!(vpx_level(Codec::Vp8, 0), 0);
         assert_eq!(vpx_level(Codec::Vp8, 127), 63);
-        assert_eq!(vpx_level(Codec::Vp8, 52), 36, "a tie resolves to the lower level");
+        assert_eq!(
+            vpx_level(Codec::Vp8, 52),
+            36,
+            "a tie resolves to the lower level"
+        );
         for level in 0..64u32 {
-            assert_eq!(vpx_level(Codec::Vp9, VPX_QINDEX[level as usize] as u32), level);
-            assert_eq!(vpx_level(Codec::Vp8, VP8_LEVEL_QINDEX[level as usize] as u32), level);
+            assert_eq!(
+                vpx_level(Codec::Vp9, VPX_QINDEX[level as usize] as u32),
+                level
+            );
+            assert_eq!(
+                vpx_level(Codec::Vp8, VP8_LEVEL_QINDEX[level as usize] as u32),
+                level
+            );
         }
     }
 
@@ -792,7 +902,11 @@ mod tests {
         assert_eq!(av1_level(1920, 1080, 60, 0), 9);
         assert_eq!(av1_level(3840, 2160, 60, 0), 13);
         assert_eq!(av1_level(3840, 2160, 120, 0), 14);
-        assert_eq!(av1_level(4096, 2304, 30, 0), 16, "larger than 5.x's MaxPicSize");
+        assert_eq!(
+            av1_level(4096, 2304, 30, 0),
+            16,
+            "larger than 5.x's MaxPicSize"
+        );
         assert_eq!(av1_level(7680, 4320, 60, 0), 17);
         assert_eq!(av1_level(7680, 4320, 120, 0), 18);
         // Both axes fit 5.x, the picture does not: MaxPicSize is not the product of the axes.
@@ -827,7 +941,9 @@ mod tests {
     /// non-IDR is intra, a P slice is delta, and a truncated slice is delta.
     #[test]
     fn h264_labels_from_the_bitstream() {
-        let idr = [0, 0, 0, 1, 0x67, 0x64, 0, 0x1f, 0, 0, 1, 0x65, 0x88, 0x84, 0];
+        let idr = [
+            0, 0, 0, 1, 0x67, 0x64, 0, 0x1f, 0, 0, 1, 0x65, 0x88, 0x84, 0,
+        ];
         assert_eq!(h264_frame_type(&idr), FRAME_KEY);
         // slice_type 7 (I, all slices) encoded ue: first_mb=0 -> '1', slice_type 7 -> '0001000'
         let intra = [0, 0, 1, 0x41, 0b1000_1000, 0b0000_0000];
@@ -884,7 +1000,9 @@ mod tests {
         let frame_header_only = [0x1a, 0x01, 0x00];
         assert!(av1_is_key(&frame_header_only));
         assert!(!av1_is_key(&[0x12, 0x00]));
-        assert!(!av1_is_key(&[0x32, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
+        assert!(!av1_is_key(&[
+            0x32, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+        ]));
         assert!(!av1_is_key(&[]));
     }
 }

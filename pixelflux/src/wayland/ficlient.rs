@@ -39,10 +39,10 @@ use std::time::{Duration, Instant};
 
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::wl_registry;
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_plasma::fake_input::client::org_kde_kwin_fake_input::OrgKdeKwinFakeInput;
 
-use crate::wayland::wlclient::{bounded_roundtrip, impl_sync_callback, SyncState};
+use crate::wayland::wlclient::{SyncState, bounded_roundtrip, impl_sync_callback};
 
 /// Highest `org_kde_kwin_fake_input` version the bindings describe; `authenticate`
 /// and `pointer_motion` are version 1.
@@ -73,12 +73,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
             && interface == "org_kde_kwin_fake_input"
             && state.fake_input.is_none()
         {
-            state.fake_input =
-                Some(registry.bind(name, version.min(FAKE_INPUT_VERSION), qh, ()));
+            state.fake_input = Some(registry.bind(name, version.min(FAKE_INPUT_VERSION), qh, ()));
         }
     }
 }
@@ -96,8 +99,8 @@ impl Device {
     /// Connect to the app compositor and bind its fake-input device; `Ok(None)`
     /// when the compositor answers but does not offer the global.
     fn connect(socket_path: &str) -> Result<Option<Device>, String> {
-        let stream = UnixStream::connect(socket_path)
-            .map_err(|e| format!("connect {socket_path}: {e}"))?;
+        let stream =
+            UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
         let conn = Connection::from_socket(stream).map_err(|e| format!("wayland setup: {e}"))?;
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
@@ -110,7 +113,12 @@ impl Device {
         device.authenticate("pixelflux".to_string(), "remote pointer motion".to_string());
         // Surfaces a bind or authentication error before the first delta.
         bounded_roundtrip(&conn, &mut queue, &mut state)?;
-        Ok(Some(Device { conn, queue, state, device }))
+        Ok(Some(Device {
+            conn,
+            queue,
+            state,
+            device,
+        }))
     }
 
     /// One delta as a non-blocking write. Whatever the compositor sent since the
@@ -158,7 +166,9 @@ fn slot() -> &'static Mutex<Slot> {
 }
 
 fn lock_slot() -> std::sync::MutexGuard<'static, Slot> {
-    slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Point the client at the app compositor's socket path (None clears it), dropping

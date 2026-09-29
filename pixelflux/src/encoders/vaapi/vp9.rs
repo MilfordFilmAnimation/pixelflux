@@ -27,7 +27,10 @@ pub(super) struct Arm {
 
 impl Arm {
     pub(super) fn new() -> Self {
-        Self { sequence: unsafe { std::mem::zeroed() }, log2_tile_columns: 0 }
+        Self {
+            sequence: unsafe { std::mem::zeroed() },
+            log2_tile_columns: 0,
+        }
     }
 
     pub(super) fn configure(&mut self, n: &Negotiated) {
@@ -41,14 +44,23 @@ impl Arm {
             s.intra_period = i32::MAX as u32;
         }
         let columns = n.width.div_ceil(MAX_TILE_WIDTH);
-        self.log2_tile_columns = if columns <= 1 { 0 } else { (32 - (columns - 1).leading_zeros()) as u8 };
+        self.log2_tile_columns = if columns <= 1 {
+            0
+        } else {
+            (32 - (columns - 1).leading_zeros()) as u8
+        };
     }
 
     pub(super) fn sequence(&mut self, _n: &Negotiated, out: &mut Buffers) {
         out.push(VAEncSequenceParameterBufferType, &self.sequence);
     }
 
-    pub(super) fn picture(&mut self, n: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    pub(super) fn picture(
+        &mut self,
+        n: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         let slot_of = |pts: u64| (pts % REFERENCE_FRAMES as u64) as u8;
         let mut pic: VAEncPictureParameterBufferVP9 = unsafe { std::mem::zeroed() };
         pic.frame_width_src = n.width;
@@ -70,7 +82,9 @@ impl Arm {
                 r.set_force_kf(1);
                 pic.refresh_frame_flags = 0xff;
             } else {
-                let (ref_pts, _) = frame.reference.ok_or("a predicted VP9 picture without a reference")?;
+                let (ref_pts, _) = frame
+                    .reference
+                    .ok_or("a predicted VP9 picture without a reference")?;
                 let slot = slot_of(ref_pts) as u32;
                 r.set_ref_frame_ctrl_l0(1);
                 r.set_ref_last_idx(slot);
@@ -84,7 +98,11 @@ impl Arm {
             p.set_show_frame(1);
             p.set_error_resilient_mode(1);
         }
-        pic.luma_ac_qindex = if n.rc_mode == VA_RC_CQP { frame.qp.min(255) as u8 } else { 100 };
+        pic.luma_ac_qindex = if n.rc_mode == VA_RC_CQP {
+            frame.qp.min(255) as u8
+        } else {
+            100
+        };
         pic.filter_level = LOOP_FILTER_LEVEL;
         pic.sharpness_level = SHARPNESS;
         out.push(VAEncPictureParameterBufferType, &pic);

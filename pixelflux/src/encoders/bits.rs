@@ -63,7 +63,11 @@ impl BitWriter {
 
     /// A signed Exp-Golomb code.
     pub fn se(&mut self, value: i32) {
-        let mapped = if value > 0 { 2 * value as u32 - 1 } else { (-2 * value) as u32 };
+        let mapped = if value > 0 {
+            2 * value as u32 - 1
+        } else {
+            (-2 * value) as u32
+        };
         self.ue(mapped);
     }
 
@@ -142,7 +146,13 @@ mod tests {
 
     #[test]
     fn emulation_prevention_guards_every_start_code() {
-        assert_eq!(escape(&[0, 0, 1, 0, 0, 0, 5, 0, 0, 3]), vec![0, 0, 3, 1, 0, 0, 3, 0, 5, 0, 0, 3, 3]);
-        assert_eq!(nal_unit(&[0x67], &[0, 0, 2]), vec![0, 0, 0, 1, 0x67, 0, 0, 3, 2]);
+        assert_eq!(
+            escape(&[0, 0, 1, 0, 0, 0, 5, 0, 0, 3]),
+            vec![0, 0, 3, 1, 0, 0, 3, 0, 5, 0, 0, 3, 3]
+        );
+        assert_eq!(
+            nal_unit(&[0x67], &[0, 0, 2]),
+            vec![0, 0, 0, 1, 0x67, 0, 0, 3, 2]
+        );
     }
 }

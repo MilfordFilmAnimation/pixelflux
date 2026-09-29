@@ -97,7 +97,10 @@ pub fn save_restore_token(token: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Err(e) = std::fs::write(&path, token) {
-        eprintln!("[HostCapture] portal restore token not saved to {}: {e}", path.display());
+        eprintln!(
+            "[HostCapture] portal restore token not saved to {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -112,7 +115,9 @@ fn value_i32(v: &Value<'_>) -> Option<i32> {
 
 fn value_pair(v: &Value<'_>) -> Option<(i32, i32)> {
     match v {
-        Value::Structure(s) if s.fields().len() == 2 => Some((value_i32(&s.fields()[0])?, value_i32(&s.fields()[1])?)),
+        Value::Structure(s) if s.fields().len() == 2 => {
+            Some((value_i32(&s.fields()[0])?, value_i32(&s.fields()[1])?))
+        }
         Value::Value(inner) => value_pair(inner),
         _ => None,
     }
@@ -125,8 +130,14 @@ fn parse_streams(v: &Value<'_>) -> Vec<PortalStream> {
     for item in arr.iter() {
         let Value::Structure(s) = item else { continue };
         let fields = s.fields();
-        let Some(Value::U32(node_id)) = fields.first() else { continue };
-        let mut stream = PortalStream { node_id: *node_id, position: None, size: None };
+        let Some(Value::U32(node_id)) = fields.first() else {
+            continue;
+        };
+        let mut stream = PortalStream {
+            node_id: *node_id,
+            position: None,
+            size: None,
+        };
         if let Some(Value::Dict(d)) = fields.get(1) {
             for (k, val) in d.iter() {
                 let Value::Str(k) = k else { continue };
@@ -147,13 +158,24 @@ impl PortalSession {
     /// drives — zero opens a plain ScreenCast session; `capture` asks for every monitor as its
     /// own stream with `cursor_mode` (`CURSOR_*`), downgraded to what the portal offers. The
     /// call returns once the portal (and any dialog it shows) has answered.
-    pub fn open(capture: bool, devices: u32, cursor_mode: u32, restore_token: Option<&str>) -> Result<Self, String> {
+    pub fn open(
+        capture: bool,
+        devices: u32,
+        cursor_mode: u32,
+        restore_token: Option<&str>,
+    ) -> Result<Self, String> {
         let conn = Connection::session().map_err(|e| format!("session bus: {e}"))?;
-        let screencast = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE).map_err(|e| e.to_string())?;
+        let screencast = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE)
+            .map_err(|e| e.to_string())?;
         let remote = (devices != 0)
-            .then(|| Proxy::new(&conn, DESKTOP, DESKTOP_PATH, REMOTE_DESKTOP_IFACE).map_err(|e| e.to_string()))
+            .then(|| {
+                Proxy::new(&conn, DESKTOP, DESKTOP_PATH, REMOTE_DESKTOP_IFACE)
+                    .map_err(|e| e.to_string())
+            })
             .transpose()?;
-        let sc_version: u32 = screencast.get_property("version").map_err(|e| format!("no ScreenCast portal: {e}"))?;
+        let sc_version: u32 = screencast
+            .get_property("version")
+            .map_err(|e| format!("no ScreenCast portal: {e}"))?;
         let mut this = Self {
             conn,
             screencast,
@@ -165,15 +187,25 @@ impl PortalSession {
             restore_token: None,
             rd_version: 0,
         };
-        let opener = this.remote.clone().unwrap_or_else(|| this.screencast.clone());
+        let opener = this
+            .remote
+            .clone()
+            .unwrap_or_else(|| this.screencast.clone());
         let rd_version: u32 = match &this.remote {
-            Some(rd) => rd.get_property("version").map_err(|e| format!("no RemoteDesktop portal: {e}"))?,
+            Some(rd) => rd
+                .get_property("version")
+                .map_err(|e| format!("no RemoteDesktop portal: {e}"))?,
             None => 0,
         };
         this.rd_version = rd_version;
         let mut options = Options::new();
-        options.insert("session_handle_token", Value::from(format!("pixelflux{}", std::process::id())));
-        let (_, results) = this.request("CreateSession", options, |o| opener.call("CreateSession", &(o,)))?;
+        options.insert(
+            "session_handle_token",
+            Value::from(format!("pixelflux{}", std::process::id())),
+        );
+        let (_, results) = this.request("CreateSession", options, |o| {
+            opener.call("CreateSession", &(o,))
+        })?;
         let session = results
             .get("session_handle")
             .and_then(|v| match &**v {
@@ -189,7 +221,10 @@ impl PortalSession {
         let persist_on_sources = this.remote.is_none() && sc_version >= 4;
         let persist_on_devices = this.remote.is_some() && rd_version >= 2;
         if capture {
-            let available: u32 = this.screencast.get_property("AvailableCursorModes").unwrap_or(CURSOR_EMBEDDED);
+            let available: u32 = this
+                .screencast
+                .get_property("AvailableCursorModes")
+                .unwrap_or(CURSOR_EMBEDDED);
             if available & cursor_mode == 0 {
                 this.cursor_mode = [CURSOR_EMBEDDED, CURSOR_HIDDEN, CURSOR_METADATA]
                     .into_iter()
@@ -209,10 +244,14 @@ impl PortalSession {
                 }
             }
             let (sc, session) = (this.screencast.clone(), this.session.clone());
-            this.request("SelectSources", options, |o| sc.call("SelectSources", &(&session, o)))?;
+            this.request("SelectSources", options, |o| {
+                sc.call("SelectSources", &(&session, o))
+            })?;
         }
         if let Some(rd) = this.remote.clone() {
-            let available: u32 = rd.get_property("AvailableDeviceTypes").unwrap_or(DEVICE_KEYBOARD | DEVICE_POINTER);
+            let available: u32 = rd
+                .get_property("AvailableDeviceTypes")
+                .unwrap_or(DEVICE_KEYBOARD | DEVICE_POINTER);
             let mut options = Options::new();
             opt_u32(&mut options, "types", devices & available);
             if persist_on_devices {
@@ -222,10 +261,14 @@ impl PortalSession {
                 }
             }
             let session = this.session.clone();
-            this.request("SelectDevices", options, |o| rd.call("SelectDevices", &(&session, o)))?;
+            this.request("SelectDevices", options, |o| {
+                rd.call("SelectDevices", &(&session, o))
+            })?;
         }
         let session = this.session.clone();
-        let (_, results) = this.request("Start", Options::new(), |o| opener.call("Start", &(&session, "", o)))?;
+        let (_, results) = this.request("Start", Options::new(), |o| {
+            opener.call("Start", &(&session, "", o))
+        })?;
         if let Some(v) = results.get("streams") {
             this.streams = parse_streams(v);
         }
@@ -246,8 +289,12 @@ impl PortalSession {
     /// did not, since a bus nobody listens on and a portal without a backend read the same.
     pub fn probe() -> Result<(), String> {
         let conn = Connection::session().map_err(|e| format!("session bus: {e}"))?;
-        let screencast = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE).map_err(|e| e.to_string())?;
-        screencast.get_property::<u32>("version").map(|_| ()).map_err(|e| format!("no ScreenCast portal: {e}"))
+        let screencast = Proxy::new(&conn, DESKTOP, DESKTOP_PATH, SCREENCAST_IFACE)
+            .map_err(|e| e.to_string())?;
+        screencast
+            .get_property::<u32>("version")
+            .map(|_| ())
+            .map_err(|e| format!("no ScreenCast portal: {e}"))
     }
 
     /// A method whose result arrives as a `Response` on a request object: subscribe to the
@@ -260,20 +307,40 @@ impl PortalSession {
         call: impl FnOnce(&Options<'_>) -> zbus::Result<OwnedObjectPath>,
     ) -> Result<(u32, HashMap<String, OwnedValue>), String> {
         static COUNTER: AtomicU32 = AtomicU32::new(1);
-        let token = format!("pixelflux{}_{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed));
-        let sender = self.conn.unique_name().ok_or("bus connection has no unique name")?.as_str().to_string();
+        let token = format!(
+            "pixelflux{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let sender = self
+            .conn
+            .unique_name()
+            .ok_or("bus connection has no unique name")?
+            .as_str()
+            .to_string();
         let path = request_path(&sender, &token);
         options.insert("handle_token", Value::from(token.clone()));
-        let request = Proxy::new(&self.conn, DESKTOP, path.as_str(), REQUEST_IFACE).map_err(|e| e.to_string())?;
-        let mut responses = request.receive_signal("Response").map_err(|e| e.to_string())?;
+        let request = Proxy::new(&self.conn, DESKTOP, path.as_str(), REQUEST_IFACE)
+            .map_err(|e| e.to_string())?;
+        let mut responses = request
+            .receive_signal("Response")
+            .map_err(|e| e.to_string())?;
         let handle = call(&options).map_err(|e| format!("{method}: {e}"))?;
         if handle.as_str() != path {
             // A portal predating handle tokens answers on the path it returned.
-            let request = Proxy::new(&self.conn, DESKTOP, handle.as_str(), REQUEST_IFACE).map_err(|e| e.to_string())?;
-            responses = request.receive_signal("Response").map_err(|e| e.to_string())?;
+            let request = Proxy::new(&self.conn, DESKTOP, handle.as_str(), REQUEST_IFACE)
+                .map_err(|e| e.to_string())?;
+            responses = request
+                .receive_signal("Response")
+                .map_err(|e| e.to_string())?;
         }
-        let msg = responses.next().ok_or_else(|| format!("{method}: the request closed without a response"))?;
-        let (code, results): (u32, HashMap<String, OwnedValue>) = msg.body().deserialize().map_err(|e| format!("{method}: {e}"))?;
+        let msg = responses
+            .next()
+            .ok_or_else(|| format!("{method}: the request closed without a response"))?;
+        let (code, results): (u32, HashMap<String, OwnedValue>) = msg
+            .body()
+            .deserialize()
+            .map_err(|e| format!("{method}: {e}"))?;
         match code {
             0 => Ok((code, results)),
             1 => Err(format!("{method}: the user canceled the portal dialog")),
@@ -303,7 +370,10 @@ impl PortalSession {
     pub fn open_pipewire_remote(&self) -> Result<OwnedFd, String> {
         let fd: zbus::zvariant::OwnedFd = self
             .screencast
-            .call("OpenPipeWireRemote", &(self.session.clone(), Options::new()))
+            .call(
+                "OpenPipeWireRemote",
+                &(self.session.clone(), Options::new()),
+            )
             .map_err(|e| format!("OpenPipeWireRemote: {e}"))?;
         Ok(fd.into())
     }
@@ -319,37 +389,63 @@ impl PortalSession {
 
     /// Absolute pointer motion in the logical coordinate space of the stream `node`.
     pub fn pointer_motion_abs(&self, node: u32, x: f64, y: f64) {
-        self.notify("NotifyPointerMotionAbsolute", &(self.session.clone(), Options::new(), node, x, y));
+        self.notify(
+            "NotifyPointerMotionAbsolute",
+            &(self.session.clone(), Options::new(), node, x, y),
+        );
     }
 
     pub fn pointer_motion(&self, dx: f64, dy: f64) {
-        self.notify("NotifyPointerMotion", &(self.session.clone(), Options::new(), dx, dy));
+        self.notify(
+            "NotifyPointerMotion",
+            &(self.session.clone(), Options::new(), dx, dy),
+        );
     }
 
     /// Button by evdev code.
     pub fn pointer_button(&self, button: i32, pressed: bool) {
-        self.notify("NotifyPointerButton", &(self.session.clone(), Options::new(), button, pressed as u32));
+        self.notify(
+            "NotifyPointerButton",
+            &(self.session.clone(), Options::new(), button, pressed as u32),
+        );
     }
 
     /// Smooth scroll by logical pixels; `finish` closes the scroll series.
     pub fn pointer_axis(&self, dx: f64, dy: f64, finish: bool) {
         let mut options = Options::new();
         options.insert("finish", Value::Bool(finish));
-        self.notify("NotifyPointerAxis", &(self.session.clone(), options, dx, dy));
+        self.notify(
+            "NotifyPointerAxis",
+            &(self.session.clone(), options, dx, dy),
+        );
     }
 
     /// Wheel steps: `axis` 0 vertical, 1 horizontal.
     pub fn pointer_axis_discrete(&self, axis: u32, steps: i32) {
-        self.notify("NotifyPointerAxisDiscrete", &(self.session.clone(), Options::new(), axis, steps));
+        self.notify(
+            "NotifyPointerAxisDiscrete",
+            &(self.session.clone(), Options::new(), axis, steps),
+        );
     }
 
     pub fn keysym(&self, keysym: i32, pressed: bool) {
-        self.notify("NotifyKeyboardKeysym", &(self.session.clone(), Options::new(), keysym, pressed as u32));
+        self.notify(
+            "NotifyKeyboardKeysym",
+            &(self.session.clone(), Options::new(), keysym, pressed as u32),
+        );
     }
 
     /// Key by evdev keycode, in the host's own layout.
     pub fn keycode(&self, keycode: i32, pressed: bool) {
-        self.notify("NotifyKeyboardKeycode", &(self.session.clone(), Options::new(), keycode, pressed as u32));
+        self.notify(
+            "NotifyKeyboardKeycode",
+            &(
+                self.session.clone(),
+                Options::new(),
+                keycode,
+                pressed as u32,
+            ),
+        );
     }
 }
 
@@ -363,7 +459,10 @@ impl Drop for PortalSession {
 
 /// The request object the portal answers a call from `sender` with `token` on.
 fn request_path(sender: &str, token: &str) -> String {
-    format!("{DESKTOP_PATH}/request/{}/{token}", sender.trim_start_matches(':').replace('.', "_"))
+    format!(
+        "{DESKTOP_PATH}/request/{}/{token}",
+        sender.trim_start_matches(':').replace('.', "_")
+    )
 }
 
 #[cfg(test)]
@@ -374,9 +473,14 @@ mod tests {
     fn stream_value(node: u32, props: Vec<(&'static str, Value<'static>)>) -> Value<'static> {
         let mut dict = Dict::new(<&str>::SIGNATURE, Value::SIGNATURE);
         for (k, v) in props {
-            dict.append(Value::from(k), Value::Value(Box::new(v))).unwrap();
+            dict.append(Value::from(k), Value::Value(Box::new(v)))
+                .unwrap();
         }
-        let st: Structure = StructureBuilder::new().add_field(node).append_field(Value::Dict(dict)).build().unwrap();
+        let st: Structure = StructureBuilder::new()
+            .add_field(node)
+            .append_field(Value::Dict(dict))
+            .build()
+            .unwrap();
         Value::Structure(st)
     }
 
@@ -386,8 +490,20 @@ mod tests {
     /// KDE (size only) and GNOME (position and size) send it.
     #[test]
     fn streams_parse_with_and_without_geometry() {
-        let kde = stream_value(113, vec![("size", Value::from((1280i32, 720i32))), ("source_type", Value::U32(1))]);
-        let gnome = stream_value(42, vec![("position", Value::from((1920i32, 0i32))), ("size", Value::from((1280i32, 720i32)))]);
+        let kde = stream_value(
+            113,
+            vec![
+                ("size", Value::from((1280i32, 720i32))),
+                ("source_type", Value::U32(1)),
+            ],
+        );
+        let gnome = stream_value(
+            42,
+            vec![
+                ("position", Value::from((1920i32, 0i32))),
+                ("size", Value::from((1280i32, 720i32))),
+            ],
+        );
         let mut arr = Array::new(&kde.value_signature().clone());
         arr.append(kde).unwrap();
         arr.append(gnome).unwrap();
@@ -395,8 +511,16 @@ mod tests {
         assert_eq!(
             streams,
             vec![
-                PortalStream { node_id: 113, position: None, size: Some((1280, 720)) },
-                PortalStream { node_id: 42, position: Some((1920, 0)), size: Some((1280, 720)) },
+                PortalStream {
+                    node_id: 113,
+                    position: None,
+                    size: Some((1280, 720))
+                },
+                PortalStream {
+                    node_id: 42,
+                    position: Some((1920, 0)),
+                    size: Some((1280, 720))
+                },
             ]
         );
     }
@@ -405,6 +529,9 @@ mod tests {
     /// its colon dropped and dots turned to underscores, then the token.
     #[test]
     fn request_path_follows_the_handle_token_convention() {
-        assert_eq!(request_path(":1.42", "pixelflux7_3"), "/org/freedesktop/portal/desktop/request/1_42/pixelflux7_3");
+        assert_eq!(
+            request_path(":1.42", "pixelflux7_3"),
+            "/org/freedesktop/portal/desktop/request/1_42/pixelflux7_3"
+        );
     }
 }

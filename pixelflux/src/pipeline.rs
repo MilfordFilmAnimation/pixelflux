@@ -10,9 +10,9 @@
 //! which one produced a frame — a paint-over refresh or a recovery keyframe has to behave
 //! identically either way. Keeping the decision logic here, source-agnostic, is what guarantees it.
 
-use crate::encoders::software::{encode_cpu, invalidate_reference, EncodedStripe, StripeState};
-use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use crate::RustCaptureSettings;
+use crate::encoders::software::{EncodedStripe, StripeState, encode_cpu, invalidate_reference};
+use crate::encoders::{self, Codec, FrameEncoder, FrameSource};
 use smithay::utils::{Physical, Rectangle};
 use std::sync::Arc;
 
@@ -81,7 +81,11 @@ const BAND_BUDGETS: f64 = 1.0;
 impl Damage {
     /// The damage a set of rectangles on a `width` x `height` frame reports: their summed area,
     /// clipped to the frame, overlaps counted twice.
-    pub fn of_rects<'a>(rects: impl IntoIterator<Item = &'a smithay::utils::Rectangle<i32, smithay::utils::Physical>>, width: i32, height: i32) -> Self {
+    pub fn of_rects<'a>(
+        rects: impl IntoIterator<Item = &'a smithay::utils::Rectangle<i32, smithay::utils::Physical>>,
+        width: i32,
+        height: i32,
+    ) -> Self {
         let frame = (width.max(1) as f64) * (height.max(1) as f64);
         let mut area = 0f64;
         for r in rects {
@@ -91,7 +95,11 @@ impl Damage {
                 area += w as f64 * h as f64;
             }
         }
-        if area > 0.0 { Damage::Area((area / frame).min(1.0) as f32) } else { Damage::None }
+        if area > 0.0 {
+            Damage::Area((area / frame).min(1.0) as f32)
+        } else {
+            Damage::None
+        }
     }
 
     /// Whether anything changed.
@@ -145,7 +153,14 @@ pub enum Cleanup {
 /// the whole picture at the paint-over quantizer the moment a window opens. `now` false (a
 /// stripe whose cleanup is staggered to a later frame) answers `Cleanup::None` and leaves the
 /// cleanup pending.
-pub fn cleanup_due(st: &mut StripeState, trigger: u32, improves: bool, now: bool, keys: bool, damage: Damage) -> Cleanup {
+pub fn cleanup_due(
+    st: &mut StripeState,
+    trigger: u32,
+    improves: bool,
+    now: bool,
+    keys: bool,
+    damage: Damage,
+) -> Cleanup {
     if damage.is_dirty() {
         st.dirty_run = st.dirty_run.saturating_add(1);
         st.no_motion_frame_count = 0;
@@ -163,7 +178,14 @@ pub fn cleanup_due(st: &mut StripeState, trigger: u32, improves: bool, now: bool
         st.unclean_frames = st.unclean_frames.saturating_add(1);
     }
     st.motion = recent_motion(st.motion, trigger.max(1), damage.is_motion());
-    let due = due_cleanup(st, trigger.max(1), keys, st.no_motion_frame_count, st.unclean_frames, st.motion);
+    let due = due_cleanup(
+        st,
+        trigger.max(1),
+        keys,
+        st.no_motion_frame_count,
+        st.unclean_frames,
+        st.motion,
+    );
     if due == Cleanup::None {
         return Cleanup::None;
     }
@@ -190,9 +212,21 @@ fn recent_motion(motion: f32, trigger: u32, moved: bool) -> f32 {
 
 /// The cleanup a region is due with `still` frames held still, `unclean` frames since it first
 /// changed after its last cleanup, and `motion` the share of its recent frames in motion.
-fn due_cleanup(st: &StripeState, trigger: u32, keys: bool, still: u32, unclean: u32, motion: f32) -> Cleanup {
-    let low_motion = !st.paint_over_sent && unclean >= trigger * LOW_MOTION_TRIGGERS && motion <= LOW_MOTION_SHARE;
-    if keys && st.change_mass >= KEY_CLEANUP_MASS && (still >= trigger * KEY_STILL_TRIGGERS || low_motion) {
+fn due_cleanup(
+    st: &StripeState,
+    trigger: u32,
+    keys: bool,
+    still: u32,
+    unclean: u32,
+    motion: f32,
+) -> Cleanup {
+    let low_motion = !st.paint_over_sent
+        && unclean >= trigger * LOW_MOTION_TRIGGERS
+        && motion <= LOW_MOTION_SHARE;
+    if keys
+        && st.change_mass >= KEY_CLEANUP_MASS
+        && (still >= trigger * KEY_STILL_TRIGGERS || low_motion)
+    {
         Cleanup::Key
     } else if !st.paint_over_sent && (still >= trigger || low_motion) {
         Cleanup::Refresh
@@ -206,7 +240,15 @@ fn due_cleanup(st: &StripeState, trigger: u32, keys: bool, still: u32, unclean: 
 pub fn cleanup_pending(st: &StripeState, trigger: u32, enabled: bool, keys: bool) -> bool {
     let unclean = st.unclean_frames.saturating_add(!st.paint_over_sent as u32);
     let motion = recent_motion(st.motion, trigger.max(1), false);
-    enabled && due_cleanup(st, trigger.max(1), keys, st.no_motion_frame_count.saturating_add(1), unclean, motion) != Cleanup::None
+    enabled
+        && due_cleanup(
+            st,
+            trigger.max(1),
+            keys,
+            st.no_motion_frame_count.saturating_add(1),
+            unclean,
+            motion,
+        ) != Cleanup::None
 }
 
 /// What an encoder says about the frames it codes, which the cleanup reads: the quality index
@@ -258,10 +300,19 @@ pub enum Convergence {
 }
 
 /// Where the rate control stands (`Convergence`).
-pub fn convergence(last: Option<u32>, bytes: Option<usize>, paint: u32, budget: f64) -> Convergence {
+pub fn convergence(
+    last: Option<u32>,
+    bytes: Option<usize>,
+    paint: u32,
+    budget: f64,
+) -> Convergence {
     match (last, bytes) {
         (Some(q), Some(b)) if (b as f64) <= budget * CONVERGED_SHARE => {
-            if q <= paint { Convergence::Converged } else { Convergence::Idle }
+            if q <= paint {
+                Convergence::Converged
+            } else {
+                Convergence::Idle
+            }
         }
         _ => Convergence::Refining,
     }
@@ -430,7 +481,15 @@ pub fn decide_hw_fullframe(
     encoder: EncoderQuality,
 ) -> HwFrameDecision {
     if !settings.video_cbr_mode {
-        return decide_constant_quality(st, settings, frame_counter, damage, is_animated, requested_idr, encoder);
+        return decide_constant_quality(
+            st,
+            settings,
+            frame_counter,
+            damage,
+            is_animated,
+            requested_idr,
+            encoder,
+        );
     }
     let normal_qp = settings.video_crf as u32;
     let paint_qp = settings.video_paintover_crf as u32;
@@ -439,14 +498,27 @@ pub fn decide_hw_fullframe(
     let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
     let converges = encoder.converges();
     let holds = encoder.holds && !converges;
-    let cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, holds, damage);
+    let cleanup = cleanup_due(
+        st,
+        settings.paint_over_trigger_frames,
+        improves,
+        true,
+        holds,
+        damage,
+    );
     let refresh_qp = held_refresh_quality(settings, encoder);
     let cleanup_qp = match cleanup {
         Cleanup::Refresh if holds => Some(refresh_qp),
         Cleanup::Key => Some(paint_qp),
         _ => None,
     };
-    let mut d = HwFrameDecision { send: false, force_idr: false, target_qp: normal_qp, hold_qp: None, hold_band: None };
+    let mut d = HwFrameDecision {
+        send: false,
+        force_idr: false,
+        target_qp: normal_qp,
+        hold_qp: None,
+        hold_band: None,
+    };
     if damage.is_dirty() {
         if !converges || damage.is_motion() {
             st.h264_burst_frames_remaining = 0;
@@ -472,12 +544,17 @@ pub fn decide_hw_fullframe(
             st.burst_held = false;
         } else if burst > 0 && (d.force_idr || cleanup != Cleanup::None) {
             st.h264_burst_frames_remaining = burst;
-            st.burst_held = holds && (cleanup != Cleanup::None || (improves && !settings.video_cbr_mode));
+            st.burst_held =
+                holds && (cleanup != Cleanup::None || (improves && !settings.video_cbr_mode));
         }
         return d;
     }
     if let Some((from, size)) = st.sweep {
-        let size = band_share(size, encoder.band, frame_budget(settings.video_bitrate_kbps, settings.target_fps));
+        let size = band_share(
+            size,
+            encoder.band,
+            frame_budget(settings.video_bitrate_kbps, settings.target_fps),
+        );
         let to = (from + size).min(1.0);
         st.sweep = (to < 1.0).then_some((to, size));
         d.send = true;
@@ -486,7 +563,12 @@ pub fn decide_hw_fullframe(
         return d;
     }
     if converges && st.h264_burst_frames_remaining > 0 {
-        match convergence(encoder.last, encoder.bytes, paint_qp, frame_budget(settings.video_bitrate_kbps, settings.target_fps)) {
+        match convergence(
+            encoder.last,
+            encoder.bytes,
+            paint_qp,
+            frame_budget(settings.video_bitrate_kbps, settings.target_fps),
+        ) {
             Convergence::Converged => {
                 st.h264_burst_frames_remaining = 0;
                 st.change_mass = 0.0;
@@ -501,7 +583,11 @@ pub fn decide_hw_fullframe(
         d.hold_qp = (st.burst_held && improves).then_some(refresh_qp);
         let trigger = settings.paint_over_trigger_frames.max(1);
         let elapsed = (converge_frames(settings) - st.h264_burst_frames_remaining).max(0) as u32;
-        if converges && improves && (st.idle_frames >= STALL_TRIGGERS * trigger || elapsed >= FALLBACK_TRIGGERS * trigger) {
+        if converges
+            && improves
+            && (st.idle_frames >= STALL_TRIGGERS * trigger
+                || elapsed >= FALLBACK_TRIGGERS * trigger)
+        {
             d.hold_qp = Some(refresh_qp);
             st.h264_burst_frames_remaining = 0;
             if encoder.band.is_some() {
@@ -545,9 +631,17 @@ fn decide_constant_quality(
     let normal_qp = settings.video_crf as u32;
     let paint_qp = settings.video_paintover_crf as u32;
     let burst = settings.video_paintover_burst_frames;
-    let improves = settings.use_paint_over_quality && settings.video_paintover_crf < settings.video_crf;
+    let improves =
+        settings.use_paint_over_quality && settings.video_paintover_crf < settings.video_crf;
     let recovery_idr = requested_idr || periodic_idr_due(settings, frame_counter);
-    let mut cleanup = cleanup_due(st, settings.paint_over_trigger_frames, improves, true, true, damage);
+    let mut cleanup = cleanup_due(
+        st,
+        settings.paint_over_trigger_frames,
+        improves,
+        true,
+        true,
+        damage,
+    );
     if damage.is_motion() || !improves {
         st.clean_quality = false;
     }
@@ -558,8 +652,18 @@ fn decide_constant_quality(
     if cleanup != Cleanup::None {
         st.clean_quality = true;
     }
-    let quality = if st.clean_quality { paint_qp } else { normal_qp };
-    let mut d = HwFrameDecision { send: false, force_idr: false, target_qp: quality, hold_qp: None, hold_band: None };
+    let quality = if st.clean_quality {
+        paint_qp
+    } else {
+        normal_qp
+    };
+    let mut d = HwFrameDecision {
+        send: false,
+        force_idr: false,
+        target_qp: quality,
+        hold_qp: None,
+        hold_band: None,
+    };
     if recovery_idr && cleanup == Cleanup::None {
         d.target_qp = normal_qp;
     }
@@ -601,7 +705,14 @@ const DAMAGE_BAND_ROWS: usize = 32;
 /// bands hash in turn on the calling thread: a band takes tens of microseconds, less than waking
 /// the rayon pool for it costs, which on a many-core host spent several times the hash in CPU
 /// and added milliseconds waiting on the slowest worker.
-fn hash_bands(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height: usize, threshold: u32, duration: i32) -> Vec<bool> {
+fn hash_bands(
+    bands: &mut Vec<StripeState>,
+    pixels: &[u8],
+    stride: usize,
+    height: usize,
+    threshold: u32,
+    duration: i32,
+) -> Vec<bool> {
     let n = height.div_ceil(DAMAGE_BAND_ROWS).max(1);
     if bands.len() != n {
         bands.clear();
@@ -612,7 +723,8 @@ fn hash_bands(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height
         .enumerate()
         .map(|(i, band)| {
             let end = ((i + 1) * DAMAGE_BAND_ROWS).min(height) * stride;
-            let bytes = &pixels[(i * DAMAGE_BAND_ROWS * stride).min(pixels.len())..end.min(pixels.len())];
+            let bytes =
+                &pixels[(i * DAMAGE_BAND_ROWS * stride).min(pixels.len())..end.min(pixels.len())];
             band.content_dirty(bytes, threshold, duration)
         })
         .collect()
@@ -632,8 +744,17 @@ fn band_damage(dirty: &[bool]) -> Damage {
 }
 
 /// The damage of a host frame against the one before it, from its band hash (`hash_bands`).
-fn hash_damage(bands: &mut Vec<StripeState>, pixels: &[u8], stride: usize, height: usize, threshold: u32, duration: i32) -> Damage {
-    band_damage(&hash_bands(bands, pixels, stride, height, threshold, duration))
+fn hash_damage(
+    bands: &mut Vec<StripeState>,
+    pixels: &[u8],
+    stride: usize,
+    height: usize,
+    threshold: u32,
+    duration: i32,
+) -> Damage {
+    band_damage(&hash_bands(
+        bands, pixels, stride, height, threshold, duration,
+    ))
 }
 
 /// The rows a band hash (`hash_bands`) found changed in a `width` x `height` frame, as
@@ -651,7 +772,10 @@ fn band_rects(dirty: &[bool], width: i32, height: i32) -> Vec<Rectangle<i32, Phy
             (false, Some(first)) => {
                 let top = (first * DAMAGE_BAND_ROWS) as i32;
                 let bottom = ((i * DAMAGE_BAND_ROWS) as i32).min(height);
-                rects.push(Rectangle::new((0, top).into(), (width, bottom - top).into()));
+                rects.push(Rectangle::new(
+                    (0, top).into(),
+                    (width, bottom - top).into(),
+                ));
                 run = None;
             }
             _ => {}
@@ -677,11 +801,14 @@ fn hash_beside<R>(
     let (out, hashed) = std::thread::scope(|s| {
         let hashing = std::thread::Builder::new()
             .name("pxf-x11-hash".into())
-            .spawn_scoped(s, || hash_bands(bands, pixels, stride, height, threshold, duration));
+            .spawn_scoped(s, || {
+                hash_bands(bands, pixels, stride, height, threshold, duration)
+            });
         let out = encode();
         (out, hashing.ok().map(|h| h.join().unwrap_or_default()))
     });
-    let dirty = hashed.unwrap_or_else(|| hash_bands(bands, pixels, stride, height, threshold, duration));
+    let dirty =
+        hashed.unwrap_or_else(|| hash_bands(bands, pixels, stride, height, threshold, duration));
     (out, dirty)
 }
 
@@ -724,7 +851,12 @@ impl X11Pipeline {
     /// H.264. A codec no backend serves falls through to the video codecs the host does serve,
     /// JPEG last.
     pub fn new(mut settings: RustCaptureSettings) -> Self {
-        let hw = encoders::select_frame_encoder(&mut settings, FrameSource::Host { rgba: false }, None, "X11");
+        let hw = encoders::select_frame_encoder(
+            &mut settings,
+            FrameSource::Host { rgba: false },
+            None,
+            "X11",
+        );
         let pipeline = Self {
             settings,
             stripes: Vec::new(),
@@ -748,7 +880,9 @@ impl X11Pipeline {
         crate::report::stream(
             &self.settings,
             encoders::software::stripe_count(self.settings.height, self.settings.codec, fullframe),
-            self.hw.as_ref().map(|enc| (enc.backend_name(), enc.is_hardware())),
+            self.hw
+                .as_ref()
+                .map(|enc| (enc.backend_name(), enc.is_hardware())),
             encoders::session_fullcolor(self.hw.as_ref(), &self.settings),
             encoders::session_full_range(self.hw.as_ref(), &self.settings),
         );
@@ -774,12 +908,24 @@ impl X11Pipeline {
             // the replacement fail too.
             self.hw = None;
             self.settings.use_cpu = true;
-            self.hw = encoders::select_frame_encoder(&mut self.settings, FrameSource::Host { rgba: false }, None, "X11");
-            crate::report::encoder_reason("the hardware encoder failed repeatedly and was given up");
+            self.hw = encoders::select_frame_encoder(
+                &mut self.settings,
+                FrameSource::Host { rgba: false },
+                None,
+                "X11",
+            );
+            crate::report::encoder_reason(
+                "the hardware encoder failed repeatedly and was given up",
+            );
         } else {
             eprintln!("[X11] rebuilding HW encoder after repeated encode errors.");
             self.hw = None;
-            self.hw = encoders::select_frame_encoder(&mut self.settings, FrameSource::Host { rgba: false }, None, "X11");
+            self.hw = encoders::select_frame_encoder(
+                &mut self.settings,
+                FrameSource::Host { rgba: false },
+                None,
+                "X11",
+            );
             self.hw_rebuilt = true;
         }
         self.record_stream();
@@ -847,7 +993,10 @@ impl X11Pipeline {
     /// only when the build's encoder for the codec does.
     pub fn colorspace_desc(&self) -> &'static str {
         let fullcolor = encoders::session_fullcolor(self.hw.as_ref(), &self.settings);
-        crate::encoders::colorspace_desc(fullcolor, encoders::session_full_range(self.hw.as_ref(), &self.settings))
+        crate::encoders::colorspace_desc(
+            fullcolor,
+            encoders::session_full_range(self.hw.as_ref(), &self.settings),
+        )
     }
 
     /// Adapt the live pipeline to recreated capture surfaces without rebuilding it.
@@ -946,7 +1095,14 @@ impl X11Pipeline {
             let damage = if turbo {
                 band_damage(&self.turbo_dirty)
             } else {
-                hash_damage(&mut self.bands, argb, stride, height as usize, threshold, duration)
+                hash_damage(
+                    &mut self.bands,
+                    argb,
+                    stride,
+                    height as usize,
+                    threshold,
+                    duration,
+                )
             };
             let quality = EncoderQuality::of(self.hw.as_ref().unwrap());
             let d = decide_hw_fullframe(
@@ -965,13 +1121,23 @@ impl X11Pipeline {
                 if let Some(q) = d.hold_qp {
                     enc.hold_quantizer(q, d.hold_band);
                 }
-                let mut encode = || if d.send {
-                    enc.encode_host(argb, stride, false, fc, d.target_qp, force_idr)
-                } else {
-                    enc.push_held(fc)
+                let mut encode = || {
+                    if d.send {
+                        enc.encode_host(argb, stride, false, fc, d.target_qp, force_idr)
+                    } else {
+                        enc.push_held(fc)
+                    }
                 };
                 let res = if turbo && self.settings.use_paint_over_quality {
-                    let (res, dirty) = hash_beside(&mut self.bands, argb, stride, height as usize, threshold, duration, encode);
+                    let (res, dirty) = hash_beside(
+                        &mut self.bands,
+                        argb,
+                        stride,
+                        height as usize,
+                        threshold,
+                        duration,
+                        encode,
+                    );
                     self.turbo_dirty = dirty;
                     res
                 } else {
@@ -1004,7 +1170,10 @@ impl X11Pipeline {
                     Err(e) => {
                         // One line per recovery window: a session failing at frame rate would
                         // otherwise write a line per frame for the life of the capture.
-                        if self.hw_error_streak.is_multiple_of(crate::HW_ERROR_RECOVERY_THRESHOLD) {
+                        if self
+                            .hw_error_streak
+                            .is_multiple_of(crate::HW_ERROR_RECOVERY_THRESHOLD)
+                        {
                             eprintln!("[X11] HW encode error: {e}");
                         }
                         self.hw_error_streak = self.hw_error_streak.saturating_add(1);
@@ -1028,10 +1197,36 @@ impl X11Pipeline {
                     && periodic_idr_due(&self.settings, self.frame_counter));
             if self.settings.codec.is_video() && self.settings.video_streaming_mode {
                 let rects = band_rects(&self.turbo_dirty, width, height);
-                let (stripes, carrying, settings) = (&mut self.stripes, &mut self.stripes_carrying, &self.settings);
-                let mut encode = || encode_cpu(stripes, carrying, argb, width, height, &rects, settings, self.frame_counter, false, false, force_idr_all);
+                let (stripes, carrying, settings) = (
+                    &mut self.stripes,
+                    &mut self.stripes_carrying,
+                    &self.settings,
+                );
+                let mut encode = || {
+                    encode_cpu(
+                        stripes,
+                        carrying,
+                        argb,
+                        width,
+                        height,
+                        &rects,
+                        settings,
+                        self.frame_counter,
+                        false,
+                        false,
+                        force_idr_all,
+                    )
+                };
                 if self.settings.use_paint_over_quality {
-                    let (out, dirty) = hash_beside(&mut self.bands, argb, stride, height as usize, threshold, duration, encode);
+                    let (out, dirty) = hash_beside(
+                        &mut self.bands,
+                        argb,
+                        stride,
+                        height as usize,
+                        threshold,
+                        duration,
+                        encode,
+                    );
                     self.turbo_dirty = dirty;
                     out
                 } else {
@@ -1070,7 +1265,13 @@ mod tests {
     use super::*;
 
     /// An encoder that holds a quantizer and reports no quality of its own.
-    const HOLDS: EncoderQuality = EncoderQuality { last: None, bytes: None, holds: true, reopens: false, band: None };
+    const HOLDS: EncoderQuality = EncoderQuality {
+        last: None,
+        bytes: None,
+        holds: true,
+        reopens: false,
+        band: None,
+    };
 
     /// A settings block for the hardware full-frame policy: a constant rate, whose cleanup holds
     /// its frames (`HOLDS` reports no quality of its own, so the cleanup always improves),
@@ -1094,12 +1295,22 @@ mod tests {
 
     /// `hw_settings` at a constant quality.
     fn crf_settings() -> RustCaptureSettings {
-        RustCaptureSettings { video_cbr_mode: false, ..hw_settings() }
+        RustCaptureSettings {
+            video_cbr_mode: false,
+            ..hw_settings()
+        }
     }
 
     /// Drive the policy through `frames` frames of `damage`, returning the decisions.
-    fn run(st: &mut StripeState, s: &RustCaptureSettings, damage: Damage, frames: usize) -> Vec<HwFrameDecision> {
-        (0..frames).map(|i| decide_hw_fullframe(st, s, i as u16 + 1, damage, false, false, HOLDS)).collect()
+    fn run(
+        st: &mut StripeState,
+        s: &RustCaptureSettings,
+        damage: Damage,
+        frames: usize,
+    ) -> Vec<HwFrameDecision> {
+        (0..frames)
+            .map(|i| decide_hw_fullframe(st, s, i as u16 + 1, damage, false, false, HOLDS))
+            .collect()
     }
 
     /// Once motion stops a constant-rate session's screen is cleaned up whether Turbo sends every
@@ -1109,24 +1320,51 @@ mod tests {
     #[test]
     fn a_still_screen_is_cleaned_up_whatever_turbo_sends() {
         for turbo in [false, true] {
-            let s = RustCaptureSettings { video_streaming_mode: turbo, ..hw_settings() };
+            let s = RustCaptureSettings {
+                video_streaming_mode: turbo,
+                ..hw_settings()
+            };
             let paint = Some(s.video_paintover_crf as u32);
             let mut st = StripeState::default();
             let moving = run(&mut st, &s, Damage::Area(1.0), 3);
-            assert!(moving.iter().all(|d| d.send && !d.force_idr && d.hold_qp.is_none()), "motion sends at the session quality");
+            assert!(
+                moving
+                    .iter()
+                    .all(|d| d.send && !d.force_idr && d.hold_qp.is_none()),
+                "motion sends at the session quality"
+            );
             let still = run(&mut st, &s, Damage::None, 16);
-            let sent: Vec<(usize, bool, Option<u32>)> =
-                still.iter().enumerate().filter(|(_, d)| d.send).map(|(i, d)| (i + 1, d.force_idr, d.hold_qp)).collect();
-            let cleanups = vec![(2, false, paint), (3, false, paint), (4, false, paint), (5, false, paint),
-                                (8, true, paint), (9, false, paint), (10, false, paint), (11, false, paint)];
+            let sent: Vec<(usize, bool, Option<u32>)> = still
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.send)
+                .map(|(i, d)| (i + 1, d.force_idr, d.hold_qp))
+                .collect();
+            let cleanups = vec![
+                (2, false, paint),
+                (3, false, paint),
+                (4, false, paint),
+                (5, false, paint),
+                (8, true, paint),
+                (9, false, paint),
+                (10, false, paint),
+                (11, false, paint),
+            ];
             if !turbo {
-                assert_eq!(sent, cleanups, "a refresh at the trigger and a key four triggers in, each with its burst held");
+                assert_eq!(
+                    sent, cleanups,
+                    "a refresh at the trigger and a key four triggers in, each with its burst held"
+                );
             } else {
                 assert_eq!(sent.len(), 16, "Turbo sends every frame");
-                let held: Vec<(usize, bool, Option<u32>)> = sent.into_iter().filter(|r| r.2.is_some()).collect();
+                let held: Vec<(usize, bool, Option<u32>)> =
+                    sent.into_iter().filter(|r| r.2.is_some()).collect();
                 assert_eq!(held, cleanups, "the same cleanups under Turbo");
             }
-            assert!(still.iter().all(|d| d.target_qp == s.video_crf as u32), "the session's own quality is left alone");
+            assert!(
+                still.iter().all(|d| d.target_qp == s.video_crf as u32),
+                "the session's own quality is left alone"
+            );
         }
     }
 
@@ -1136,35 +1374,83 @@ mod tests {
     /// cap coarsened is refined back.
     #[test]
     fn a_constant_rate_cleanup_keeps_to_its_budget() {
-        let s = RustCaptureSettings { video_cbr_mode: true, ..hw_settings() };
-        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false, band: None };
+        let s = RustCaptureSettings {
+            video_cbr_mode: true,
+            ..hw_settings()
+        };
+        let coarse = EncoderQuality {
+            last: Some(40),
+            bytes: None,
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         for i in 0..3u16 {
             decide_hw_fullframe(&mut st, &s, i, Damage::Area(1.0), false, false, coarse);
         }
-        let still: Vec<HwFrameDecision> = (0..12u16).map(|i| decide_hw_fullframe(&mut st, &s, 10 + i, Damage::None, false, false, coarse)).collect();
+        let still: Vec<HwFrameDecision> = (0..12u16)
+            .map(|i| decide_hw_fullframe(&mut st, &s, 10 + i, Damage::None, false, false, coarse))
+            .collect();
         let refresh_qp = held_refresh_quality(&s, coarse);
-        assert_eq!(refresh_qp, 10, "35 steps under the rate control's 40 is past the paint-over quality");
-        assert_eq!(still[1].hold_qp, Some(refresh_qp), "the refresh at the budget's quality");
-        assert!((2..5).all(|i| still[i].hold_qp == Some(refresh_qp)), "its burst at the same");
-        assert!(still[7].force_idr && still[7].hold_qp == Some(s.video_paintover_crf as u32), "the key at the paint-over one");
-        assert!((8..11).all(|i| still[i].send && still[i].hold_qp == Some(refresh_qp)), "its burst at the refresh's");
+        assert_eq!(
+            refresh_qp, 10,
+            "35 steps under the rate control's 40 is past the paint-over quality"
+        );
+        assert_eq!(
+            still[1].hold_qp,
+            Some(refresh_qp),
+            "the refresh at the budget's quality"
+        );
+        assert!(
+            (2..5).all(|i| still[i].hold_qp == Some(refresh_qp)),
+            "its burst at the same"
+        );
+        assert!(
+            still[7].force_idr && still[7].hold_qp == Some(s.video_paintover_crf as u32),
+            "the key at the paint-over one"
+        );
+        assert!(
+            (8..11).all(|i| still[i].send && still[i].hold_qp == Some(refresh_qp)),
+            "its burst at the refresh's"
+        );
     }
 
     /// A small change is cleaned up by a refresh alone; one covering half a screen since the last
     /// key frame earns a key frame once the screen holds still long enough.
     #[test]
     fn a_small_change_is_refreshed_and_a_large_one_keyed() {
-        let s = RustCaptureSettings { video_paintover_burst_frames: 0, ..hw_settings() };
+        let s = RustCaptureSettings {
+            video_paintover_burst_frames: 0,
+            ..hw_settings()
+        };
         let keys = |st: &mut StripeState, damage: Damage, frames: usize| -> (usize, usize) {
             run(st, &s, damage, frames);
             let still = run(st, &s, Damage::None, 12);
-            (still.iter().filter(|d| d.hold_qp.is_some() && !d.force_idr).count(), still.iter().filter(|d| d.force_idr).count())
+            (
+                still
+                    .iter()
+                    .filter(|d| d.hold_qp.is_some() && !d.force_idr)
+                    .count(),
+                still.iter().filter(|d| d.force_idr).count(),
+            )
         };
         let mut st = StripeState::default();
-        assert_eq!(keys(&mut st, Damage::Area(1.0), 2), (1, 1), "a scroll is refreshed, then keyed");
-        assert_eq!(keys(&mut st, Damage::Area(0.001), 1), (1, 0), "a caret is refreshed, never keyed");
-        assert_eq!(keys(&mut st, Damage::Area(0.3), 2), (1, 1), "0.6 of a screen changed since the last key frame");
+        assert_eq!(
+            keys(&mut st, Damage::Area(1.0), 2),
+            (1, 1),
+            "a scroll is refreshed, then keyed"
+        );
+        assert_eq!(
+            keys(&mut st, Damage::Area(0.001), 1),
+            (1, 0),
+            "a caret is refreshed, never keyed"
+        );
+        assert_eq!(
+            keys(&mut st, Damage::Area(0.3), 2),
+            (1, 1),
+            "0.6 of a screen changed since the last key frame"
+        );
     }
 
     /// A still screen the rate control codes finer than the paint-over quantizer owes no cleanup,
@@ -1175,38 +1461,81 @@ mod tests {
     fn a_constant_rate_cleanup_runs_through_a_rate_control_that_converges() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let refining = EncoderQuality { last: Some(40), bytes: Some(budget), holds: true, reopens: false, band: None };
-        let converged = EncoderQuality { last: Some(8), bytes: Some(budget / 8), holds: true, reopens: false, band: None };
+        let refining = EncoderQuality {
+            last: Some(40),
+            bytes: Some(budget),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
+        let converged = EncoderQuality {
+            last: Some(8),
+            bytes: Some(budget / 8),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let trigger = s.paint_over_trigger_frames as u16;
         let window = trigger + (FALLBACK_TRIGGERS as u16) * trigger;
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, refining);
-        let still: Vec<HwFrameDecision> =
-            (1..window).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, refining)).collect();
-        assert!(still.iter().all(|d| d.hold_qp.is_none() && !d.force_idr), "no frame held, no key frame");
+        let still: Vec<HwFrameDecision> = (1..window)
+            .map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, refining))
+            .collect();
+        assert!(
+            still.iter().all(|d| d.hold_qp.is_none() && !d.force_idr),
+            "no frame held, no key frame"
+        );
         let first = still.iter().position(|d| d.send).expect("a cleanup");
         assert_eq!(first + 1, trigger as usize, "due at the trigger");
-        assert!(still[first..].iter().all(|d| d.send), "the frames keep flowing while it refines");
+        assert!(
+            still[first..].iter().all(|d| d.send),
+            "the frames keep flowing while it refines"
+        );
         let d = decide_hw_fullframe(&mut st, &s, window, Damage::None, false, false, converged);
-        assert!(!d.send, "and stop once it codes a small frame at the paint-over quality");
-        assert!((window + 1..window + 100).all(|i| !decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, converged).send));
+        assert!(
+            !d.send,
+            "and stop once it codes a small frame at the paint-over quality"
+        );
+        assert!((window + 1..window + 100).all(|i| {
+            !decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, converged).send
+        }));
     }
 
     #[test]
     fn a_rate_control_that_does_not_converge_gets_one_held_refresh() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let crawling = EncoderQuality { last: Some(38), bytes: Some(budget / 2), holds: true, reopens: false, band: None };
+        let crawling = EncoderQuality {
+            last: Some(38),
+            bytes: Some(budget / 2),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, crawling);
-        let still: Vec<HwFrameDecision> =
-            (1..=200).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, crawling)).collect();
+        let still: Vec<HwFrameDecision> = (1..=200)
+            .map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, crawling))
+            .collect();
         assert!(still.iter().all(|d| !d.force_idr), "no key frame");
-        let held: Vec<usize> = still.iter().enumerate().filter(|(_, d)| d.hold_qp.is_some()).map(|(i, _)| i).collect();
+        let held: Vec<usize> = still
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.hold_qp.is_some())
+            .map(|(i, _)| i)
+            .collect();
         assert_eq!(held.len(), 1, "{held:?}");
         let trigger = s.paint_over_trigger_frames as usize;
-        assert_eq!(held[0] + 1, trigger + (FALLBACK_TRIGGERS as usize) * trigger, "after the window");
-        assert_eq!(still[held[0]].hold_qp, Some(held_refresh_quality(&s, crawling)));
+        assert_eq!(
+            held[0] + 1,
+            trigger + (FALLBACK_TRIGGERS as usize) * trigger,
+            "after the window"
+        );
+        assert_eq!(
+            still[held[0]].hold_qp,
+            Some(held_refresh_quality(&s, crawling))
+        );
         assert!(still[held[0] + 1..].iter().all(|d| !d.send));
     }
 
@@ -1214,40 +1543,78 @@ mod tests {
     fn a_blinking_caret_does_not_hold_off_a_converging_cleanup() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let crawling = EncoderQuality { last: Some(38), bytes: Some(budget / 2), holds: true, reopens: false, band: None };
+        let crawling = EncoderQuality {
+            last: Some(38),
+            bytes: Some(budget / 2),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, crawling);
         let trigger = s.paint_over_trigger_frames as u16;
         let decisions: Vec<HwFrameDecision> = (1..300)
             .map(|i| {
-                let damage = if i % 3 == 0 { Damage::Area(0.001) } else { Damage::None };
+                let damage = if i % 3 == 0 {
+                    Damage::Area(0.001)
+                } else {
+                    Damage::None
+                };
                 decide_hw_fullframe(&mut st, &s, i, damage, false, false, crawling)
             })
             .collect();
         assert!(decisions.iter().all(|d| !d.force_idr), "no key frame");
-        let first = decisions.iter().position(|d| d.hold_qp.is_some()).expect("a held refresh") as u16 + 1;
+        let first = decisions
+            .iter()
+            .position(|d| d.hold_qp.is_some())
+            .expect("a held refresh") as u16
+            + 1;
         let bound = trigger * (LOW_MOTION_TRIGGERS + 2 * FALLBACK_TRIGGERS) as u16 * 3 / 2;
-        assert!(first <= bound, "the caret does not hold it off: {first} > {bound}");
+        assert!(
+            first <= bound,
+            "the caret does not hold it off: {first} > {bound}"
+        );
         let held = decisions.iter().filter(|d| d.hold_qp.is_some()).count();
-        assert!(held <= 300 / (trigger as usize * LOW_MOTION_TRIGGERS as usize), "{held} held refreshes");
+        assert!(
+            held <= 300 / (trigger as usize * LOW_MOTION_TRIGGERS as usize),
+            "{held} held refreshes"
+        );
     }
 
     #[test]
     fn a_stalled_rate_control_is_held_once_at_the_paint_over_quantizer() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let idle = EncoderQuality { last: Some(38), bytes: Some(budget / 10), holds: true, reopens: false, band: None };
+        let idle = EncoderQuality {
+            last: Some(38),
+            bytes: Some(budget / 10),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, idle);
-        let still: Vec<HwFrameDecision> =
-            (1..=200).map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle)).collect();
-        let held: Vec<usize> = still.iter().enumerate().filter(|(_, d)| d.hold_qp.is_some()).map(|(i, _)| i).collect();
+        let still: Vec<HwFrameDecision> = (1..=200)
+            .map(|i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle))
+            .collect();
+        let held: Vec<usize> = still
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.hold_qp.is_some())
+            .map(|(i, _)| i)
+            .collect();
         assert_eq!(held.len(), 1, "one held frame: {held:?}");
         assert_eq!(still[held[0]].hold_qp, Some(held_refresh_quality(&s, idle)));
         assert!(!still[held[0]].force_idr, "a refresh, not a key frame");
         let stall = (STALL_TRIGGERS * s.paint_over_trigger_frames) as usize;
-        assert!(held[0] + 1 >= s.paint_over_trigger_frames as usize + stall, "after the stall, not at the trigger");
-        assert!(still[held[0] + 1..].iter().all(|d| !d.send), "which ends the cleanup");
+        assert!(
+            held[0] + 1 >= s.paint_over_trigger_frames as usize + stall,
+            "after the stall, not at the trigger"
+        );
+        assert!(
+            still[held[0] + 1..].iter().all(|d| !d.send),
+            "which ends the cleanup"
+        );
     }
 
     #[test]
@@ -1266,7 +1633,9 @@ mod tests {
         let mut bands: Vec<(f64, f64)> = Vec::new();
         let mut sent_after = 0;
         for i in 1..=600u16 {
-            let held = bands.last().map_or(0, |(a, b)| ((b - a) * 128.0 * budget) as usize);
+            let held = bands
+                .last()
+                .map_or(0, |(a, b)| ((b - a) * 128.0 * budget) as usize);
             let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle(held));
             assert!(!d.force_idr, "no key frame");
             match d.hold_band {
@@ -1280,10 +1649,22 @@ mod tests {
                 }
             }
         }
-        assert_eq!(bands[0], (0.0, FIRST_BAND), "the sweep starts at the stall, from the top");
-        assert!(bands.windows(2).all(|w| w[0].1 == w[1].0), "contiguous bands: {bands:?}");
+        assert_eq!(
+            bands[0],
+            (0.0, FIRST_BAND),
+            "the sweep starts at the stall, from the top"
+        );
+        assert!(
+            bands.windows(2).all(|w| w[0].1 == w[1].0),
+            "contiguous bands: {bands:?}"
+        );
         assert_eq!(bands.last().unwrap().1, 1.0, "that cover the picture");
-        assert!(bands[2..bands.len() - 1].iter().all(|(a, b)| ((b - a) * 128.0 - 1.0).abs() < 1e-3), "each a budget: {bands:?}");
+        assert!(
+            bands[2..bands.len() - 1]
+                .iter()
+                .all(|(a, b)| ((b - a) * 128.0 - 1.0).abs() < 1e-3),
+            "each a budget: {bands:?}"
+        );
         assert_eq!(sent_after, 0, "which ends the cleanup");
     }
 
@@ -1291,16 +1672,42 @@ mod tests {
     fn motion_ends_a_band_sweep() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let idle = EncoderQuality { last: Some(38), bytes: Some(budget / 10), holds: true, reopens: false, band: Some(budget) };
+        let idle = EncoderQuality {
+            last: Some(38),
+            bytes: Some(budget / 10),
+            holds: true,
+            reopens: false,
+            band: Some(budget),
+        };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &s, 0, Damage::Area(1.0), false, false, idle);
         let first = (1..=200u16)
-            .find(|&i| decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle).hold_band.is_some())
+            .find(|&i| {
+                decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, idle)
+                    .hold_band
+                    .is_some()
+            })
             .expect("a sweep");
-        let moving = decide_hw_fullframe(&mut st, &s, first + 1, Damage::Area(0.5), false, false, idle);
+        let moving = decide_hw_fullframe(
+            &mut st,
+            &s,
+            first + 1,
+            Damage::Area(0.5),
+            false,
+            false,
+            idle,
+        );
         assert!(moving.send && moving.hold_qp.is_none() && moving.hold_band.is_none());
         assert!(st.sweep.is_none());
-        let caret = decide_hw_fullframe(&mut st, &s, first + 2, Damage::Area(0.001), false, false, idle);
+        let caret = decide_hw_fullframe(
+            &mut st,
+            &s,
+            first + 2,
+            Damage::Area(0.001),
+            false,
+            false,
+            idle,
+        );
         assert!(caret.hold_band.is_none());
     }
 
@@ -1308,25 +1715,69 @@ mod tests {
     fn a_recovery_key_frame_is_refined_until_the_rate_control_converges() {
         let s = hw_settings();
         let budget = frame_budget(s.video_bitrate_kbps, s.target_fps) as usize;
-        let coarse = EncoderQuality { last: Some(40), bytes: Some(budget), holds: true, reopens: false, band: None };
-        let clean = EncoderQuality { last: Some(8), bytes: Some(budget / 8), holds: true, reopens: false, band: None };
+        let coarse = EncoderQuality {
+            last: Some(40),
+            bytes: Some(budget),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
+        let clean = EncoderQuality {
+            last: Some(8),
+            bytes: Some(budget / 8),
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
-        assert!((0..200).all(|i| !decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, clean).send));
+        assert!(
+            (0..200).all(|i| !decide_hw_fullframe(
+                &mut st,
+                &s,
+                i,
+                Damage::None,
+                false,
+                false,
+                clean
+            )
+            .send)
+        );
         let join = decide_hw_fullframe(&mut st, &s, 200, Damage::None, false, true, clean);
         assert!(join.send && join.force_idr && join.hold_qp.is_none());
         let past_burst = 201 + s.video_paintover_burst_frames as u16 + 3;
-        assert!((201..past_burst).all(|i| {
-            let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, coarse);
-            d.send && !d.force_idr && d.hold_qp.is_none()
-        }), "the rate control keeps refining the key frame past the configured burst");
-        assert!(!decide_hw_fullframe(&mut st, &s, past_burst, Damage::None, false, false, clean).send, "until it converges");
+        assert!(
+            (201..past_burst).all(|i| {
+                let d = decide_hw_fullframe(&mut st, &s, i, Damage::None, false, false, coarse);
+                d.send && !d.force_idr && d.hold_qp.is_none()
+            }),
+            "the rate control keeps refining the key frame past the configured burst"
+        );
+        assert!(
+            !decide_hw_fullframe(&mut st, &s, past_burst, Damage::None, false, false, clean).send,
+            "until it converges"
+        );
     }
 
     #[test]
     fn a_large_change_after_a_clean_still_screen_is_not_keyed_as_it_lands() {
-        let s = RustCaptureSettings { video_paintover_burst_frames: 0, ..hw_settings() };
-        let fine = EncoderQuality { last: Some(5), bytes: None, holds: true, reopens: false, band: None };
-        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false, band: None };
+        let s = RustCaptureSettings {
+            video_paintover_burst_frames: 0,
+            ..hw_settings()
+        };
+        let fine = EncoderQuality {
+            last: Some(5),
+            bytes: None,
+            holds: true,
+            reopens: false,
+            band: None,
+        };
+        let coarse = EncoderQuality {
+            last: Some(40),
+            bytes: None,
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         let mut frame = 0u16;
         let mut step = |st: &mut StripeState, damage: Damage, q: EncoderQuality| {
@@ -1334,10 +1785,24 @@ mod tests {
             decide_hw_fullframe(st, &s, frame, damage, false, false, q)
         };
         step(&mut st, Damage::Area(1.0), coarse);
-        assert!((0..100).all(|_| step(&mut st, Damage::None, fine).hold_qp.is_none()), "a finer rate control is left alone");
-        let landing = [step(&mut st, Damage::Area(1.0), fine), step(&mut st, Damage::Area(1.0), coarse)];
-        assert!(landing.iter().all(|d| d.send && !d.force_idr && d.hold_qp.is_none()), "the change goes out at the session quality");
-        assert!((0..12).any(|_| step(&mut st, Damage::None, coarse).force_idr), "and is keyed once the screen holds still");
+        assert!(
+            (0..100).all(|_| step(&mut st, Damage::None, fine).hold_qp.is_none()),
+            "a finer rate control is left alone"
+        );
+        let landing = [
+            step(&mut st, Damage::Area(1.0), fine),
+            step(&mut st, Damage::Area(1.0), coarse),
+        ];
+        assert!(
+            landing
+                .iter()
+                .all(|d| d.send && !d.force_idr && d.hold_qp.is_none()),
+            "the change goes out at the session quality"
+        );
+        assert!(
+            (0..12).any(|_| step(&mut st, Damage::None, coarse).force_idr),
+            "and is keyed once the screen holds still"
+        );
     }
 
     /// A screen that never holds still for the trigger (a caret blinking every other frame)
@@ -1345,12 +1810,19 @@ mod tests {
     /// with it.
     #[test]
     fn low_motion_does_not_hold_off_the_cleanup_forever() {
-        let s = RustCaptureSettings { paint_over_trigger_frames: 4, ..hw_settings() };
+        let s = RustCaptureSettings {
+            paint_over_trigger_frames: 4,
+            ..hw_settings()
+        };
         let mut st = StripeState::default();
         run(&mut st, &s, Damage::Area(1.0), 3);
         let mut fired = None;
         for i in 0..40u16 {
-            let damage = if i % 2 == 0 { Damage::Area(0.0005) } else { Damage::None };
+            let damage = if i % 2 == 0 {
+                Damage::Area(0.0005)
+            } else {
+                Damage::None
+            };
             let d = decide_hw_fullframe(&mut st, &s, 100 + i, damage, false, false, HOLDS);
             if d.hold_qp.is_some() {
                 fired = Some((i, d.force_idr));
@@ -1358,7 +1830,11 @@ mod tests {
             }
         }
         let (at, key) = fired.expect("a cleanup under low motion");
-        assert_eq!(at as u32 + 4, s.paint_over_trigger_frames * LOW_MOTION_TRIGGERS, "at the end of the window since the scroll began");
+        assert_eq!(
+            at as u32 + 4,
+            s.paint_over_trigger_frames * LOW_MOTION_TRIGGERS,
+            "at the end of the window since the scroll began"
+        );
         assert!(key, "the scroll before it makes it a key frame");
 
         // After a long scroll the caret gets the cleanup once the scroll has aged out of the
@@ -1367,11 +1843,18 @@ mod tests {
         run(&mut st, &s, Damage::Area(1.0), 200);
         let window = s.paint_over_trigger_frames * LOW_MOTION_TRIGGERS;
         let fired = (0..200u16).find(|&i| {
-            let damage = if i % 2 == 0 { Damage::Area(0.0005) } else { Damage::None };
+            let damage = if i % 2 == 0 {
+                Damage::Area(0.0005)
+            } else {
+                Damage::None
+            };
             decide_hw_fullframe(&mut st, &s, 300 + i, damage, false, false, HOLDS).force_idr
         });
         let at = fired.expect("a key frame under low motion after a long scroll") as u32;
-        assert!(at >= window && at <= window * 2, "{at} frames after the scroll stopped, window {window}");
+        assert!(
+            at >= window && at <= window * 2,
+            "{at} frames after the scroll stopped, window {window}"
+        );
     }
 
     /// Sustained motion is not low motion: a screen changing every frame gets no cleanup until
@@ -1380,8 +1863,16 @@ mod tests {
     fn sustained_motion_gets_no_cleanup_until_it_stops() {
         let s = hw_settings();
         let mut st = StripeState::default();
-        assert!(run(&mut st, &s, Damage::Area(0.5), 60).iter().all(|d| d.hold_qp.is_none()));
-        assert!(run(&mut st, &s, Damage::Unknown, 60).iter().all(|d| d.hold_qp.is_none()));
+        assert!(
+            run(&mut st, &s, Damage::Area(0.5), 60)
+                .iter()
+                .all(|d| d.hold_qp.is_none())
+        );
+        assert!(
+            run(&mut st, &s, Damage::Unknown, 60)
+                .iter()
+                .all(|d| d.hold_qp.is_none())
+        );
     }
 
     /// A change of unknown extent counts toward a key frame only in runs: isolated ones (a
@@ -1393,11 +1884,19 @@ mod tests {
         for _ in 0..20 {
             run(&mut st, &s, Damage::Unknown, 1);
             let still = run(&mut st, &s, Damage::None, 10);
-            assert!(still[1].hold_qp.is_some() && !still[1].force_idr, "isolated changes are refreshed");
+            assert!(
+                still[1].hold_qp.is_some() && !still[1].force_idr,
+                "isolated changes are refreshed"
+            );
             assert!(still.iter().all(|d| !d.force_idr), "and never keyed");
         }
         run(&mut st, &s, Damage::Unknown, 12);
-        assert!(run(&mut st, &s, Damage::None, 10).iter().any(|d| d.force_idr), "a run of ten counts for more than half a screen");
+        assert!(
+            run(&mut st, &s, Damage::None, 10)
+                .iter()
+                .any(|d| d.force_idr),
+            "a run of ten counts for more than half a screen"
+        );
     }
 
     /// Motion outranks the burst: it sends at normal quality, drops a burst in flight, and forces
@@ -1405,7 +1904,12 @@ mod tests {
     #[test]
     fn motion_sends_at_normal_quality_and_cancels_the_burst() {
         let s = hw_settings();
-        let mut st = StripeState { h264_burst_frames_remaining: 3, paint_over_sent: true, no_motion_frame_count: 9, ..Default::default() };
+        let mut st = StripeState {
+            h264_burst_frames_remaining: 3,
+            paint_over_sent: true,
+            no_motion_frame_count: 9,
+            ..Default::default()
+        };
         let d = decide_hw_fullframe(&mut st, &s, 1, Damage::Area(0.2), false, false, HOLDS);
         assert!(d.send && !d.force_idr && d.hold_qp.is_none());
         assert_eq!(d.target_qp, s.video_crf as u32);
@@ -1421,15 +1925,24 @@ mod tests {
     /// rate it is not held.
     #[test]
     fn a_requested_key_frame_is_the_rate_controls_own() {
-        let s = RustCaptureSettings { paint_over_trigger_frames: 30, ..crf_settings() };
+        let s = RustCaptureSettings {
+            paint_over_trigger_frames: 30,
+            ..crf_settings()
+        };
         let (normal, paint) = (s.video_crf as u32, s.video_paintover_crf as u32);
         let mut st = StripeState::default();
         run(&mut st, &s, Damage::Area(1.0), 1);
         let join = decide_hw_fullframe(&mut st, &s, 2, Damage::None, false, true, HOLDS);
         assert!(join.send && join.force_idr && join.hold_qp.is_none() && join.target_qp == normal);
-        assert_eq!(st.h264_burst_frames_remaining, s.video_paintover_burst_frames);
+        assert_eq!(
+            st.h264_burst_frames_remaining,
+            s.video_paintover_burst_frames
+        );
         let burst = decide_hw_fullframe(&mut st, &s, 3, Damage::None, false, false, HOLDS);
-        assert!(burst.send && burst.hold_qp.is_none() && burst.target_qp == paint, "the burst refines at the paint-over quality");
+        assert!(
+            burst.send && burst.hold_qp.is_none() && burst.target_qp == paint,
+            "the burst refines at the paint-over quality"
+        );
 
         let s = crf_settings();
         let mut st = StripeState::default();
@@ -1437,23 +1950,42 @@ mod tests {
         run(&mut st, &s, Damage::None, 12);
         assert!(st.clean_quality, "cleaned up");
         let join = decide_hw_fullframe(&mut st, &s, 30, Damage::None, false, true, HOLDS);
-        assert!(join.force_idr && join.target_qp == normal, "a key frame on a clean screen at the session's quality");
+        assert!(
+            join.force_idr && join.target_qp == normal,
+            "a key frame on a clean screen at the session's quality"
+        );
         let burst = decide_hw_fullframe(&mut st, &s, 31, Damage::None, false, false, HOLDS);
         assert_eq!(burst.target_qp, paint);
 
-        let cbr = RustCaptureSettings { video_cbr_mode: true, paint_over_trigger_frames: 30, ..hw_settings() };
-        let coarse = EncoderQuality { last: Some(40), bytes: None, holds: true, reopens: false, band: None };
+        let cbr = RustCaptureSettings {
+            video_cbr_mode: true,
+            paint_over_trigger_frames: 30,
+            ..hw_settings()
+        };
+        let coarse = EncoderQuality {
+            last: Some(40),
+            bytes: None,
+            holds: true,
+            reopens: false,
+            band: None,
+        };
         let mut st = StripeState::default();
         decide_hw_fullframe(&mut st, &cbr, 1, Damage::Area(1.0), false, false, coarse);
         let join = decide_hw_fullframe(&mut st, &cbr, 2, Damage::None, false, true, coarse);
         assert!(join.force_idr && join.hold_qp.is_none());
         let burst = decide_hw_fullframe(&mut st, &cbr, 3, Damage::None, false, false, coarse);
-        assert!(burst.send && burst.hold_qp.is_none(), "a constant rate refines the burst itself");
+        assert!(
+            burst.send && burst.hold_qp.is_none(),
+            "a constant rate refines the burst itself"
+        );
 
         let mut moving = StripeState::default();
         let dirty = decide_hw_fullframe(&mut moving, &s, 1, Damage::Area(1.0), false, true, HOLDS);
         assert!(dirty.send && dirty.force_idr && dirty.hold_qp.is_none());
-        assert_eq!(moving.h264_burst_frames_remaining, 0, "motion carries the refinement, so no burst is opened");
+        assert_eq!(
+            moving.h264_burst_frames_remaining, 0,
+            "motion carries the refinement, so no burst is opened"
+        );
     }
 
     /// At a constant quality the cleanup applies where the paint-over quality is finer than the
@@ -1485,14 +2017,40 @@ mod tests {
             (false, 18, false, None, true, Seen::Nothing),
             (true, 18, false, None, true, Seen::Nothing),
         ] {
-            let s = RustCaptureSettings { video_cbr_mode: cbr, video_paintover_crf: paint, use_paint_over_quality: on, ..hw_settings() };
+            let s = RustCaptureSettings {
+                video_cbr_mode: cbr,
+                video_paintover_crf: paint,
+                use_paint_over_quality: on,
+                ..hw_settings()
+            };
             let mut st = StripeState::default();
             let mut got = Seen::Nothing;
             for i in 0..40u16 {
-                let damage = if i == 0 { Damage::Area(1.0) } else { Damage::None };
-                let d = decide_hw_fullframe(&mut st, &s, i, damage, false, false, EncoderQuality { last, bytes: None, holds, reopens: false, band: None });
+                let damage = if i == 0 {
+                    Damage::Area(1.0)
+                } else {
+                    Damage::None
+                };
+                let d = decide_hw_fullframe(
+                    &mut st,
+                    &s,
+                    i,
+                    damage,
+                    false,
+                    false,
+                    EncoderQuality {
+                        last,
+                        bytes: None,
+                        holds,
+                        reopens: false,
+                        band: None,
+                    },
+                );
                 if i > 0 && d.send {
-                    assert!(!cbr || holds || !d.force_idr, "a key frame where no quantizer is held: last={last:?}");
+                    assert!(
+                        !cbr || holds || !d.force_idr,
+                        "a key frame where no quantizer is held: last={last:?}"
+                    );
                     if d.hold_qp.is_some() {
                         got = Seen::Held;
                     } else if d.target_qp != s.video_crf as u32 {
@@ -1503,7 +2061,10 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(got, seen, "cbr={cbr} paint={paint} on={on} last={last:?} holds={holds}");
+            assert_eq!(
+                got, seen,
+                "cbr={cbr} paint={paint} on={on} last={last:?} holds={holds}"
+            );
         }
     }
 
@@ -1514,24 +2075,61 @@ mod tests {
     #[test]
     fn a_constant_quality_cleanup_moves_the_session_quality() {
         for turbo in [false, true] {
-            let s = RustCaptureSettings { video_streaming_mode: turbo, ..crf_settings() };
+            let s = RustCaptureSettings {
+                video_streaming_mode: turbo,
+                ..crf_settings()
+            };
             let (normal, paint) = (s.video_crf as u32, s.video_paintover_crf as u32);
             let mut st = StripeState::default();
             let moving = run(&mut st, &s, Damage::Area(1.0), 3);
-            assert!(moving.iter().all(|d| d.send && !d.force_idr && d.hold_qp.is_none() && d.target_qp == normal));
+            assert!(
+                moving.iter().all(|d| d.send
+                    && !d.force_idr
+                    && d.hold_qp.is_none()
+                    && d.target_qp == normal)
+            );
             let still = run(&mut st, &s, Damage::None, 16);
-            assert!(still.iter().all(|d| d.hold_qp.is_none()), "no frame is held");
-            let sent: Vec<(usize, bool, u32)> =
-                still.iter().enumerate().filter(|(_, d)| d.send).map(|(i, d)| (i + 1, d.force_idr, d.target_qp)).collect();
+            assert!(
+                still.iter().all(|d| d.hold_qp.is_none()),
+                "no frame is held"
+            );
+            let sent: Vec<(usize, bool, u32)> = still
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.send)
+                .map(|(i, d)| (i + 1, d.force_idr, d.target_qp))
+                .collect();
             if !turbo {
-                let cleanups = vec![(2, false, paint), (3, false, paint), (4, false, paint), (5, false, paint),
-                                    (8, true, paint), (9, false, paint), (10, false, paint), (11, false, paint)];
-                assert_eq!(sent, cleanups, "a refresh at the trigger and a key four triggers in, each with its burst");
+                let cleanups = vec![
+                    (2, false, paint),
+                    (3, false, paint),
+                    (4, false, paint),
+                    (5, false, paint),
+                    (8, true, paint),
+                    (9, false, paint),
+                    (10, false, paint),
+                    (11, false, paint),
+                ];
+                assert_eq!(
+                    sent, cleanups,
+                    "a refresh at the trigger and a key four triggers in, each with its burst"
+                );
             } else {
                 assert_eq!(sent.len(), 16, "Turbo sends every frame");
-                assert_eq!(sent[0], (1, false, normal), "the session's quality until the cleanup");
-                assert!(sent[1..].iter().all(|r| r.2 == paint), "the paint-over quality from the refresh on: {sent:?}");
-                assert_eq!(sent.iter().filter(|r| r.1).map(|r| r.0).collect::<Vec<_>>(), vec![8], "one key frame");
+                assert_eq!(
+                    sent[0],
+                    (1, false, normal),
+                    "the session's quality until the cleanup"
+                );
+                assert!(
+                    sent[1..].iter().all(|r| r.2 == paint),
+                    "the paint-over quality from the refresh on: {sent:?}"
+                );
+                assert_eq!(
+                    sent.iter().filter(|r| r.1).map(|r| r.0).collect::<Vec<_>>(),
+                    vec![8],
+                    "one key frame"
+                );
             }
         }
     }
@@ -1542,7 +2140,13 @@ mod tests {
     #[test]
     fn a_reopening_encoder_counts_its_refresh_as_the_key_frame() {
         let s = crf_settings();
-        let reopens = EncoderQuality { last: None, bytes: None, holds: true, reopens: true, band: None };
+        let reopens = EncoderQuality {
+            last: None,
+            bytes: None,
+            holds: true,
+            reopens: true,
+            band: None,
+        };
         let mut st = StripeState::default();
         for i in 0..3u16 {
             decide_hw_fullframe(&mut st, &s, i, Damage::Area(1.0), false, false, reopens);
@@ -1553,7 +2157,11 @@ mod tests {
             .filter(|(_, d)| d.force_idr)
             .map(|(i, _)| i + 1)
             .collect();
-        assert_eq!(keys, vec![2], "the refresh at the trigger is the key frame, and the only one");
+        assert_eq!(
+            keys,
+            vec![2],
+            "the refresh at the trigger is the key frame, and the only one"
+        );
     }
 
     /// A clean region keeps the paint-over quality through a small change (a caret), so an
@@ -1561,24 +2169,45 @@ mod tests {
     /// of unknown extent, takes it back to the session's quality until its next cleanup.
     #[test]
     fn a_clean_region_keeps_its_quality_until_it_moves() {
-        let s = RustCaptureSettings { video_streaming_mode: true, ..crf_settings() };
+        let s = RustCaptureSettings {
+            video_streaming_mode: true,
+            ..crf_settings()
+        };
         let (normal, paint) = (s.video_crf as u32, s.video_paintover_crf as u32);
         let mut st = StripeState::default();
         run(&mut st, &s, Damage::Area(1.0), 3);
         run(&mut st, &s, Damage::None, 12);
         let caret = decide_hw_fullframe(&mut st, &s, 100, Damage::Area(0.001), false, false, HOLDS);
         assert_eq!(caret.target_qp, paint, "a caret keeps it");
-        assert_eq!(decide_hw_fullframe(&mut st, &s, 101, Damage::None, false, false, HOLDS).target_qp, paint);
+        assert_eq!(
+            decide_hw_fullframe(&mut st, &s, 101, Damage::None, false, false, HOLDS).target_qp,
+            paint
+        );
         let scroll = decide_hw_fullframe(&mut st, &s, 102, Damage::Area(0.5), false, false, HOLDS);
         assert_eq!(scroll.target_qp, normal, "motion takes it back");
-        assert_eq!(decide_hw_fullframe(&mut st, &s, 103, Damage::None, false, false, HOLDS).target_qp, normal, "until the next cleanup");
+        assert_eq!(
+            decide_hw_fullframe(&mut st, &s, 103, Damage::None, false, false, HOLDS).target_qp,
+            normal,
+            "until the next cleanup"
+        );
         run(&mut st, &s, Damage::None, 12);
-        assert_eq!(decide_hw_fullframe(&mut st, &s, 120, Damage::Unknown, false, false, HOLDS).target_qp, normal);
+        assert_eq!(
+            decide_hw_fullframe(&mut st, &s, 120, Damage::Unknown, false, false, HOLDS).target_qp,
+            normal
+        );
 
-        let off = RustCaptureSettings { use_paint_over_quality: false, ..s };
+        let off = RustCaptureSettings {
+            use_paint_over_quality: false,
+            ..s
+        };
         let mut st = StripeState::default();
         run(&mut st, &off, Damage::Area(1.0), 3);
-        assert!(run(&mut st, &off, Damage::None, 20).iter().all(|d| d.target_qp == normal), "paint-over off");
+        assert!(
+            run(&mut st, &off, Damage::None, 20)
+                .iter()
+                .all(|d| d.target_qp == normal),
+            "paint-over off"
+        );
     }
 
     /// Streaming and animated modes send every frame, and a scheduled interval forces the
@@ -1588,20 +2217,30 @@ mod tests {
         let mut s = hw_settings();
         s.video_streaming_mode = true;
         let mut st = StripeState::default();
-        assert!(decide_hw_fullframe(&mut st, &s, 1, Damage::None, false, false, HOLDS).send,
-                "streaming mode sends a static frame");
+        assert!(
+            decide_hw_fullframe(&mut st, &s, 1, Damage::None, false, false, HOLDS).send,
+            "streaming mode sends a static frame"
+        );
 
         s.video_streaming_mode = false;
         let mut animated = StripeState::default();
-        assert!(decide_hw_fullframe(&mut animated, &s, 1, Damage::None, true, false, HOLDS).send,
-                "an animated overlay sends a static frame");
+        assert!(
+            decide_hw_fullframe(&mut animated, &s, 1, Damage::None, true, false, HOLDS).send,
+            "an animated overlay sends a static frame"
+        );
 
         // 1 s at 60 fps: frame 60 is due, 61 is not.
         s.keyframe_interval_s = 1.0;
         let mut scheduled = StripeState::default();
-        assert!(decide_hw_fullframe(&mut scheduled, &s, 60, Damage::None, false, false, HOLDS).force_idr);
+        assert!(
+            decide_hw_fullframe(&mut scheduled, &s, 60, Damage::None, false, false, HOLDS)
+                .force_idr
+        );
         let mut off_beat = StripeState::default();
-        assert!(!decide_hw_fullframe(&mut off_beat, &s, 61, Damage::None, false, false, HOLDS).force_idr);
+        assert!(
+            !decide_hw_fullframe(&mut off_beat, &s, 61, Damage::None, false, false, HOLDS)
+                .force_idr
+        );
     }
 
     /// Software JPEG path emits on change and stays silent while static: the first frame
@@ -1629,7 +2268,10 @@ mod tests {
         let n1 = p.process(&frame_a, stride).len();
         let n2 = p.process(&frame_a, stride).len();
         let n3 = p.process(&frame_b, stride).len();
-        assert!(n1 > 0, "first frame should emit (all stripes dirty vs init)");
+        assert!(
+            n1 > 0,
+            "first frame should emit (all stripes dirty vs init)"
+        );
         assert_eq!(n2, 0, "identical static frame should emit nothing");
         assert!(n3 > 0, "changed frame should emit dirty stripes");
     }
@@ -1659,13 +2301,25 @@ mod tests {
         for _ in 0..4 {
             let _ = p.process(&frame, stride);
         }
-        assert!(p.process(&frame, stride).is_empty(), "static screen is quiet before the request");
+        assert!(
+            p.process(&frame, stride).is_empty(),
+            "static screen is quiet before the request"
+        );
         p.request_idr();
-        assert!(!p.process(&frame, stride).is_empty(), "requested IDR emits on a static screen");
+        assert!(
+            !p.process(&frame, stride).is_empty(),
+            "requested IDR emits on a static screen"
+        );
         for i in 0..5 {
-            assert!(!p.process(&frame, stride).is_empty(), "recovery burst frame {i} streams while static");
+            assert!(
+                !p.process(&frame, stride).is_empty(),
+                "recovery burst frame {i} streams while static"
+            );
         }
-        assert!(p.process(&frame, stride).is_empty(), "stream goes quiet again after the recovery burst");
+        assert!(
+            p.process(&frame, stride).is_empty(),
+            "stream goes quiet again after the recovery burst"
+        );
     }
 
     /// The software path carries a 4:4:4 request exactly when the build's encoder does —
@@ -1676,8 +2330,15 @@ mod tests {
     #[test]
     fn x11_colorspace_desc_reports_what_the_software_encoder_carries() {
         let carries_444 = crate::encoders::software_fullcolor(Codec::H264);
-        assert_eq!(carries_444, crate::encoders::software_library(Codec::H264) == "x264");
-        let i444 = if carries_444 { "I444 (Full Range)" } else { "I420 (Limited Range)" };
+        assert_eq!(
+            carries_444,
+            crate::encoders::software_library(Codec::H264) == "x264"
+        );
+        let i444 = if carries_444 {
+            "I444 (Full Range)"
+        } else {
+            "I420 (Limited Range)"
+        };
         for (fullcolor, expected) in [(true, i444), (false, "I420 (Limited Range)")] {
             let settings = RustCaptureSettings {
                 width: 64,
@@ -1688,7 +2349,10 @@ mod tests {
                 ..Default::default()
             };
             let p = X11Pipeline::new(settings.clone());
-            assert_eq!(p.encoder_name(), format!("CPU ({})", crate::encoders::software_library(Codec::H264)));
+            assert_eq!(
+                p.encoder_name(),
+                format!("CPU ({})", crate::encoders::software_library(Codec::H264))
+            );
             assert_eq!(p.colorspace_desc(), expected);
             // The chroma and the range are each read from the session rather than assumed
             // equal: a 4:2:0 session converted at full range exists, so the two are no longer
@@ -1730,11 +2394,18 @@ mod tests {
         let mut stripes = p.process(&pixels, 64 * 4);
         assert!(!stripes.is_empty(), "the first frame of a pipeline is sent");
         let start = crate::wayland::host::now_ns();
-        crate::encoders::software::FrameTiming::stamp(&mut stripes, start - 2_000_000, start - 1_000_000);
+        crate::encoders::software::FrameTiming::stamp(
+            &mut stripes,
+            start - 2_000_000,
+            start - 1_000_000,
+        );
         report.tally(&stripes);
         let totals = report.totals();
         assert_eq!(totals.frames, 1);
-        assert_eq!(totals.bytes, stripes.iter().map(|s| s.data.len() as u64).sum::<u64>());
+        assert_eq!(
+            totals.bytes,
+            stripes.iter().map(|s| s.data.len() as u64).sum::<u64>()
+        );
         assert!(totals.encode_ns >= 1_000_000 && totals.pipeline_ns >= 2_000_000);
     }
 
@@ -1781,7 +2452,10 @@ mod tests {
     /// position: the GOP is infinite, so there is no scheduled IDR to break the silence.
     #[test]
     fn static_frames_stay_silent_without_request() {
-        let s = RustCaptureSettings { use_paint_over_quality: false, ..hw_settings() };
+        let s = RustCaptureSettings {
+            use_paint_over_quality: false,
+            ..hw_settings()
+        };
         let mut st = StripeState::default();
         for fc in [0u16, 1, 120, 240] {
             let d = decide_hw_fullframe(&mut st, &s, fc, Damage::None, false, false, HOLDS);
@@ -1793,11 +2467,18 @@ mod tests {
     /// so a constant-rate session can refine it.
     #[test]
     fn requested_idr_recovers_even_without_paint_over() {
-        let s = RustCaptureSettings { use_paint_over_quality: false, video_paintover_burst_frames: 5, ..hw_settings() };
+        let s = RustCaptureSettings {
+            use_paint_over_quality: false,
+            video_paintover_burst_frames: 5,
+            ..hw_settings()
+        };
         let mut st = StripeState::default();
         let d = decide_hw_fullframe(&mut st, &s, 5, Damage::None, false, true, HOLDS);
         assert!(d.send && d.force_idr && d.hold_qp.is_none());
-        assert_eq!(st.h264_burst_frames_remaining, 5, "recovery burst armed without paint-over");
+        assert_eq!(
+            st.h264_burst_frames_remaining, 5,
+            "recovery burst armed without paint-over"
+        );
         let d = decide_hw_fullframe(&mut st, &s, 6, Damage::None, false, false, HOLDS);
         assert!(d.send && !d.force_idr);
         assert_eq!(d.target_qp, 25);
@@ -1812,7 +2493,10 @@ mod tests {
         assert!(periodic_idr_due(&s, 120));
         let mut st = StripeState::default();
         let d = decide_hw_fullframe(&mut st, &s, 120, Damage::None, false, false, HOLDS);
-        assert!(d.send && d.force_idr, "interval keyframe fires on a static screen");
+        assert!(
+            d.send && d.force_idr,
+            "interval keyframe fires on a static screen"
+        );
         s.keyframe_interval_s = 0.0;
         assert!(!periodic_idr_due(&s, 0) && !periodic_idr_due(&s, 120));
     }
@@ -1822,14 +2506,41 @@ mod tests {
     /// that coded near the paint-over quantizer, gets the paint-over one.
     #[test]
     fn a_held_refresh_fits_the_budget_a_constant_rate_leaves() {
-        let cbr = RustCaptureSettings { video_cbr_mode: true, video_paintover_crf: 18, target_fps: 30.0, ..hw_settings() };
-        let q = |s: &RustCaptureSettings, last| held_refresh_quality(s, EncoderQuality { last, bytes: None, holds: true, reopens: false, band: None });
-        assert_eq!(q(&cbr, Some(51)), 22, "thirty frames of budget are 29 steps finer than the rate control");
+        let cbr = RustCaptureSettings {
+            video_cbr_mode: true,
+            video_paintover_crf: 18,
+            target_fps: 30.0,
+            ..hw_settings()
+        };
+        let q = |s: &RustCaptureSettings, last| {
+            held_refresh_quality(
+                s,
+                EncoderQuality {
+                    last,
+                    bytes: None,
+                    holds: true,
+                    reopens: false,
+                    band: None,
+                },
+            )
+        };
+        assert_eq!(
+            q(&cbr, Some(51)),
+            22,
+            "thirty frames of budget are 29 steps finer than the rate control"
+        );
         assert_eq!(q(&cbr, Some(45)), 18);
         assert_eq!(q(&cbr, Some(30)), 18);
         assert_eq!(q(&cbr, None), 18);
-        let crf = RustCaptureSettings { video_cbr_mode: false, ..cbr.clone() };
-        assert_eq!(q(&crf, Some(45)), 18, "a constant quality has no budget to fit");
+        let crf = RustCaptureSettings {
+            video_cbr_mode: false,
+            ..cbr.clone()
+        };
+        assert_eq!(
+            q(&crf, Some(45)),
+            18,
+            "a constant quality has no budget to fit"
+        );
     }
 
     /// Damage rectangles report the share of the frame they cover, clipped to it.
@@ -1840,7 +2551,11 @@ mod tests {
         let quarter = [Rectangle::new((0, 0).into(), (50, 50).into())];
         assert_eq!(Damage::of_rects(&quarter, 100, 100), Damage::Area(0.25));
         let past = [Rectangle::new((80, 80).into(), (50, 50).into())];
-        assert_eq!(Damage::of_rects(&past, 100, 100), Damage::Area(0.04), "clipped to the frame");
+        assert_eq!(
+            Damage::of_rects(&past, 100, 100),
+            Damage::Area(0.04),
+            "clipped to the frame"
+        );
         let whole = [Rectangle::new((0, 0).into(), (200, 200).into())];
         assert_eq!(Damage::of_rects(&whole, 100, 100), Damage::Area(1.0));
     }
@@ -1852,12 +2567,23 @@ mod tests {
         let (w, h) = (32usize, 256usize);
         let mut bands = Vec::new();
         let frame = vec![7u8; w * 4 * h];
-        assert_eq!(hash_damage(&mut bands, &frame, w * 4, h, 10, 20), Damage::Area(1.0), "the first frame is all new");
-        assert_eq!(hash_damage(&mut bands, &frame, w * 4, h, 10, 20), Damage::None);
+        assert_eq!(
+            hash_damage(&mut bands, &frame, w * 4, h, 10, 20),
+            Damage::Area(1.0),
+            "the first frame is all new"
+        );
+        assert_eq!(
+            hash_damage(&mut bands, &frame, w * 4, h, 10, 20),
+            Damage::None
+        );
         let mut caret = frame.clone();
         caret[w * 4 * (DAMAGE_BAND_ROWS + 1)] = 0;
         let n = h.div_ceil(DAMAGE_BAND_ROWS);
-        assert_eq!(hash_damage(&mut bands, &caret, w * 4, h, 10, 20), Damage::Area(1.0 / n as f32), "one band of {n}");
+        assert_eq!(
+            hash_damage(&mut bands, &caret, w * 4, h, 10, 20),
+            Damage::Area(1.0 / n as f32),
+            "one band of {n}"
+        );
     }
 
     /// The rows a band hash found changed map onto full-width rectangles, one per run of bands,
@@ -1867,7 +2593,10 @@ mod tests {
         let r = |y: i32, h: i32| Rectangle::new((0, y).into(), (64, h).into());
         assert_eq!(band_rects(&[], 64, 100), vec![r(0, 100)]);
         assert_eq!(band_rects(&[false, false, false, false], 64, 100), vec![]);
-        assert_eq!(band_rects(&[true, true, false, true], 64, 100), vec![r(0, 64), r(96, 4)]);
+        assert_eq!(
+            band_rects(&[true, true, false, true], 64, 100),
+            vec![r(0, 64), r(96, 4)]
+        );
         assert_eq!(band_damage(&[true, true, false, true]), Damage::Area(0.75));
         assert_eq!(band_damage(&[]), Damage::Area(1.0));
     }
@@ -1881,9 +2610,18 @@ mod vbv_tests {
     fn vbv_policy() {
         use crate::encoders::vbv_bits;
         let frame = 4_000_000f64 / 60.0;
-        assert_eq!(vbv_bits(4_000_000, 60.0, 0.0, 0.0), (frame * 1.5).round() as u32);
-        assert_eq!(vbv_bits(4_000_000, 60.0, 2.0, 0.0), (frame * 3.0).round() as u32);
+        assert_eq!(
+            vbv_bits(4_000_000, 60.0, 0.0, 0.0),
+            (frame * 1.5).round() as u32
+        );
+        assert_eq!(
+            vbv_bits(4_000_000, 60.0, 2.0, 0.0),
+            (frame * 3.0).round() as u32
+        );
         assert_eq!(vbv_bits(4_000_000, 60.0, 2.0, 1.0), frame.round() as u32);
-        assert_eq!(vbv_bits(8_000_000, 60.0, 0.0, 1.0), (2.0 * frame).round() as u32);
+        assert_eq!(
+            vbv_bits(8_000_000, 60.0, 0.0, 1.0),
+            (2.0 * frame).round() as u32
+        );
     }
 }

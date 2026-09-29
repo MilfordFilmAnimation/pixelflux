@@ -23,7 +23,7 @@ use std::time::Duration;
 use pyo3::{Py, PyAny, Python};
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::{wl_registry, wl_seat};
-use wayland_client::{delegate_noop, Connection, Dispatch, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
     ext_data_control_manager_v1::ExtDataControlManagerV1,
@@ -38,8 +38,8 @@ use wayland_protocols_wlr::data_control::v1::client::{
 };
 
 use crate::wayland::wlclient::{
-    bounded_roundtrip, impl_sync_callback, pipe_cloexec, read_fd_to_end, wait_readable,
-    write_fd_all, SyncState, IO_TIMEOUT,
+    IO_TIMEOUT, SyncState, bounded_roundtrip, impl_sync_callback, pipe_cloexec, read_fd_to_end,
+    wait_readable, write_fd_all,
 };
 
 /// How often a background thread wakes from its socket poll to check its stop
@@ -203,10 +203,11 @@ impl DcState {
         // Replaced offers are dead objects; drop their proxy and mimes so a
         // long-lived watch connection doesn't accumulate them.
         if let Some(old) = self.selection.take()
-            && offer.as_ref().map(|o| o.id()) != Some(old.id()) {
-                self.offer_mimes.remove(&old.id());
-                old.destroy();
-            }
+            && offer.as_ref().map(|o| o.id()) != Some(old.id())
+        {
+            self.offer_mimes.remove(&old.id());
+            old.destroy();
+        }
         self.selection = offer;
         self.selection_changed = true;
     }
@@ -216,10 +217,11 @@ impl DcState {
     /// compositor reused the regular selection's object) so it can't pile up.
     fn on_primary_selection(&mut self, offer: Option<DcOffer>) {
         if let Some(o) = offer
-            && self.selection.as_ref().map(|s| s.id()) != Some(o.id()) {
-                self.offer_mimes.remove(&o.id());
-                o.destroy();
-            }
+            && self.selection.as_ref().map(|s| s.id()) != Some(o.id())
+        {
+            self.offer_mimes.remove(&o.id());
+            o.destroy();
+        }
     }
 
     fn on_send(&mut self, mime_type: &str, fd: std::os::fd::OwnedFd) {
@@ -239,7 +241,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for DcState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, .. } = event {
+        if let wl_registry::Event::Global {
+            name, interface, ..
+        } = event
+        {
             // Version 1 of each suffices: the seat is only an argument, and v1
             // data-control carries the regular selection this bridge needs.
             match interface.as_str() {
@@ -397,7 +402,15 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for DcState {
 /// the current selection already delivered.
 fn open_device(
     socket_path: &str,
-) -> Result<(Connection, wayland_client::EventQueue<DcState>, DcState, DcDevice), String> {
+) -> Result<
+    (
+        Connection,
+        wayland_client::EventQueue<DcState>,
+        DcState,
+        DcDevice,
+    ),
+    String,
+> {
     let stream =
         UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
     let conn = Connection::from_socket(stream).map_err(|e| format!("wayland setup: {e}"))?;
@@ -406,7 +419,10 @@ fn open_device(
     let _registry = conn.display().get_registry(&qh, ());
     let mut state = DcState::default();
     bounded_roundtrip(&conn, &mut queue, &mut state)?;
-    let seat = state.seat.clone().ok_or("app compositor advertises no wl_seat")?;
+    let seat = state
+        .seat
+        .clone()
+        .ok_or("app compositor advertises no wl_seat")?;
     let manager = state.take_manager()?;
     let device = manager.get_data_device(&seat, &qh);
     bounded_roundtrip(&conn, &mut queue, &mut state)?;
@@ -433,7 +449,10 @@ pub(crate) fn read(socket_path: &str, mime: &str) -> Result<Option<Vec<u8>>, Str
         device.destroy();
         return Ok(None);
     };
-    let offered = state.offer_mimes.get(&offer.id()).is_some_and(|m| m.iter().any(|x| x == mime));
+    let offered = state
+        .offer_mimes
+        .get(&offer.id())
+        .is_some_and(|m| m.iter().any(|x| x == mime));
     if !offered {
         device.destroy();
         return Ok(None);
@@ -465,7 +484,10 @@ pub(crate) fn write(socket_path: &str, entries: Vec<(String, Vec<u8>)>) -> Resul
     let _registry = conn.display().get_registry(&qh, ());
     let mut state = DcState::default();
     bounded_roundtrip(&conn, &mut queue, &mut state)?;
-    let seat = state.seat.clone().ok_or("app compositor advertises no wl_seat")?;
+    let seat = state
+        .seat
+        .clone()
+        .ok_or("app compositor advertises no wl_seat")?;
     let manager = state.take_manager()?;
     let device = manager.get_data_device(&seat, &qh);
     let source = manager.create_data_source(&qh);
@@ -503,7 +525,9 @@ fn serve_selection(
                 guard.read().map_err(|e| format!("read: {e}"))?;
             }
         }
-        queue.dispatch_pending(&mut state).map_err(|e| format!("dispatch: {e}"))?;
+        queue
+            .dispatch_pending(&mut state)
+            .map_err(|e| format!("dispatch: {e}"))?;
     }
     source.destroy();
     device.destroy();
@@ -534,8 +558,7 @@ pub(crate) fn watch(socket_path: &str, callback: Py<PyAny>) -> Result<(), String
     {
         let mut reg = WATCHERS.lock().unwrap();
         let map = reg.get_or_insert_with(HashMap::new);
-        if let Some(old) = map.insert(socket_path.to_string(), WatchHandle { stop: stop.clone() })
-        {
+        if let Some(old) = map.insert(socket_path.to_string(), WatchHandle { stop: stop.clone() }) {
             old.stop.store(true, Ordering::Relaxed);
         }
     }
@@ -566,9 +589,10 @@ pub(crate) fn unwatch_all() {
 pub(crate) fn unwatch(socket_path: &str) {
     let mut reg = WATCHERS.lock().unwrap();
     if let Some(map) = reg.as_mut()
-        && let Some(handle) = map.remove(socket_path) {
-            handle.stop.store(true, Ordering::Relaxed);
-        }
+        && let Some(handle) = map.remove(socket_path)
+    {
+        handle.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 fn watch_loop(socket_path: &str, callback: Py<PyAny>, stop: &AtomicBool) -> Result<(), String> {
@@ -597,7 +621,9 @@ fn watch_loop(socket_path: &str, callback: Py<PyAny>, stop: &AtomicBool) -> Resu
                 guard.read().map_err(|e| format!("read: {e}"))?;
             }
         }
-        queue.dispatch_pending(&mut state).map_err(|e| format!("dispatch: {e}"))?;
+        queue
+            .dispatch_pending(&mut state)
+            .map_err(|e| format!("dispatch: {e}"))?;
     }
     device.destroy();
     let _ = queue.flush();

@@ -97,7 +97,11 @@ struct KeyAge {
 
 impl KeyAge {
     fn record(&mut self, frame_id: u16, key: bool) {
-        self.since_key = if key { 0 } else { self.since_key + frame_id.wrapping_sub(self.newest) as u64 };
+        self.since_key = if key {
+            0
+        } else {
+            self.since_key + frame_id.wrapping_sub(self.newest) as u64
+        };
         self.newest = frame_id;
     }
 
@@ -146,12 +150,20 @@ impl ReferenceWindow {
         if key || !self.has_reference() || self.anchors.iter().all(Option::is_none) {
             return Some(0);
         }
-        let every = if self.anchors.len() == 1 { ANCHOR_ALONE_EVERY } else { ANCHOR_EVERY };
+        let every = if self.anchors.len() == 1 {
+            ANCHOR_ALONE_EVERY
+        } else {
+            ANCHOR_EVERY
+        };
         if !(self.next_pts - self.key_pts).is_multiple_of(every) {
             return None;
         }
-        let rank = |a: &Option<(u16, u64, bool)>| a.map_or((0, 0), |(_, pts, lost)| (u8::from(!lost), pts));
-        (0..self.anchors.len()).min_by_key(|&i| rank(&self.anchors[i])).map(|i| i as u8)
+        let rank = |a: &Option<(u16, u64, bool)>| {
+            a.map_or((0, 0), |(_, pts, lost)| (u8::from(!lost), pts))
+        };
+        (0..self.anchors.len())
+            .min_by_key(|&i| rank(&self.anchors[i]))
+            .map(|i| i as u8)
     }
 
     /// How many values the stream's `frame_num` takes before it wraps; 0 for a codec without
@@ -188,14 +200,20 @@ impl ReferenceWindow {
 
     /// Whether a frame not coded as a key frame has a reference left to predict from.
     pub fn has_reference(&self) -> bool {
-        self.frames.iter().copied().chain(self.anchor_frames()).any(|f| !f.2)
+        self.frames
+            .iter()
+            .copied()
+            .chain(self.anchor_frames())
+            .any(|f| !f.2)
     }
 
     /// The newest frame the client still has, as its id and timestamp: the one the next frame
     /// predicts from.
     pub fn newest_valid(&self) -> Option<(u16, u64)> {
         let held = self.frames.iter().copied().chain(self.anchor_frames());
-        held.filter(|f| !f.2).max_by_key(|f| f.1).map(|f| (f.0, f.1))
+        held.filter(|f| !f.2)
+            .max_by_key(|f| f.1)
+            .map(|f| (f.0, f.1))
     }
 
     /// The frames the decoder holds, oldest first: each frame's id, timestamp, and whether
@@ -206,7 +224,10 @@ impl ReferenceWindow {
         anchors.sort_by_key(|f| std::cmp::Reverse(f.1));
         let mut frames = self.frames.iter().copied().peekable();
         std::iter::from_fn(move || {
-            if anchors.last().is_some_and(|a| frames.peek().is_none_or(|f| a.1 < f.1)) {
+            if anchors
+                .last()
+                .is_some_and(|a| frames.peek().is_none_or(|f| a.1 < f.1))
+            {
                 anchors.pop()
             } else {
                 frames.next()
@@ -236,7 +257,8 @@ impl ReferenceWindow {
             self.key_pts = pts;
             Reference::None
         } else {
-            self.newest_valid().map_or(Reference::None, |(id, _)| Reference::Frame(id))
+            self.newest_valid()
+                .map_or(Reference::None, |(id, _)| Reference::Frame(id))
         };
         match anchor.and_then(|slot| self.anchors.get_mut(slot as usize)) {
             Some(slot) => *slot = Some((frame_id, pts, false)),
@@ -268,13 +290,25 @@ impl ReferenceWindow {
             Some(at) => {
                 let pts = self.frames[at].1;
                 let wraps = self.frame_num_range > 0
-                    && self.frames.iter().skip(at).any(|f| (f.1 - self.key_pts).is_multiple_of(self.frame_num_range));
+                    && self
+                        .frames
+                        .iter()
+                        .skip(at)
+                        .any(|f| (f.1 - self.key_pts).is_multiple_of(self.frame_num_range));
                 for f in self.frames.iter_mut().skip(if wraps { 0 } else { at }) {
                     f.2 = true;
                 }
-                if wraps { Invalidation::KeyFrame } else { Invalidation::Forget(pts) }
+                if wraps {
+                    Invalidation::KeyFrame
+                } else {
+                    Invalidation::Forget(pts)
+                }
             }
-            None if self.age.behind(frame_id).is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) => {
+            None if self
+                .age
+                .behind(frame_id)
+                .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) =>
+            {
                 for f in self.frames.iter_mut() {
                     f.2 = true;
                 }
@@ -287,15 +321,26 @@ impl ReferenceWindow {
     /// `invalidate` where anchors are kept: a loss older than every recent frame is dated by
     /// the frames remembered and predicted past from an anchor before it, where one is left.
     fn invalidate_anchored(&mut self, frame_id: u16) -> Invalidation {
-        let remembered = self.recent.iter().rev().find(|r| r.0 == frame_id).map(|r| r.1);
+        let remembered = self
+            .recent
+            .iter()
+            .rev()
+            .find(|r| r.0 == frame_id)
+            .map(|r| r.1);
         let lost_pts = match remembered {
             Some(pts) if pts >= self.key_pts => pts,
             Some(_) => return Invalidation::Ignored,
             None => {
                 // Older than every frame remembered, so everything held predicts through it; a
                 // frame before the key frame, or one never sent, was never a reference.
-                let Some(&(oldest, _)) = self.recent.front() else { return Invalidation::Ignored };
-                if !self.age.behind(frame_id).is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) {
+                let Some(&(oldest, _)) = self.recent.front() else {
+                    return Invalidation::Ignored;
+                };
+                if !self
+                    .age
+                    .behind(frame_id)
+                    .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64)
+                {
                     return Invalidation::Ignored;
                 }
                 self.key_pts
@@ -304,7 +349,8 @@ impl ReferenceWindow {
         let newest = self.next_pts.saturating_sub(1);
         // The first frame at or after the loss that carries `frame_num` 0, if one was sent.
         let range = self.frame_num_range;
-        let wraps = range > 0 && (lost_pts - self.key_pts).div_ceil(range) * range <= newest - self.key_pts;
+        let wraps =
+            range > 0 && (lost_pts - self.key_pts).div_ceil(range) * range <= newest - self.key_pts;
         let cut = if wraps { 0 } else { lost_pts };
         for f in self.frames.iter_mut().filter(|f| f.1 >= cut) {
             f.2 = true;
@@ -312,7 +358,11 @@ impl ReferenceWindow {
         for a in self.anchors.iter_mut().flatten().filter(|a| a.1 >= cut) {
             a.2 = true;
         }
-        if wraps || !self.has_reference() { Invalidation::KeyFrame } else { Invalidation::Forget(lost_pts) }
+        if wraps || !self.has_reference() {
+            Invalidation::KeyFrame
+        } else {
+            Invalidation::Forget(lost_pts)
+        }
     }
 }
 
@@ -373,7 +423,10 @@ pub struct SlotPlan {
 
 impl SlotPlan {
     /// A VP8 key frame: it predicts from nothing and re-anchors every buffer.
-    pub const KEY: Self = Self { predict_from: 0, refresh: SlotRefresh(SlotRefresh::ALL) };
+    pub const KEY: Self = Self {
+        predict_from: 0,
+        refresh: SlotRefresh(SlotRefresh::ALL),
+    };
 }
 
 impl Default for ReferenceSlots {
@@ -394,7 +447,14 @@ impl ReferenceSlots {
     }
 
     fn with(count: usize) -> Self {
-        Self { slots: [None; 8], count, recent: VecDeque::new(), next_pts: 0, age: KeyAge::default(), key_pts: 0 }
+        Self {
+            slots: [None; 8],
+            count,
+            recent: VecDeque::new(),
+            next_pts: 0,
+            age: KeyAge::default(),
+            key_pts: 0,
+        }
     }
 
     /// The timestamp the next frame is encoded with.
@@ -404,7 +464,9 @@ impl ReferenceSlots {
 
     /// Whether a frame not coded as a key frame has a buffer left to predict from.
     pub fn has_reference(&self) -> bool {
-        self.slots[..self.count].iter().any(|s| s.is_some_and(|(_, _, lost)| !lost))
+        self.slots[..self.count]
+            .iter()
+            .any(|s| s.is_some_and(|(_, _, lost)| !lost))
     }
 
     /// What each buffer holds: the frame's id and timestamp and whether it was reported lost.
@@ -416,7 +478,10 @@ impl ReferenceSlots {
     /// buffers it refreshes; a key frame refreshes all of them and predicts from none.
     pub fn plan(&self, key: bool) -> SlotPlan {
         if key || !self.has_reference() {
-            return SlotPlan { predict_from: 0, refresh: SlotRefresh(((1u16 << self.count) - 1) as u8) };
+            return SlotPlan {
+                predict_from: 0,
+                refresh: SlotRefresh(((1u16 << self.count) - 1) as u8),
+            };
         }
         let mut newest = 0;
         for i in 0..self.count {
@@ -429,15 +494,31 @@ impl ReferenceSlots {
         let predict_from = 1 << newest;
         let since_key = self.next_pts - self.key_pts;
         let refresh = if self.count > 3 {
-            1 << (since_key % RING) | if since_key % RING == 0 { 1 << (RING + since_key / RING % RING) } else { 0 }
+            1 << (since_key % RING)
+                | if since_key % RING == 0 {
+                    1 << (RING + since_key / RING % RING)
+                } else {
+                    0
+                }
         } else if predict_from != SlotRefresh::LAST {
             SlotRefresh::ALL
         } else {
             SlotRefresh::LAST
-                | if since_key % ANCHOR_PERIOD == 0 { SlotRefresh::GOLDEN } else { 0 }
-                | if since_key % ANCHOR_PERIOD == ANCHOR_PERIOD / 2 { SlotRefresh::ALTREF } else { 0 }
+                | if since_key % ANCHOR_PERIOD == 0 {
+                    SlotRefresh::GOLDEN
+                } else {
+                    0
+                }
+                | if since_key % ANCHOR_PERIOD == ANCHOR_PERIOD / 2 {
+                    SlotRefresh::ALTREF
+                } else {
+                    0
+                }
         };
-        SlotPlan { predict_from, refresh: SlotRefresh(refresh) }
+        SlotPlan {
+            predict_from,
+            refresh: SlotRefresh(refresh),
+        }
     }
 
     /// Record the frame just encoded under `plan` and answer what it predicted from.
@@ -450,7 +531,8 @@ impl ReferenceSlots {
                 self.key_pts = pts;
                 Reference::None
             }
-            from => self.slots[from.trailing_zeros() as usize].map_or(Reference::None, |(id, _, _)| Reference::Frame(id)),
+            from => self.slots[from.trailing_zeros() as usize]
+                .map_or(Reference::None, |(id, _, _)| Reference::Frame(id)),
         };
         for (i, slot) in self.slots[..self.count].iter_mut().enumerate() {
             if plan.predict_from == 0 || plan.refresh.refreshes(1 << i) {
@@ -473,8 +555,14 @@ impl ReferenceSlots {
                 // A frame older than what is remembered was sent before every buffered one,
                 // so everything held predicts through it; one before the key frame, or a
                 // newer one, was never a reference.
-                let Some(&(oldest, _)) = self.recent.front() else { return Invalidation::Ignored };
-                if !self.age.behind(frame_id).is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64) {
+                let Some(&(oldest, _)) = self.recent.front() else {
+                    return Invalidation::Ignored;
+                };
+                if !self
+                    .age
+                    .behind(frame_id)
+                    .is_some_and(|b| b > self.age.newest.wrapping_sub(oldest) as u64)
+                {
                     return Invalidation::Ignored;
                 }
                 0
@@ -485,7 +573,11 @@ impl ReferenceSlots {
                 slot.2 = true;
             }
         }
-        if self.has_reference() { Invalidation::Forget(lost_pts) } else { Invalidation::KeyFrame }
+        if self.has_reference() {
+            Invalidation::Forget(lost_pts)
+        } else {
+            Invalidation::KeyFrame
+        }
     }
 }
 
@@ -496,7 +588,10 @@ mod tests {
     #[test]
     fn a_frame_predicts_from_the_newest_one_the_client_still_has() {
         let mut w = ReferenceWindow::new(4);
-        assert!(!w.has_reference(), "an empty window has nothing to predict from");
+        assert!(
+            !w.has_reference(),
+            "an empty window has nothing to predict from"
+        );
         assert_eq!(w.record(10, true), Reference::None);
         assert_eq!(w.record(11, false), Reference::Frame(10));
         assert_eq!(w.record(12, false), Reference::Frame(11));
@@ -531,7 +626,11 @@ mod tests {
         w.record(100, true);
         w.record(101, false);
         assert_eq!(w.invalidate(99), Invalidation::Ignored);
-        assert_eq!(w.invalidate(105), Invalidation::Ignored, "a frame never sent is nothing to forget");
+        assert_eq!(
+            w.invalidate(105),
+            Invalidation::Ignored,
+            "a frame never sent is nothing to forget"
+        );
         assert!(w.has_reference());
     }
 
@@ -544,9 +643,17 @@ mod tests {
         assert_eq!(w.record(1, false), Reference::Frame(0));
         assert_eq!(w.invalidate(65535), Invalidation::Forget(1));
         assert_eq!(w.record(2, false), Reference::Frame(65534));
-        assert_eq!(w.invalidate(65533), Invalidation::Ignored, "before the key frame");
+        assert_eq!(
+            w.invalidate(65533),
+            Invalidation::Ignored,
+            "before the key frame"
+        );
         w.set_capacity(2);
-        assert_eq!(w.invalidate(65534), Invalidation::KeyFrame, "left the window, and everything held predicts through it");
+        assert_eq!(
+            w.invalidate(65534),
+            Invalidation::KeyFrame,
+            "left the window, and everything held predicts through it"
+        );
     }
 
     #[test]
@@ -560,19 +667,30 @@ mod tests {
         // Frame 16 carries frame_num 0 again; a loss that leaves it out cannot be predicted past.
         assert_eq!(w.invalidate(17), Invalidation::Forget(17));
         assert_eq!(w.record(18, false), Reference::Frame(16));
-        assert_eq!(w.invalidate(15), Invalidation::KeyFrame, "15, 16, and 18 go, and 16 is the wrap");
+        assert_eq!(
+            w.invalidate(15),
+            Invalidation::KeyFrame,
+            "15, 16, and 18 go, and 16 is the wrap"
+        );
         assert!(!w.has_reference());
         assert_eq!(w.record(19, true), Reference::None);
         assert_eq!(w.record(20, false), Reference::Frame(19));
-        assert_eq!(w.invalidate(20), Invalidation::Forget(20), "the count restarts at the key frame");
+        assert_eq!(
+            w.invalidate(20),
+            Invalidation::Forget(20),
+            "the count restarts at the key frame"
+        );
         let mut w = ReferenceWindow::new(8);
         w.record(0, true);
         for id in 1..=17u16 {
             w.record(id, false);
         }
-        assert_eq!(w.invalidate(16), Invalidation::Forget(16), "a codec without the counter predicts past it");
+        assert_eq!(
+            w.invalidate(16),
+            Invalidation::Forget(16),
+            "a codec without the counter predicts past it"
+        );
     }
-
 
     #[test]
     fn three_buffers_anchor_older_frames() {
@@ -590,14 +708,22 @@ mod tests {
         assert_eq!(s.invalidate(25), Invalidation::Forget(25));
         let plan = s.plan(false);
         assert_eq!(plan.predict_from, SlotRefresh::GOLDEN);
-        assert_eq!(plan.refresh, SlotRefresh(SlotRefresh::ALL), "a recovery frame re-anchors every buffer");
+        assert_eq!(
+            plan.refresh,
+            SlotRefresh(SlotRefresh::ALL),
+            "a recovery frame re-anchors every buffer"
+        );
         assert_eq!(s.record(31, plan), Reference::Frame(24));
         assert_eq!(s.record(32, s.plan(false)), Reference::Frame(31));
         // Losing the re-anchoring frame leaves nothing older than it.
         assert_eq!(s.invalidate(31), Invalidation::KeyFrame);
         assert!(!s.has_reference());
         assert_eq!(s.record(33, s.plan(false)), Reference::None);
-        assert_eq!(s.invalidate(3), Invalidation::Ignored, "before the key frame");
+        assert_eq!(
+            s.invalidate(3),
+            Invalidation::Ignored,
+            "before the key frame"
+        );
         assert_eq!(s.next_pts(), 34);
     }
 
@@ -614,8 +740,16 @@ mod tests {
         for (i, &r) in refreshes.iter().enumerate() {
             let frame = i + 1;
             let want = SlotRefresh::LAST
-                | if frame % 24 == 0 { SlotRefresh::GOLDEN } else { 0 }
-                | if frame % 24 == 12 { SlotRefresh::ALTREF } else { 0 };
+                | if frame % 24 == 0 {
+                    SlotRefresh::GOLDEN
+                } else {
+                    0
+                }
+                | if frame % 24 == 12 {
+                    SlotRefresh::ALTREF
+                } else {
+                    0
+                };
             assert_eq!(r, want, "frame {frame}");
         }
         // A loss of frames 37 to 48 takes the golden of frame 48; the altref of frame 36 is
@@ -623,14 +757,22 @@ mod tests {
         assert_eq!(s.invalidate(37), Invalidation::Forget(37));
         assert_eq!(s.plan(false).predict_from, SlotRefresh::ALTREF);
         assert_eq!(s.record(49, s.plan(false)), Reference::Frame(36));
-        assert_eq!(s.invalidate(100), Invalidation::Ignored, "a frame never sent is nothing to forget");
+        assert_eq!(
+            s.invalidate(100),
+            Invalidation::Ignored,
+            "a frame never sent is nothing to forget"
+        );
     }
 
     #[test]
     fn eight_buffers_keep_four_recent_frames_and_every_fourth() {
         let mut s = ReferenceSlots::vp9();
         let key = s.plan(true);
-        assert_eq!(key.refresh, SlotRefresh(0xff), "a key frame refreshes all eight");
+        assert_eq!(
+            key.refresh,
+            SlotRefresh(0xff),
+            "a key frame refreshes all eight"
+        );
         s.record(0, key);
         for id in 1..=19u16 {
             let plan = s.plan(false);
@@ -653,7 +795,10 @@ mod tests {
     /// holding a frame older than it.
     #[test]
     fn a_loss_up_to_twelve_frames_deep_finds_an_anchor() {
-        for make in [ReferenceSlots::new as fn() -> ReferenceSlots, ReferenceSlots::vp9] {
+        for make in [
+            ReferenceSlots::new as fn() -> ReferenceSlots,
+            ReferenceSlots::vp9,
+        ] {
             for sent in 1..=60u16 {
                 for depth in 1..=sent.min(12) {
                     let mut s = make();
@@ -663,9 +808,16 @@ mod tests {
                         s.record(id, plan);
                     }
                     let lost = sent + 1 - depth;
-                    assert!(matches!(s.invalidate(lost), Invalidation::Forget(_)), "{} buffers, frame {lost} of {sent} lost", s.count);
+                    assert!(
+                        matches!(s.invalidate(lost), Invalidation::Forget(_)),
+                        "{} buffers, frame {lost} of {sent} lost",
+                        s.count
+                    );
                     let plan = s.plan(false);
-                    assert!(s.slot(plan.predict_from).is_some_and(|(id, _, lost_too)| id < lost && !lost_too));
+                    assert!(
+                        s.slot(plan.predict_from)
+                            .is_some_and(|(id, _, lost_too)| id < lost && !lost_too)
+                    );
                 }
             }
         }
@@ -675,7 +827,10 @@ mod tests {
     fn the_set_held_leaves_out_what_a_client_lost() {
         let held = |w: &ReferenceWindow| w.held().filter(|f| !f.2).map(|f| f.1).collect::<Vec<_>>();
         let mut w = ReferenceWindow::new(4);
-        assert!(held(&w).is_empty(), "nothing is held before the first frame");
+        assert!(
+            held(&w).is_empty(),
+            "nothing is held before the first frame"
+        );
         w.record(10, true);
         w.record(11, false);
         w.record(12, false);
@@ -687,7 +842,11 @@ mod tests {
         assert_eq!(held(&w), [0, 3]);
         // A lost frame still takes its place in the window until it is let go.
         w.record(14, false);
-        assert_eq!(held(&w), [3, 4], "10 left the window of four, behind the two lost ones");
+        assert_eq!(
+            held(&w),
+            [3, 4],
+            "10 left the window of four, behind the two lost ones"
+        );
         assert_eq!(w.invalidate(10), Invalidation::KeyFrame);
         assert!(held(&w).is_empty(), "the next frame has to be a key frame");
         w.record(15, true);
@@ -711,14 +870,26 @@ mod tests {
         }
         assert_eq!(w.invalidate(id(39_998)), Invalidation::Forget(39_998));
         assert_eq!(s.invalidate(id(39_998)), Invalidation::Forget(39_998));
-        assert_eq!(w.invalidate(id(39_900)), Invalidation::KeyFrame, "sent since the key, and older than the window");
-        assert_eq!(w.invalidate(id(39_999) + 1), Invalidation::Ignored, "a frame the capture skipped was never sent");
+        assert_eq!(
+            w.invalidate(id(39_900)),
+            Invalidation::KeyFrame,
+            "sent since the key, and older than the window"
+        );
+        assert_eq!(
+            w.invalidate(id(39_999) + 1),
+            Invalidation::Ignored,
+            "a frame the capture skipped was never sent"
+        );
         let mut w = ReferenceWindow::new(8);
         w.record(id(0), false);
         for n in 1..=40_000u32 {
             w.record(id(n), n == 39_990);
         }
-        assert_eq!(w.invalidate(id(39_989)), Invalidation::Ignored, "before the key frame");
+        assert_eq!(
+            w.invalidate(id(39_989)),
+            Invalidation::Ignored,
+            "before the key frame"
+        );
         assert_eq!(w.invalidate(id(39_995)), Invalidation::Forget(39_995));
     }
 
@@ -737,7 +908,11 @@ mod tests {
     #[test]
     fn anchors_are_marked_every_twelfth_frame_into_the_older_one() {
         let mut w = ReferenceWindow::with_anchors(4, 2);
-        assert_eq!(w.plan_anchor(true), Some(0), "the key frame is the first anchor");
+        assert_eq!(
+            w.plan_anchor(true),
+            Some(0),
+            "the key frame is the first anchor"
+        );
         assert_eq!(w.record_marked(0, true, Some(0)), Reference::None);
         let mut marks = Vec::new();
         for id in 1..=48u16 {
@@ -745,7 +920,11 @@ mod tests {
             if let Some(slot) = slot {
                 marks.push((id, slot));
             }
-            assert_eq!(w.record_marked(id, false, slot), Reference::Frame(id - 1), "frame {id}");
+            assert_eq!(
+                w.record_marked(id, false, slot),
+                Reference::Frame(id - 1),
+                "frame {id}"
+            );
         }
         assert_eq!(marks, [(12, 1), (24, 0), (36, 1), (48, 0)]);
         // Two of the four frames are anchors, so two recent frames are held beside them.
@@ -768,7 +947,10 @@ mod tests {
         // Three recent frames beside the anchor; a loss before the anchor finds nothing older.
         assert_eq!(w.held().map(|f| f.0).collect::<Vec<_>>(), [96, 98, 99, 100]);
         assert_eq!(w.invalidate(97), Invalidation::Forget(97));
-        assert_eq!(w.record_marked(101, false, w.plan_anchor(false)), Reference::Frame(96));
+        assert_eq!(
+            w.record_marked(101, false, w.plan_anchor(false)),
+            Reference::Frame(96)
+        );
         assert_eq!(w.invalidate(95), Invalidation::KeyFrame);
     }
 
@@ -777,12 +959,21 @@ mod tests {
         // Held: anchors 0 and 12, recent frames 19 and 20.
         let mut w = anchored(20);
         assert_eq!(w.invalidate(16), Invalidation::Forget(16));
-        assert_eq!(w.record_marked(21, false, w.plan_anchor(false)), Reference::Frame(12));
-        assert_eq!(w.record_marked(22, false, w.plan_anchor(false)), Reference::Frame(21));
+        assert_eq!(
+            w.record_marked(21, false, w.plan_anchor(false)),
+            Reference::Frame(12)
+        );
+        assert_eq!(
+            w.record_marked(22, false, w.plan_anchor(false)),
+            Reference::Frame(21)
+        );
         // A loss before the newer anchor leaves the key frame.
         let mut w = anchored(20);
         assert_eq!(w.invalidate(10), Invalidation::Forget(10));
-        assert_eq!(w.record_marked(21, false, w.plan_anchor(false)), Reference::Frame(0));
+        assert_eq!(
+            w.record_marked(21, false, w.plan_anchor(false)),
+            Reference::Frame(0)
+        );
         // So does a loss of the newer anchor itself.
         let mut w = anchored(20);
         assert_eq!(w.invalidate(12), Invalidation::Forget(12));
@@ -791,7 +982,11 @@ mod tests {
         let mut w = anchored(20);
         assert_eq!(w.invalidate(0), Invalidation::KeyFrame);
         assert!(!w.has_reference());
-        assert_eq!(w.plan_anchor(false), Some(0), "the next frame is a key frame and the first anchor");
+        assert_eq!(
+            w.plan_anchor(false),
+            Some(0),
+            "the next frame is a key frame and the first anchor"
+        );
     }
 
     #[test]
@@ -799,7 +994,10 @@ mod tests {
         // Anchors 24 and 12; frame 24 is reported lost at frame 30.
         let mut w = anchored(30);
         assert_eq!(w.invalidate(24), Invalidation::Forget(24));
-        assert_eq!(w.record_marked(31, false, w.plan_anchor(false)), Reference::Frame(12));
+        assert_eq!(
+            w.record_marked(31, false, w.plan_anchor(false)),
+            Reference::Frame(12)
+        );
         for id in 32..=35u16 {
             w.record_marked(id, false, w.plan_anchor(false));
         }
@@ -818,12 +1016,28 @@ mod tests {
         }
         // Frame 16 carries frame_num 0 again.
         assert_eq!(w.invalidate(17), Invalidation::Forget(17));
-        assert_eq!(w.invalidate(15), Invalidation::KeyFrame, "15 to 17 go, and 16 is the wrap");
+        assert_eq!(
+            w.invalidate(15),
+            Invalidation::KeyFrame,
+            "15 to 17 go, and 16 is the wrap"
+        );
         let mut w = anchored(20);
-        assert_eq!(w.invalidate(40), Invalidation::Ignored, "a frame never sent is nothing to forget");
+        assert_eq!(
+            w.invalidate(40),
+            Invalidation::Ignored,
+            "a frame never sent is nothing to forget"
+        );
         w.record_marked(21, true, Some(0));
-        assert_eq!(w.invalidate(20), Invalidation::Ignored, "before the key frame");
-        assert_eq!(w.invalidate(21), Invalidation::KeyFrame, "the key frame was all there was");
+        assert_eq!(
+            w.invalidate(20),
+            Invalidation::Ignored,
+            "before the key frame"
+        );
+        assert_eq!(
+            w.invalidate(21),
+            Invalidation::KeyFrame,
+            "the key frame was all there was"
+        );
     }
 
     #[test]

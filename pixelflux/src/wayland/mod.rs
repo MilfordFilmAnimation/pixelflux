@@ -9,35 +9,35 @@
 //! `frontend` owns the compositor state machine, protocol handlers, and input routing.
 //! `cursor` resolves Wayland cursor shapes to PNG images for the Python callback.
 
-/// Headless Smithay compositor, protocol handlers, and input routing.
-pub mod frontend;
 /// Wayland cursor shape to PNG resolution and the cursor delivery worker.
 pub mod cursor;
-/// Seat keymap ownership: base layout plus batched overlay keysym binding.
-pub mod keymap;
-/// Virtual-keyboard client for typing into a nested app compositor's socket.
-pub mod vkclient;
-/// Shared plumbing for outbound Wayland client connections.
-pub mod wlclient;
 /// Data-control clipboard client bridging a nested app compositor's selection.
 pub mod dcclient;
-/// Output-management client scaling a nested app compositor's screens.
-pub mod outclient;
+/// libei (EIS) input injection over a portal session's `ConnectToEIS` socket.
+pub mod eiclient;
+/// Fake-input client delivering relative pointer motion into a nested KWin session.
+pub mod ficlient;
+/// Headless Smithay compositor, protocol handlers, and input routing.
+pub mod frontend;
+/// Host-capture mode: capture/inject as a client of an external compositor.
+pub mod host;
 /// KDE client growing, removing, and arranging a nested KWin session's screens.
 pub mod kdeclient;
 /// Generated bindings for the KDE output protocols vendored under `protocols/`.
 pub mod kdeproto;
-/// Fake-input client delivering relative pointer motion into a nested KWin session.
-pub mod ficlient;
-/// Host-capture mode: capture/inject as a client of an external compositor.
-pub mod host;
+/// Seat keymap ownership: base layout plus batched overlay keysym binding.
+pub mod keymap;
+/// Output-management client scaling a nested app compositor's screens.
+pub mod outclient;
 /// xdg-desktop-portal RemoteDesktop/ScreenCast session: streams and input for hosts without
 /// the privileged Wayland protocols.
 pub mod portal;
 /// PipeWire consumer turning a portal monitor stream into host frames.
 pub mod pwcapture;
-/// libei (EIS) input injection over a portal session's `ConnectToEIS` socket.
-pub mod eiclient;
+/// Virtual-keyboard client for typing into a nested app compositor's socket.
+pub mod vkclient;
+/// Shared plumbing for outbound Wayland client connections.
+pub mod wlclient;
 
 /// An enabled screen as clients see it: name, layout position, and the size of
 /// the mode it currently holds.

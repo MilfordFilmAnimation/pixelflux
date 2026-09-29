@@ -14,7 +14,7 @@
 //! through TurboJPEG, which pixelflux already uses for its own JPEG stripes. Decoding is
 //! software here; a hardware decoder only changes which `Decoder` is constructed.
 
-use std::ffi::{c_int, c_void, CStr};
+use std::ffi::{CStr, c_int, c_void};
 use std::ptr;
 
 use turbojpeg::{Decompressor, Image, PixelFormat, Subsamp, YuvImage};
@@ -24,7 +24,9 @@ use super::convert::{I420Buffer, I420View};
 /// Input codecs, by wire id. The ids are part of the Selkies WebSocket framing and are exported to
 /// Python as `VirtualCamera.CODEC_*`.
 pub use crate::encoders::codec::Codec;
-use crate::encoders::codec::{annexb_nals, av1_is_key, h264_frame_type, h265_frame_type, vp8_is_key, vp9_is_key, FRAME_KEY};
+use crate::encoders::codec::{
+    FRAME_KEY, annexb_nals, av1_is_key, h264_frame_type, h265_frame_type, vp8_is_key, vp9_is_key,
+};
 use crate::encoders::sps;
 
 /// Whether an encoded frame is a key frame, read from the bitstream itself: every codec here
@@ -71,10 +73,22 @@ pub struct ColorTags {
 }
 
 impl ColorTags {
-    pub const BT709_LIMITED: Self = Self { matrix: 1, full_range: false };
-    pub const BT709_FULL: Self = Self { matrix: 1, full_range: true };
-    pub const BT470BG_LIMITED: Self = Self { matrix: 5, full_range: false };
-    pub const BT470BG_FULL: Self = Self { matrix: 5, full_range: true };
+    pub const BT709_LIMITED: Self = Self {
+        matrix: 1,
+        full_range: false,
+    };
+    pub const BT709_FULL: Self = Self {
+        matrix: 1,
+        full_range: true,
+    };
+    pub const BT470BG_LIMITED: Self = Self {
+        matrix: 5,
+        full_range: false,
+    };
+    pub const BT470BG_FULL: Self = Self {
+        matrix: 5,
+        full_range: true,
+    };
 }
 
 /// The chroma sampling of a decoded picture.
@@ -130,7 +144,13 @@ impl VideoDecoder {
             Codec::H265 => Backend::Hevc(De265Backend::new()?),
             Codec::Jpeg => return Err("MJPEG decodes through the JPEG decoder".into()),
         };
-        Ok(Self { codec, backend, picture: None, converted: I420Buffer::new(2, 2), from_converted: false })
+        Ok(Self {
+            codec,
+            backend,
+            picture: None,
+            converted: I420Buffer::new(2, 2),
+            from_converted: false,
+        })
     }
 
     /// The color matrix and range the last decoded frame carries, as the bitstream declared
@@ -151,7 +171,8 @@ impl VideoDecoder {
         let (up, vp) = rest.split_at_mut(uv_len);
         let y = unsafe { p.plane(0, h, w) };
         for row in 0..h {
-            yp[row * w..row * w + w].copy_from_slice(&y[row * p.strides[0]..row * p.strides[0] + w]);
+            yp[row * w..row * w + w]
+                .copy_from_slice(&y[row * p.strides[0]..row * p.strides[0] + w]);
         }
         let (src_cw, src_ch) = match p.chroma {
             Chroma::C420 => (cw, ch),
@@ -166,13 +187,18 @@ impl VideoDecoder {
                     let sum: u32 = match p.chroma {
                         Chroma::C420 => src[row * s + x] as u32 * 4,
                         Chroma::C422 => {
-                            let (r0, r1) = ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
+                            let (r0, r1) =
+                                ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
                             (src[r0 * s + x] as u32 + src[r1 * s + x] as u32) * 2
                         }
                         Chroma::C444 => {
-                            let (r0, r1) = ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
+                            let (r0, r1) =
+                                ((2 * row).min(src_ch - 1), (2 * row + 1).min(src_ch - 1));
                             let (x0, x1) = (2 * x, (2 * x + 1).min(src_cw - 1));
-                            src[r0 * s + x0] as u32 + src[r0 * s + x1] as u32 + src[r1 * s + x0] as u32 + src[r1 * s + x1] as u32
+                            src[r0 * s + x0] as u32
+                                + src[r0 * s + x1] as u32
+                                + src[r1 * s + x0] as u32
+                                + src[r1 * s + x1] as u32
                         }
                     };
                     dst[row * cw + x] = ((sum + 2) / 4) as u8;
@@ -195,7 +221,9 @@ impl Decoder for VideoDecoder {
             Backend::Av1(b) => b.decode(data)?,
             Backend::Hevc(b) => b.decode(data)?,
         };
-        let Some(picture) = picture else { return Ok(false) };
+        let Some(picture) = picture else {
+            return Ok(false);
+        };
         self.from_converted = picture.chroma != Chroma::C420;
         self.picture = Some(picture);
         if self.from_converted {
@@ -256,8 +284,14 @@ impl H264Backend {
         if unsafe { source::APILoader::WelsCreateDecoder(&mut decoder) } != 0 {
             return Err("OpenH264 created no decoder".into());
         }
-        let me = Self { decoder, tags: None };
-        let initialize = me.api().and_then(|a| a.Initialize).ok_or("OpenH264 exposes no Initialize")?;
+        let me = Self {
+            decoder,
+            tags: None,
+        };
+        let initialize = me
+            .api()
+            .and_then(|a| a.Initialize)
+            .ok_or("OpenH264 exposes no Initialize")?;
         let mut param: SDecodingParam = unsafe { std::mem::zeroed() };
         param.eEcActiveIdc = ERROR_CON_SLICE_MV_COPY_CROSS_IDR;
         param.sVideoProperty.size = std::mem::size_of::<SVideoProperty>() as u32;
@@ -281,8 +315,14 @@ impl H264Backend {
         }
         if let Some(sps) = sps {
             self.tags = Some(match sps::read_color(sps) {
-                Some(signal) => ColorTags { matrix: signal.matrix, full_range: signal.full_range },
-                None => ColorTags { matrix: 2, full_range: false },
+                Some(signal) => ColorTags {
+                    matrix: signal.matrix,
+                    full_range: signal.full_range,
+                },
+                None => ColorTags {
+                    matrix: 2,
+                    full_range: false,
+                },
             });
         }
         // OpenH264 also decodes the scalable extension, and a prefix or extension NAL unit naming
@@ -301,8 +341,19 @@ impl H264Backend {
         };
         let mut dst: [*mut u8; 3] = [ptr::null_mut(); 3];
         let mut info: SBufferInfo = unsafe { std::mem::zeroed() };
-        let decode = self.api().and_then(|a| a.DecodeFrameNoDelay).ok_or_else(|| DecodeError::Fatal("OpenH264 exposes no DecodeFrameNoDelay".into()))?;
-        let mut state = unsafe { decode(self.decoder, data.as_ptr(), data.len() as c_int, dst.as_mut_ptr(), &mut info) };
+        let decode = self
+            .api()
+            .and_then(|a| a.DecodeFrameNoDelay)
+            .ok_or_else(|| DecodeError::Fatal("OpenH264 exposes no DecodeFrameNoDelay".into()))?;
+        let mut state = unsafe {
+            decode(
+                self.decoder,
+                data.as_ptr(),
+                data.len() as c_int,
+                dst.as_mut_ptr(),
+                &mut info,
+            )
+        };
         // A profile above baseline has the decoder hold each picture back until the next
         // one arrives, against reordering the stream never does: the held picture is this
         // access unit's, and flushing hands it over now. OpenH264 2.6 keeps a flushed
@@ -315,7 +366,9 @@ impl H264Backend {
         }
         if info.iBufferStatus != 1 || dst.iter().any(|p| p.is_null()) {
             if state != dsErrorFree {
-                return Err(DecodeError::Corrupt(format!("OpenH264 decoding state {state:#x}")));
+                return Err(DecodeError::Corrupt(format!(
+                    "OpenH264 decoding state {state:#x}"
+                )));
             }
             return Ok(None);
         }
@@ -325,7 +378,11 @@ impl H264Backend {
             height: system.iHeight as usize,
             chroma: Chroma::C420,
             planes: [dst[0], dst[1], dst[2]],
-            strides: [system.iStride[0] as usize, system.iStride[1] as usize, system.iStride[1] as usize],
+            strides: [
+                system.iStride[0] as usize,
+                system.iStride[1] as usize,
+                system.iStride[1] as usize,
+            ],
             tags: self.tags,
         }))
     }
@@ -386,39 +443,83 @@ fn vp8_color_bits(frame: &[u8]) -> Option<(bool, bool)> {
 impl VpxBackend {
     fn new(codec: Codec) -> Result<Self, String> {
         use codec_sys::vpx::*;
-        let iface = unsafe { if codec == Codec::Vp8 { vpx_codec_vp8_dx() } else { vpx_codec_vp9_dx() } };
+        let iface = unsafe {
+            if codec == Codec::Vp8 {
+                vpx_codec_vp8_dx()
+            } else {
+                vpx_codec_vp9_dx()
+            }
+        };
         let mut ctx: vpx_codec_ctx_t = unsafe { std::mem::zeroed() };
-        if unsafe { vpx_codec_dec_init_ver(&mut ctx, iface, ptr::null(), 0, VPX_DECODER_ABI_VERSION as c_int) } != VPX_CODEC_OK {
+        if unsafe {
+            vpx_codec_dec_init_ver(
+                &mut ctx,
+                iface,
+                ptr::null(),
+                0,
+                VPX_DECODER_ABI_VERSION as c_int,
+            )
+        } != VPX_CODEC_OK
+        {
             return Err(format!("libvpx opened no {} decoder", codec.name()));
         }
-        Ok(Self { codec, ctx, tags: None })
+        Ok(Self {
+            codec,
+            ctx,
+            tags: None,
+        })
     }
 
     fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, DecodeError> {
         use codec_sys::vpx::*;
-        if self.codec == Codec::Vp8 && let Some((reserved, clamping)) = vp8_color_bits(data) {
-            self.tags = Some(ColorTags { matrix: if reserved { 2 } else { 5 }, full_range: clamping });
+        if self.codec == Codec::Vp8
+            && let Some((reserved, clamping)) = vp8_color_bits(data)
+        {
+            self.tags = Some(ColorTags {
+                matrix: if reserved { 2 } else { 5 },
+                full_range: clamping,
+            });
         }
-        let res = unsafe { vpx_codec_decode(&mut self.ctx, data.as_ptr(), data.len() as u32, ptr::null_mut(), 0) };
+        let res = unsafe {
+            vpx_codec_decode(
+                &mut self.ctx,
+                data.as_ptr(),
+                data.len() as u32,
+                ptr::null_mut(),
+                0,
+            )
+        };
         if res != VPX_CODEC_OK {
-            let detail = unsafe { CStr::from_ptr(vpx_codec_err_to_string(res)) }.to_string_lossy().into_owned();
+            let detail = unsafe { CStr::from_ptr(vpx_codec_err_to_string(res)) }
+                .to_string_lossy()
+                .into_owned();
             return Err(DecodeError::Corrupt(detail));
         }
         let mut iter: vpx_codec_iter_t = ptr::null_mut();
         let mut image = None;
-        while let Some(next) = ptr::NonNull::new(unsafe { vpx_codec_get_frame(&mut self.ctx, &mut iter) }) {
+        while let Some(next) =
+            ptr::NonNull::new(unsafe { vpx_codec_get_frame(&mut self.ctx, &mut iter) })
+        {
             image = Some(next);
         }
         let Some(image) = image else { return Ok(None) };
         let img = unsafe { image.as_ref() };
         if img.bit_depth != 8 {
-            return Err(DecodeError::Fatal(format!("unsupported libvpx bit depth {}", img.bit_depth)));
+            return Err(DecodeError::Fatal(format!(
+                "unsupported libvpx bit depth {}",
+                img.bit_depth
+            )));
         }
         let chroma = match (img.x_chroma_shift, img.y_chroma_shift) {
             (1, 1) => Chroma::C420,
             (1, 0) => Chroma::C422,
             (0, 0) => Chroma::C444,
-            _ => return Err(DecodeError::Fatal(format!("unsupported libvpx image format {}", img.fmt))),
+            _ => {
+                return Err(DecodeError::Fatal(format!(
+                    "unsupported libvpx image format {}",
+                    img.fmt
+                )));
+            }
         };
         if self.codec == Codec::Vp9 {
             let matrix = match img.cs {
@@ -430,14 +531,21 @@ impl VpxBackend {
                 VPX_CS_SRGB => 0,
                 _ => 2,
             };
-            self.tags = Some(ColorTags { matrix, full_range: img.range == VPX_CR_FULL_RANGE });
+            self.tags = Some(ColorTags {
+                matrix,
+                full_range: img.range == VPX_CR_FULL_RANGE,
+            });
         }
         Ok(Some(Picture {
             width: img.d_w as usize,
             height: img.d_h as usize,
             chroma,
             planes: [img.planes[0], img.planes[1], img.planes[2]],
-            strides: [img.stride[0] as usize, img.stride[1] as usize, img.stride[2] as usize],
+            strides: [
+                img.stride[0] as usize,
+                img.stride[1] as usize,
+                img.stride[2] as usize,
+            ],
             tags: self.tags,
         }))
     }
@@ -473,7 +581,11 @@ impl Dav1dBackend {
         if unsafe { dav1d_open(&mut ctx, &settings) } != 0 || ctx.is_null() {
             return Err("dav1d opened no decoder".into());
         }
-        Ok(Self { ctx, picture: unsafe { std::mem::zeroed() }, held: false })
+        Ok(Self {
+            ctx,
+            picture: unsafe { std::mem::zeroed() },
+            held: false,
+        })
     }
 
     fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, DecodeError> {
@@ -490,7 +602,9 @@ impl Dav1dBackend {
             let sent = unsafe { dav1d_send_data(self.ctx, &mut input) };
             if sent < 0 && sent != AGAIN {
                 unsafe { dav1d_data_unref(&mut input) };
-                return Err(DecodeError::Corrupt(format!("dav1d refused the data ({sent})")));
+                return Err(DecodeError::Corrupt(format!(
+                    "dav1d refused the data ({sent})"
+                )));
             }
             loop {
                 let mut next: Dav1dPicture = unsafe { std::mem::zeroed() };
@@ -500,7 +614,9 @@ impl Dav1dBackend {
                 }
                 if res < 0 {
                     unsafe { dav1d_data_unref(&mut input) };
-                    return Err(DecodeError::Corrupt(format!("dav1d decoded no picture ({res})")));
+                    return Err(DecodeError::Corrupt(format!(
+                        "dav1d decoded no picture ({res})"
+                    )));
                 }
                 if self.held {
                     unsafe { dav1d_picture_unref(&mut self.picture) };
@@ -522,18 +638,36 @@ impl Dav1dBackend {
             DAV1D_PIXEL_LAYOUT_I420 => Chroma::C420,
             DAV1D_PIXEL_LAYOUT_I422 => Chroma::C422,
             DAV1D_PIXEL_LAYOUT_I444 => Chroma::C444,
-            other => return Err(DecodeError::Fatal(format!("unsupported dav1d layout {other}"))),
+            other => {
+                return Err(DecodeError::Fatal(format!(
+                    "unsupported dav1d layout {other}"
+                )));
+            }
         };
         if p.p.bpc != 8 {
-            return Err(DecodeError::Fatal(format!("unsupported dav1d bit depth {}", p.p.bpc)));
+            return Err(DecodeError::Fatal(format!(
+                "unsupported dav1d bit depth {}",
+                p.p.bpc
+            )));
         }
-        let tags = unsafe { p.seq_hdr.as_ref() }.map(|s| ColorTags { matrix: s.mtrx as u8, full_range: s.color_range != 0 });
+        let tags = unsafe { p.seq_hdr.as_ref() }.map(|s| ColorTags {
+            matrix: s.mtrx as u8,
+            full_range: s.color_range != 0,
+        });
         Ok(Some(Picture {
             width: p.p.w as usize,
             height: p.p.h as usize,
             chroma,
-            planes: [p.data[0] as *const u8, p.data[1] as *const u8, p.data[2] as *const u8],
-            strides: [p.stride[0] as usize, p.stride[1] as usize, p.stride[1] as usize],
+            planes: [
+                p.data[0] as *const u8,
+                p.data[1] as *const u8,
+                p.data[2] as *const u8,
+            ],
+            strides: [
+                p.stride[0] as usize,
+                p.stride[1] as usize,
+                p.stride[1] as usize,
+            ],
             tags,
         }))
     }
@@ -563,14 +697,27 @@ impl De265Backend {
             de265_set_parameter_bool(ctx, DE265_DECODER_PARAM_BOOL_SEI_CHECK_HASH, 0);
             de265_start_worker_threads(ctx, 2);
         }
-        Ok(Self { ctx, planes: Vec::new() })
+        Ok(Self {
+            ctx,
+            planes: Vec::new(),
+        })
     }
 
     fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>, DecodeError> {
         use codec_sys::de265::*;
-        let text = |err: de265_error| unsafe { CStr::from_ptr(de265_get_error_text(err)) }.to_string_lossy().into_owned();
+        let text = |err: de265_error| {
+            unsafe { CStr::from_ptr(de265_get_error_text(err)) }
+                .to_string_lossy()
+                .into_owned()
+        };
         unsafe {
-            let err = de265_push_data(self.ctx, data.as_ptr() as *const c_void, data.len() as c_int, 0, ptr::null_mut());
+            let err = de265_push_data(
+                self.ctx,
+                data.as_ptr() as *const c_void,
+                data.len() as c_int,
+                0,
+                ptr::null_mut(),
+            );
             if err != DE265_OK {
                 return Err(DecodeError::Corrupt(text(err)));
             }
@@ -598,7 +745,10 @@ impl De265Backend {
             if image.is_null() {
                 return Ok(None);
             }
-            let (w, h) = (de265_get_image_width(image, 0) as usize, de265_get_image_height(image, 0) as usize);
+            let (w, h) = (
+                de265_get_image_width(image, 0) as usize,
+                de265_get_image_height(image, 0) as usize,
+            );
             let format = de265_get_chroma_format(image);
             let chroma = if format == de265_chroma_420 {
                 Chroma::C420
@@ -607,7 +757,9 @@ impl De265Backend {
             } else if format == de265_chroma_444 {
                 Chroma::C444
             } else {
-                return Err(DecodeError::Fatal(format!("unsupported libde265 chroma format {format}")));
+                return Err(DecodeError::Fatal(format!(
+                    "unsupported libde265 chroma format {format}"
+                )));
             };
             if (0..3).any(|c| de265_get_bits_per_pixel(image, c) != 8) {
                 return Err(DecodeError::Fatal("unsupported libde265 bit depth".into()));
@@ -630,14 +782,22 @@ impl De265Backend {
                 let mut stride: c_int = 0;
                 let src = de265_get_image_plane(image, c, &mut stride);
                 for row in 0..rows {
-                    ptr::copy_nonoverlapping(src.add(row * stride as usize), dst.as_mut_ptr().add(row * cols), cols);
+                    ptr::copy_nonoverlapping(
+                        src.add(row * stride as usize),
+                        dst.as_mut_ptr().add(row * cols),
+                        cols,
+                    );
                 }
             }
             Ok(Some(Picture {
                 width: w,
                 height: h,
                 chroma,
-                planes: [self.planes.as_ptr(), self.planes[w * h..].as_ptr(), self.planes[w * h + cw * ch..].as_ptr()],
+                planes: [
+                    self.planes.as_ptr(),
+                    self.planes[w * h..].as_ptr(),
+                    self.planes[w * h + cw * ch..].as_ptr(),
+                ],
                 strides: [w, cw, cw],
                 tags,
             }))
@@ -672,18 +832,37 @@ impl Decoder for JpegDecoder {
 
     fn decode(&mut self, data: &[u8]) -> Result<bool, DecodeError> {
         self.have_frame = false;
-        let hdr = self.dec.read_header(data).map_err(|e| DecodeError::Corrupt(format!("jpeg header: {}", e)))?;
+        let hdr = self
+            .dec
+            .read_header(data)
+            .map_err(|e| DecodeError::Corrupt(format!("jpeg header: {}", e)))?;
         if hdr.width == 0 || hdr.height == 0 {
             return Err(DecodeError::Corrupt("empty jpeg".into()));
         }
         self.out.resize(hdr.width, hdr.height);
         if hdr.subsamp == Subsamp::Sub2x2 {
-            let img = YuvImage { pixels: &mut self.out.data[..], width: hdr.width, align: 1, height: hdr.height, subsamp: Subsamp::Sub2x2 };
-            self.dec.decompress_to_yuv(data, img).map_err(|e| DecodeError::Corrupt(format!("jpeg: {}", e)))?;
+            let img = YuvImage {
+                pixels: &mut self.out.data[..],
+                width: hdr.width,
+                align: 1,
+                height: hdr.height,
+                subsamp: Subsamp::Sub2x2,
+            };
+            self.dec
+                .decompress_to_yuv(data, img)
+                .map_err(|e| DecodeError::Corrupt(format!("jpeg: {}", e)))?;
         } else {
             self.rgb.resize(hdr.width * hdr.height * 4, 0);
-            let img = Image { pixels: &mut self.rgb[..], width: hdr.width, pitch: hdr.width * 4, height: hdr.height, format: PixelFormat::RGBA };
-            self.dec.decompress(data, img).map_err(|e| DecodeError::Corrupt(format!("jpeg: {}", e)))?;
+            let img = Image {
+                pixels: &mut self.rgb[..],
+                width: hdr.width,
+                pitch: hdr.width * 4,
+                height: hdr.height,
+                format: PixelFormat::RGBA,
+            };
+            self.dec
+                .decompress(data, img)
+                .map_err(|e| DecodeError::Corrupt(format!("jpeg: {}", e)))?;
             let y_len = self.out.y_len();
             let uv_len = self.out.uv_len();
             let cw = hdr.width.div_ceil(2);
@@ -699,8 +878,15 @@ impl Decoder for JpegDecoder {
                 width: hdr.width as u32,
                 height: hdr.height as u32,
             };
-            yuv::rgba_to_yuv420(&mut planar, &self.rgb, (hdr.width * 4) as u32, yuv::YuvRange::Full, yuv::YuvStandardMatrix::Bt601, yuv::YuvConversionMode::Fast)
-                .map_err(|e| DecodeError::Corrupt(format!("rgb->i420: {:?}", e)))?;
+            yuv::rgba_to_yuv420(
+                &mut planar,
+                &self.rgb,
+                (hdr.width * 4) as u32,
+                yuv::YuvRange::Full,
+                yuv::YuvStandardMatrix::Bt601,
+                yuv::YuvConversionMode::Fast,
+            )
+            .map_err(|e| DecodeError::Corrupt(format!("rgb->i420: {:?}", e)))?;
         }
         self.have_frame = true;
         Ok(true)
@@ -730,7 +916,9 @@ mod tests {
 
     #[test]
     fn h264_keyframe_sniff() {
-        let idr = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xCE, 0, 0, 1, 0x65, 0x88];
+        let idr = [
+            0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xCE, 0, 0, 1, 0x65, 0x88,
+        ];
         assert_eq!(sniff_keyframe(Codec::H264, &idr), Some(true));
         let p = [0, 0, 0, 1, 0x41, 0x9A];
         assert_eq!(sniff_keyframe(Codec::H264, &p), Some(false));
@@ -738,9 +926,18 @@ mod tests {
         assert_eq!(sniff_keyframe(Codec::Vp8, &[0x11, 0, 0]), Some(false));
         assert_eq!(sniff_keyframe(Codec::Vp9, &[0x82, 0x49, 0x83]), Some(true));
         assert_eq!(sniff_keyframe(Codec::Vp9, &[0x86, 0]), Some(false));
-        assert_eq!(sniff_keyframe(Codec::H265, &[0, 0, 1, 0x26, 0x01]), Some(true));
-        assert_eq!(sniff_keyframe(Codec::H265, &[0, 0, 1, 0x02, 0x01]), Some(false));
-        assert_eq!(sniff_keyframe(Codec::Av1, &[0x12, 0, 0x32, 0x01, 0x10]), Some(true));
+        assert_eq!(
+            sniff_keyframe(Codec::H265, &[0, 0, 1, 0x26, 0x01]),
+            Some(true)
+        );
+        assert_eq!(
+            sniff_keyframe(Codec::H265, &[0, 0, 1, 0x02, 0x01]),
+            Some(false)
+        );
+        assert_eq!(
+            sniff_keyframe(Codec::Av1, &[0x12, 0, 0x32, 0x01, 0x10]),
+            Some(true)
+        );
         assert_eq!(sniff_keyframe(Codec::Av1, &[0x32, 0x01, 0x30]), Some(false));
     }
 
@@ -754,7 +951,13 @@ mod tests {
         img.data[..yl].fill(200);
         img.data[yl..yl + ul].fill(100);
         img.data[yl + ul..].fill(150);
-        let src = YuvImage { pixels: &img.data[..], width: w, align: 1, height: h, subsamp: Subsamp::Sub2x2 };
+        let src = YuvImage {
+            pixels: &img.data[..],
+            width: w,
+            align: 1,
+            height: h,
+            subsamp: Subsamp::Sub2x2,
+        };
         let jpeg = turbojpeg::compress_yuv(src, 90).unwrap();
         let mut dec = JpegDecoder::new().unwrap();
         assert!(dec.decode(&jpeg).unwrap());
@@ -803,7 +1006,15 @@ mod tests {
                 let y = v.y[(h / 2) * v.y_stride + w / 2];
                 let u = v.u[(h / 4) * v.uv_stride + w / 4];
                 let vv = v.v[(h / 4) * v.uv_stride + w / 4];
-                assert!((y as i32 - 145).abs() <= 6 && (u as i32 - 54).abs() <= 6 && (vv as i32 - 34).abs() <= 6, "yuv {} {} {}", y, u, vv);
+                assert!(
+                    (y as i32 - 145).abs() <= 6
+                        && (u as i32 - 54).abs() <= 6
+                        && (vv as i32 - 34).abs() <= 6,
+                    "yuv {} {} {}",
+                    y,
+                    u,
+                    vv
+                );
             }
         }
         assert!(decoded >= 5, "decoded {} of 6 frames", decoded);
@@ -945,14 +1156,18 @@ mod tests {
     #[test]
     fn a_10_bit_vp9_frame_never_decodes_as_8_bit() {
         const KEY: [u8; 77] = [
-            0x92, 0x49, 0x83, 0x42, 0x00, 0x09, 0xf8, 0x07, 0x7b, 0x03, 0x1c, 0x12, 0x0e, 0x0c, 0x2c, 0x00, 0x00, 0x48,
-            0x47, 0xa8, 0x3d, 0x8f, 0xc8, 0xc0, 0x0c, 0x30, 0x00, 0x6b, 0x41, 0x13, 0x20, 0x95, 0xe2, 0x6a, 0x41, 0xdc,
-            0xb8, 0x00, 0x11, 0x50, 0x1b, 0x55, 0x82, 0x76, 0x20, 0x4f, 0xd6, 0xa9, 0x82, 0x10, 0xc5, 0xe9, 0x8f, 0xe0,
-            0xa3, 0xf7, 0xcd, 0x66, 0x00, 0xbc, 0xd3, 0xeb, 0x11, 0x3a, 0xb5, 0xed, 0x25, 0x7b, 0x25, 0x6d, 0xa9, 0x8e,
-            0xf7, 0xf7, 0xfa, 0x2b, 0x10,
+            0x92, 0x49, 0x83, 0x42, 0x00, 0x09, 0xf8, 0x07, 0x7b, 0x03, 0x1c, 0x12, 0x0e, 0x0c,
+            0x2c, 0x00, 0x00, 0x48, 0x47, 0xa8, 0x3d, 0x8f, 0xc8, 0xc0, 0x0c, 0x30, 0x00, 0x6b,
+            0x41, 0x13, 0x20, 0x95, 0xe2, 0x6a, 0x41, 0xdc, 0xb8, 0x00, 0x11, 0x50, 0x1b, 0x55,
+            0x82, 0x76, 0x20, 0x4f, 0xd6, 0xa9, 0x82, 0x10, 0xc5, 0xe9, 0x8f, 0xe0, 0xa3, 0xf7,
+            0xcd, 0x66, 0x00, 0xbc, 0xd3, 0xeb, 0x11, 0x3a, 0xb5, 0xed, 0x25, 0x7b, 0x25, 0x6d,
+            0xa9, 0x8e, 0xf7, 0xf7, 0xfa, 0x2b, 0x10,
         ];
         let mut d = VideoDecoder::new(Codec::Vp9).unwrap();
-        assert!(!matches!(d.decode(&KEY), Ok(true)), "a 10-bit picture was handed on as an 8-bit one");
+        assert!(
+            !matches!(d.decode(&KEY), Ok(true)),
+            "a 10-bit picture was handed on as an 8-bit one"
+        );
     }
 
     #[test]
@@ -963,6 +1178,10 @@ mod tests {
         key[10] = 0xff;
         key[11] = 0xff;
         assert_eq!(vp8_color_bits(&key), Some((true, true)));
-        assert_eq!(vp8_color_bits(&[0x11, 0, 0]), None, "an inter frame carries no header");
+        assert_eq!(
+            vp8_color_bits(&[0x11, 0, 0]),
+            None,
+            "an inter frame carries no header"
+        );
     }
 }

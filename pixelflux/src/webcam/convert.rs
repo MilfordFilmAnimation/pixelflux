@@ -9,7 +9,7 @@
 
 use yuv::{BufferStoreMut, YuvPackedImageMut, YuvPlanarImage};
 
-use super::ring::{V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_MJPEG};
+use super::ring::{V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_YUYV};
 
 /// Borrowed I420 planes with arbitrary strides.
 #[derive(Clone, Copy)]
@@ -67,7 +67,11 @@ pub struct I420Buffer {
 
 impl I420Buffer {
     pub fn new(width: usize, height: usize) -> Self {
-        let mut b = I420Buffer { width, height, data: Vec::new() };
+        let mut b = I420Buffer {
+            width,
+            height,
+            data: Vec::new(),
+        };
         b.resize(width, height);
         b
     }
@@ -75,7 +79,10 @@ impl I420Buffer {
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
-        self.data.resize(width * height + 2 * (width.div_ceil(2) * height.div_ceil(2)), 0);
+        self.data.resize(
+            width * height + 2 * (width.div_ceil(2) * height.div_ceil(2)),
+            0,
+        );
     }
 
     pub fn y_len(&self) -> usize {
@@ -127,21 +134,37 @@ fn range_lut() -> &'static RangeLut {
         for i in 0..256usize {
             luma[i] = (16 + (i * 219 + 127) / 255) as u8;
             let c = i as i32 - 128;
-            let scaled = if c >= 0 { (c * 224 + 127) / 255 } else { -((-c * 224 + 127) / 255) };
+            let scaled = if c >= 0 {
+                (c * 224 + 127) / 255
+            } else {
+                -((-c * 224 + 127) / 255)
+            };
             chroma[i] = (128 + scaled) as u8;
             let ly = i as i32 - 16;
             luma_up[i] = ((ly * 255 + 109) / 219).clamp(0, 255) as u8;
-            let up = if c >= 0 { (c * 255 + 112) / 224 } else { -((-c * 255 + 112) / 224) };
+            let up = if c >= 0 {
+                (c * 255 + 112) / 224
+            } else {
+                -((-c * 255 + 112) / 224)
+            };
             chroma_up[i] = (128 + up).clamp(0, 255) as u8;
         }
-        RangeLut { luma, chroma, luma_up, chroma_up }
+        RangeLut {
+            luma,
+            chroma,
+            luma_up,
+            chroma_up,
+        }
     })
 }
 
 /// The LUTs that move `src` samples into the device's range: full-range JPEG into a
 /// limited-range raw device, limited-range video into the full-range MJPEG device, or nothing
 /// when the two agree.
-fn range_luts(src_full: bool, dev: &DeviceFormat) -> (Option<&'static [u8; 256]>, Option<&'static [u8; 256]>) {
+fn range_luts(
+    src_full: bool,
+    dev: &DeviceFormat,
+) -> (Option<&'static [u8; 256]>, Option<&'static [u8; 256]>) {
     let lut = range_lut();
     match (src_full, dev.full_range()) {
         (true, false) => (Some(&lut.luma), Some(&lut.chroma)),
@@ -151,7 +174,15 @@ fn range_luts(src_full: bool, dev: &DeviceFormat) -> (Option<&'static [u8; 256]>
 }
 
 /// Copy a plane row by row, optionally through a range LUT.
-fn copy_plane(src: &[u8], src_stride: usize, width: usize, height: usize, dst: &mut [u8], dst_stride: usize, lut: Option<&[u8; 256]>) {
+fn copy_plane(
+    src: &[u8],
+    src_stride: usize,
+    width: usize,
+    height: usize,
+    dst: &mut [u8],
+    dst_stride: usize,
+    lut: Option<&[u8; 256]>,
+) {
     for row in 0..height {
         let s = &src[row * src_stride..row * src_stride + width];
         let d = &mut dst[row * dst_stride..row * dst_stride + width];
@@ -168,7 +199,13 @@ fn copy_plane(src: &[u8], src_stride: usize, width: usize, height: usize, dst: &
 
 /// Average 2x2 blocks: exact halving, used before bilinear when the ratio exceeds 2 so strong
 /// downscales do not alias.
-fn halve_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut Vec<u8>) -> (usize, usize) {
+fn halve_plane(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    sstride: usize,
+    dst: &mut Vec<u8>,
+) -> (usize, usize) {
     let dw = (sw / 2).max(1);
     let dh = (sh / 2).max(1);
     dst.resize(dw * dh, 0);
@@ -187,7 +224,16 @@ fn halve_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut Vec<u
 
 /// Separable bilinear resample of one plane (fixed point 16.16).
 #[allow(clippy::too_many_arguments)]
-fn bilinear_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut [u8], dw: usize, dh: usize, dstride: usize) {
+fn bilinear_plane(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    sstride: usize,
+    dst: &mut [u8],
+    dw: usize,
+    dh: usize,
+    dstride: usize,
+) {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return;
     }
@@ -197,7 +243,8 @@ fn bilinear_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut [u
     }
     let xs: Vec<(usize, usize, u32)> = (0..dw)
         .map(|x| {
-            let fx = ((x as u64 * 2 + 1) * sw as u64 * 65536 / (dw as u64 * 2)).saturating_sub(32768);
+            let fx =
+                ((x as u64 * 2 + 1) * sw as u64 * 65536 / (dw as u64 * 2)).saturating_sub(32768);
             let x0 = (fx >> 16) as usize;
             let frac = (fx & 0xFFFF) as u32;
             let x0 = x0.min(sw - 1);
@@ -225,14 +272,27 @@ fn bilinear_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut [u
 /// Resample a plane into `dst` (tightly packed `dw` x `dh`), halving first while the source is more
 /// than twice the destination in either dimension.
 #[allow(clippy::too_many_arguments)]
-fn scale_plane(src: &[u8], sw: usize, sh: usize, sstride: usize, dst: &mut [u8], dw: usize, dh: usize, tmp: &mut [Vec<u8>; 2]) {
+fn scale_plane(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    sstride: usize,
+    dst: &mut [u8],
+    dw: usize,
+    dh: usize,
+    tmp: &mut [Vec<u8>; 2],
+) {
     let mut cur: Option<(usize, usize, usize)> = None;
     let mut which = 0;
     let (mut w, mut h, mut stride) = (sw, sh, sstride);
     while w >= 2 * dw && h >= 2 * dh && w > 1 && h > 1 {
         let (nw, nh) = {
             let (a, b) = tmp.split_at_mut(1);
-            let (out, input) = if which == 0 { (&mut b[0], &a[0]) } else { (&mut a[0], &b[0]) };
+            let (out, input) = if which == 0 {
+                (&mut b[0], &a[0])
+            } else {
+                (&mut a[0], &b[0])
+            };
             match cur {
                 None => halve_plane(src, w, h, stride, out),
                 Some(_) => halve_plane(input, w, h, stride, out),
@@ -295,9 +355,36 @@ impl Normalizer {
         self.scaled[0].resize(dw * dh, 0);
         self.scaled[1].resize(cw * ch, 0);
         self.scaled[2].resize(cw * ch, 0);
-        scale_plane(src.y, src.width, src.height, src.y_stride, &mut self.scaled[0], dw, dh, &mut self.halves);
-        scale_plane(src.u, src.chroma_width(), src.chroma_height(), src.uv_stride, &mut self.scaled[1], cw, ch, &mut self.halves);
-        scale_plane(src.v, src.chroma_width(), src.chroma_height(), src.uv_stride, &mut self.scaled[2], cw, ch, &mut self.halves);
+        scale_plane(
+            src.y,
+            src.width,
+            src.height,
+            src.y_stride,
+            &mut self.scaled[0],
+            dw,
+            dh,
+            &mut self.halves,
+        );
+        scale_plane(
+            src.u,
+            src.chroma_width(),
+            src.chroma_height(),
+            src.uv_stride,
+            &mut self.scaled[1],
+            cw,
+            ch,
+            &mut self.halves,
+        );
+        scale_plane(
+            src.v,
+            src.chroma_width(),
+            src.chroma_height(),
+            src.uv_stride,
+            &mut self.scaled[2],
+            cw,
+            ch,
+            &mut self.halves,
+        );
         let (y_lut, c_lut) = range_luts(src.full_range, dev);
         let fw = self.fitted.width;
         let fcw = fw.div_ceil(2);
@@ -305,9 +392,33 @@ impl Normalizer {
         let uv_len = self.fitted.uv_len();
         let (yp, rest) = self.fitted.data.split_at_mut(y_len);
         let (up, vp) = rest.split_at_mut(uv_len);
-        copy_plane(&self.scaled[0], dw, dw, dh, &mut yp[oy * fw + ox..], fw, y_lut);
-        copy_plane(&self.scaled[1], cw, cw, ch, &mut up[(oy / 2) * fcw + ox / 2..], fcw, c_lut);
-        copy_plane(&self.scaled[2], cw, cw, ch, &mut vp[(oy / 2) * fcw + ox / 2..], fcw, c_lut);
+        copy_plane(
+            &self.scaled[0],
+            dw,
+            dw,
+            dh,
+            &mut yp[oy * fw + ox..],
+            fw,
+            y_lut,
+        );
+        copy_plane(
+            &self.scaled[1],
+            cw,
+            cw,
+            ch,
+            &mut up[(oy / 2) * fcw + ox / 2..],
+            fcw,
+            c_lut,
+        );
+        copy_plane(
+            &self.scaled[2],
+            cw,
+            cw,
+            ch,
+            &mut vp[(oy / 2) * fcw + ox / 2..],
+            fcw,
+            c_lut,
+        );
         let fitted = self.fitted.view(dev.full_range());
         emit(&fitted, dev, out);
         need
@@ -334,7 +445,10 @@ pub struct Orientation {
 }
 
 impl Orientation {
-    pub const UPRIGHT: Orientation = Orientation { quarter_turns: 0, hflip: false };
+    pub const UPRIGHT: Orientation = Orientation {
+        quarter_turns: 0,
+        hflip: false,
+    };
 
     pub fn is_upright(&self) -> bool {
         self.quarter_turns.is_multiple_of(4) && !self.hflip
@@ -376,7 +490,11 @@ fn orient_plane(src: &[u8], stride: usize, w: usize, h: usize, o: Orientation, d
             for dy in ty..(ty + ORIENT_TILE).min(dh) {
                 let row = &mut dst[dy * dw..(dy + 1) * dw];
                 for dx in tx..(tx + ORIENT_TILE).min(dw) {
-                    let (sx, sy) = if q == 1 { (dy, h - 1 - dx) } else { (w - 1 - dy, dx) };
+                    let (sx, sy) = if q == 1 {
+                        (dy, h - 1 - dx)
+                    } else {
+                        (w - 1 - dy, dx)
+                    };
                     row[if o.hflip { dw - 1 - dx } else { dx }] = src[sy * stride + sx];
                 }
             }
@@ -390,15 +508,33 @@ fn orient_plane(src: &[u8], stride: usize, w: usize, h: usize, o: Orientation, d
 /// independently.
 pub fn orient_i420(src: &I420View<'_>, o: Orientation, out: &mut I420Buffer) {
     let q = o.quarter_turns % 4;
-    let (dw, dh) = if q % 2 == 1 { (src.height, src.width) } else { (src.width, src.height) };
+    let (dw, dh) = if q % 2 == 1 {
+        (src.height, src.width)
+    } else {
+        (src.width, src.height)
+    };
     out.resize(dw, dh);
     let y_len = out.y_len();
     let uv_len = out.uv_len();
     let (yp, rest) = out.data.split_at_mut(y_len);
     let (up, vp) = rest.split_at_mut(uv_len);
     orient_plane(src.y, src.y_stride, src.width, src.height, o, yp);
-    orient_plane(src.u, src.uv_stride, src.chroma_width(), src.chroma_height(), o, up);
-    orient_plane(src.v, src.uv_stride, src.chroma_width(), src.chroma_height(), o, vp);
+    orient_plane(
+        src.u,
+        src.uv_stride,
+        src.chroma_width(),
+        src.chroma_height(),
+        o,
+        up,
+    );
+    orient_plane(
+        src.v,
+        src.uv_stride,
+        src.chroma_width(),
+        src.chroma_height(),
+        o,
+        vp,
+    );
 }
 
 /// Largest even-aligned size of `sw` x `sh` that fits into `dw` x `dh` preserving aspect, and the
@@ -482,7 +618,14 @@ fn emit(src: &I420View<'_>, dev: &DeviceFormat, out: &mut [u8]) {
     }
 }
 
-fn yuyv_scalar(src: &I420View<'_>, w: usize, h: usize, out: &mut [u8], y_lut: Option<&[u8; 256]>, c_lut: Option<&[u8; 256]>) {
+fn yuyv_scalar(
+    src: &I420View<'_>,
+    w: usize,
+    h: usize,
+    out: &mut [u8],
+    y_lut: Option<&[u8; 256]>,
+    c_lut: Option<&[u8; 256]>,
+) {
     let cw = w.div_ceil(2);
     for row in 0..h {
         let y = &src.y[row * src.y_stride..row * src.y_stride + w];
@@ -490,9 +633,15 @@ fn yuyv_scalar(src: &I420View<'_>, w: usize, h: usize, out: &mut [u8], y_lut: Op
         let v = &src.v[(row / 2) * src.uv_stride..(row / 2) * src.uv_stride + cw];
         let o = &mut out[row * w * 2..(row + 1) * w * 2];
         for x in 0..w {
-            let yy = match y_lut { Some(t) => t[y[x] as usize], None => y[x] };
+            let yy = match y_lut {
+                Some(t) => t[y[x] as usize],
+                None => y[x],
+            };
             let c = if x % 2 == 0 { u[x / 2] } else { v[x / 2] };
-            let cc = match c_lut { Some(t) => t[c as usize], None => c };
+            let cc = match c_lut {
+                Some(t) => t[c as usize],
+                None => c,
+            };
             o[2 * x] = yy;
             o[2 * x + 1] = cc;
         }
@@ -516,14 +665,25 @@ mod tests {
 
     #[test]
     fn mjpeg_device_takes_full_range_samples() {
-        let mjpeg = DeviceFormat { width: 4, height: 2, fourcc: V4L2_PIX_FMT_MJPEG };
-        let raw = DeviceFormat { width: 4, height: 2, fourcc: V4L2_PIX_FMT_YUV420 };
+        let mjpeg = DeviceFormat {
+            width: 4,
+            height: 2,
+            fourcc: V4L2_PIX_FMT_MJPEG,
+        };
+        let raw = DeviceFormat {
+            width: 4,
+            height: 2,
+            fourcc: V4L2_PIX_FMT_YUV420,
+        };
         let mut limited = I420Buffer::new(4, 2);
         limited.data[..8].fill(16);
         limited.data[8..].fill(128);
         let mut out = vec![0u8; mjpeg.frame_bytes()];
         let mut n = Normalizer::new();
-        assert_eq!(n.write_frame(&limited.view(false), &mjpeg, &mut out), mjpeg.frame_bytes());
+        assert_eq!(
+            n.write_frame(&limited.view(false), &mjpeg, &mut out),
+            mjpeg.frame_bytes()
+        );
         assert_eq!((out[0], out[8]), (0, 128));
         limited.data[..8].fill(235);
         n.write_frame(&limited.view(false), &mjpeg, &mut out);
@@ -534,7 +694,10 @@ mod tests {
         n.write_frame(&full.view(true), &mjpeg, &mut out);
         assert_eq!((out[0], out[8]), (200, 60));
         n.write_frame(&full.view(true), &raw, &mut out);
-        assert_eq!((out[0], out[8]), (range_lut().luma[200], range_lut().chroma[60]));
+        assert_eq!(
+            (out[0], out[8]),
+            (range_lut().luma[200], range_lut().chroma[60])
+        );
     }
 
     #[test]
@@ -551,7 +714,11 @@ mod tests {
     #[test]
     fn same_size_i420_is_a_plain_copy() {
         let src = solid(8, 4, 100, 60, 200);
-        let dev = DeviceFormat { width: 8, height: 4, fourcc: V4L2_PIX_FMT_YUV420 };
+        let dev = DeviceFormat {
+            width: 8,
+            height: 4,
+            fourcc: V4L2_PIX_FMT_YUV420,
+        };
         let mut out = vec![0u8; dev.frame_bytes() + 7];
         let n = Normalizer::new().write_frame(&src.view(false), &dev, &mut out);
         assert_eq!(n, 8 * 4 * 3 / 2);
@@ -561,7 +728,11 @@ mod tests {
     #[test]
     fn full_range_is_compressed_to_limited() {
         let src = solid(4, 2, 255, 0, 255);
-        let dev = DeviceFormat { width: 4, height: 2, fourcc: V4L2_PIX_FMT_YUV420 };
+        let dev = DeviceFormat {
+            width: 4,
+            height: 2,
+            fourcc: V4L2_PIX_FMT_YUV420,
+        };
         let mut out = vec![0u8; dev.frame_bytes()];
         Normalizer::new().write_frame(&src.view(true), &dev, &mut out);
         assert_eq!(out[0], 235);
@@ -575,14 +746,28 @@ mod tests {
     #[test]
     fn nv12_and_yuyv_interleave() {
         let src = solid(4, 2, 50, 60, 70);
-        let nv12 = DeviceFormat { width: 4, height: 2, fourcc: V4L2_PIX_FMT_NV12 };
+        let nv12 = DeviceFormat {
+            width: 4,
+            height: 2,
+            fourcc: V4L2_PIX_FMT_NV12,
+        };
         let mut out = vec![0u8; nv12.frame_bytes()];
-        assert_eq!(Normalizer::new().write_frame(&src.view(false), &nv12, &mut out), 12);
+        assert_eq!(
+            Normalizer::new().write_frame(&src.view(false), &nv12, &mut out),
+            12
+        );
         assert_eq!(&out[..8], &[50; 8]);
         assert_eq!(&out[8..], &[60, 70, 60, 70]);
-        let yuyv = DeviceFormat { width: 4, height: 2, fourcc: V4L2_PIX_FMT_YUYV };
+        let yuyv = DeviceFormat {
+            width: 4,
+            height: 2,
+            fourcc: V4L2_PIX_FMT_YUYV,
+        };
         let mut out = vec![0u8; yuyv.frame_bytes()];
-        assert_eq!(Normalizer::new().write_frame(&src.view(false), &yuyv, &mut out), 16);
+        assert_eq!(
+            Normalizer::new().write_frame(&src.view(false), &yuyv, &mut out),
+            16
+        );
         assert_eq!(&out[..8], &[50, 60, 50, 70, 50, 60, 50, 70]);
         let mut out2 = vec![0u8; yuyv.frame_bytes()];
         Normalizer::new().write_frame(&src.view(true), &yuyv, &mut out2);
@@ -593,10 +778,17 @@ mod tests {
     #[test]
     fn letterbox_scales_and_pads_black() {
         let src = solid(8, 8, 200, 90, 160);
-        let dev = DeviceFormat { width: 16, height: 8, fourcc: V4L2_PIX_FMT_YUV420 };
+        let dev = DeviceFormat {
+            width: 16,
+            height: 8,
+            fourcc: V4L2_PIX_FMT_YUV420,
+        };
         let mut out = vec![0u8; dev.frame_bytes()];
         let mut n = Normalizer::new();
-        assert_eq!(n.write_frame(&src.view(false), &dev, &mut out), dev.frame_bytes());
+        assert_eq!(
+            n.write_frame(&src.view(false), &dev, &mut out),
+            dev.frame_bytes()
+        );
         assert_eq!(out[0], 16);
         assert_eq!(out[4 + 3 * 16], 200);
         assert_eq!(out[15], 16);
@@ -604,7 +796,10 @@ mod tests {
         assert_eq!(out[uv], 128);
         assert_eq!(out[uv + 2 + 8 * 2], 90);
         assert_eq!(out[uv + 8 * 4 + 2 + 8 * 2], 160);
-        assert_eq!(n.write_frame(&src.view(false), &dev, &mut out), dev.frame_bytes());
+        assert_eq!(
+            n.write_frame(&src.view(false), &dev, &mut out),
+            dev.frame_bytes()
+        );
         assert_eq!(out[4 + 3 * 16], 200);
     }
 
@@ -616,17 +811,51 @@ mod tests {
         src.data[5] = 20;
         let mut out = I420Buffer::new(2, 2);
         let v = src.view(false);
-        orient_i420(&v, Orientation { quarter_turns: 1, hflip: false }, &mut out);
+        orient_i420(
+            &v,
+            Orientation {
+                quarter_turns: 1,
+                hflip: false,
+            },
+            &mut out,
+        );
         assert_eq!(&out.data[..4], &[3, 1, 4, 2]);
-        orient_i420(&v, Orientation { quarter_turns: 2, hflip: false }, &mut out);
+        orient_i420(
+            &v,
+            Orientation {
+                quarter_turns: 2,
+                hflip: false,
+            },
+            &mut out,
+        );
         assert_eq!(&out.data[..4], &[4, 3, 2, 1]);
-        orient_i420(&v, Orientation { quarter_turns: 3, hflip: false }, &mut out);
+        orient_i420(
+            &v,
+            Orientation {
+                quarter_turns: 3,
+                hflip: false,
+            },
+            &mut out,
+        );
         assert_eq!(&out.data[..4], &[2, 4, 1, 3]);
-        orient_i420(&v, Orientation { quarter_turns: 0, hflip: true }, &mut out);
+        orient_i420(
+            &v,
+            Orientation {
+                quarter_turns: 0,
+                hflip: true,
+            },
+            &mut out,
+        );
         assert_eq!(&out.data[..4], &[2, 1, 4, 3]);
         assert_eq!((out.data[4], out.data[5]), (10, 20));
         assert!(Orientation::UPRIGHT.is_upright());
-        assert!(!Orientation { quarter_turns: 2, hflip: false }.is_upright());
+        assert!(
+            !Orientation {
+                quarter_turns: 2,
+                hflip: false
+            }
+            .is_upright()
+        );
     }
 
     #[test]
@@ -641,14 +870,32 @@ mod tests {
         let v = src.view(false);
         let mut out = I420Buffer::new(2, 2);
         for (q, hflip) in [(1u8, false), (1, true), (3, false), (3, true)] {
-            orient_i420(&v, Orientation { quarter_turns: q, hflip }, &mut out);
+            orient_i420(
+                &v,
+                Orientation {
+                    quarter_turns: q,
+                    hflip,
+                },
+                &mut out,
+            );
             assert_eq!((out.width, out.height), (h, w));
             for dy in 0..w {
                 for dx in 0..h {
-                    let (sx, sy) = if q == 1 { (dy, h - 1 - dx) } else { (w - 1 - dy, dx) };
+                    let (sx, sy) = if q == 1 {
+                        (dy, h - 1 - dx)
+                    } else {
+                        (w - 1 - dy, dx)
+                    };
                     let dst_x = if hflip { h - 1 - dx } else { dx };
-                    assert_eq!(out.data[dy * h + dst_x], v.y[sy * v.y_stride + sx],
-                               "q={} hflip={} dx={} dy={}", q, hflip, dx, dy);
+                    assert_eq!(
+                        out.data[dy * h + dst_x],
+                        v.y[sy * v.y_stride + sx],
+                        "q={} hflip={} dx={} dy={}",
+                        q,
+                        hflip,
+                        dx,
+                        dy
+                    );
                 }
             }
         }
@@ -661,7 +908,14 @@ mod tests {
             *b = i as u8;
         }
         let mut out = I420Buffer::new(2, 2);
-        orient_i420(&src.view(true), Orientation { quarter_turns: 1, hflip: false }, &mut out);
+        orient_i420(
+            &src.view(true),
+            Orientation {
+                quarter_turns: 1,
+                hflip: false,
+            },
+            &mut out,
+        );
         assert_eq!((out.width, out.height), (2, 4));
         assert_eq!(&out.data[..8], &[4, 0, 5, 1, 6, 2, 7, 3]);
         assert!(out.view(true).full_range);
@@ -671,11 +925,22 @@ mod tests {
     fn downscale_averages() {
         let mut src = I420Buffer::new(64, 64);
         for (i, b) in src.data.iter_mut().enumerate() {
-            *b = if i < 64 * 64 { ((i % 64) * 4) as u8 } else { 128 };
+            *b = if i < 64 * 64 {
+                ((i % 64) * 4) as u8
+            } else {
+                128
+            };
         }
-        let dev = DeviceFormat { width: 16, height: 16, fourcc: V4L2_PIX_FMT_YUV420 };
+        let dev = DeviceFormat {
+            width: 16,
+            height: 16,
+            fourcc: V4L2_PIX_FMT_YUV420,
+        };
         let mut out = vec![0u8; dev.frame_bytes()];
-        assert_eq!(Normalizer::new().write_frame(&src.view(false), &dev, &mut out), dev.frame_bytes());
+        assert_eq!(
+            Normalizer::new().write_frame(&src.view(false), &dev, &mut out),
+            dev.frame_bytes()
+        );
         assert!(out[0] < out[8] && out[8] < out[15]);
         assert!(out[..256].iter().all(|v| *v <= 252));
         assert!(out[256..].iter().all(|v| *v == 128));

@@ -26,7 +26,7 @@
 //! session delivers the host's real cursor sprite to the cursor callback, and damage metadata
 //! so unchanged stripes are recognized.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, Ordering};
@@ -39,7 +39,7 @@ use smithay::utils::{Physical, Rectangle};
 
 use crate::pipewire::*;
 use crate::wayland::cursor::CursorJob;
-use crate::wayland::host::{now_ns, trace, FrameSink, HostCpuFrame, HostFrame};
+use crate::wayland::host::{FrameSink, HostCpuFrame, HostFrame, now_ns, trace};
 
 const FOURCC_XR24: u32 = 0x3432_5258;
 const FOURCC_AR24: u32 = 0x3432_5241;
@@ -91,8 +91,14 @@ impl PwCore {
             if thread_loop.is_null() {
                 return Err("pw_thread_loop_new failed".into());
             }
-            let mut this = PwCore { api, thread_loop, context: ptr::null_mut(), core: ptr::null_mut() };
-            this.context = (api.context_new)((api.thread_loop_get_loop)(thread_loop), ptr::null_mut(), 0);
+            let mut this = PwCore {
+                api,
+                thread_loop,
+                context: ptr::null_mut(),
+                core: ptr::null_mut(),
+            };
+            this.context =
+                (api.context_new)((api.thread_loop_get_loop)(thread_loop), ptr::null_mut(), 0);
             if this.context.is_null() {
                 return Err("pw_context_new failed".into());
             }
@@ -100,7 +106,12 @@ impl PwCore {
                 return Err("pw_thread_loop_start failed".into());
             }
             (api.thread_loop_lock)(thread_loop);
-            this.core = (api.context_connect_fd)(this.context, std::os::fd::IntoRawFd::into_raw_fd(fd), ptr::null_mut(), 0);
+            this.core = (api.context_connect_fd)(
+                this.context,
+                std::os::fd::IntoRawFd::into_raw_fd(fd),
+                ptr::null_mut(),
+                0,
+            );
             (api.thread_loop_unlock)(thread_loop);
             if this.core.is_null() {
                 return Err("pw_context_connect_fd failed".into());
@@ -195,22 +206,33 @@ unsafe impl Sync for Shared {}
 
 fn enum_format_pod(spa_format: u32, modifiers: Option<&[u64]>, cfg: &StreamConfig) -> Vec<u8> {
     object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_ENUM_FORMAT, |p| {
-        prop(p, SPA_FORMAT_MEDIA_TYPE, |v| pod_id(v, SPA_MEDIA_TYPE_VIDEO));
-        prop(p, SPA_FORMAT_MEDIA_SUBTYPE, |v| pod_id(v, SPA_MEDIA_SUBTYPE_RAW));
+        prop(p, SPA_FORMAT_MEDIA_TYPE, |v| {
+            pod_id(v, SPA_MEDIA_TYPE_VIDEO)
+        });
+        prop(p, SPA_FORMAT_MEDIA_SUBTYPE, |v| {
+            pod_id(v, SPA_MEDIA_SUBTYPE_RAW)
+        });
         prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| pod_id(v, spa_format));
         if let Some(mods) = modifiers {
             let mut values: Vec<i64> = Vec::with_capacity(mods.len() + 1);
             values.push(mods[0] as i64);
             values.extend(mods.iter().map(|m| *m as i64));
-            prop_flags(p, SPA_FORMAT_VIDEO_MODIFIER, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE, |v| {
-                pod_choice_long(v, SPA_CHOICE_ENUM, &values)
-            });
+            prop_flags(
+                p,
+                SPA_FORMAT_VIDEO_MODIFIER,
+                SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE,
+                |v| pod_choice_long(v, SPA_CHOICE_ENUM, &values),
+            );
         }
         let (w, h) = (cfg.expect.0.max(1) as u32, cfg.expect.1.max(1) as u32);
-        prop(p, SPA_FORMAT_VIDEO_SIZE, |v| pod_choice_rect(v, SPA_CHOICE_RANGE, &[(w, h), (1, 1), (16384, 16384)]));
+        prop(p, SPA_FORMAT_VIDEO_SIZE, |v| {
+            pod_choice_rect(v, SPA_CHOICE_RANGE, &[(w, h), (1, 1), (16384, 16384)])
+        });
         prop(p, SPA_FORMAT_VIDEO_FRAMERATE, |v| pod_frac(v, 0, 1));
         let fps = (cfg.fps_milli.max(1000), 1000);
-        prop(p, SPA_FORMAT_VIDEO_MAX_FRAMERATE, |v| pod_choice_frac(v, SPA_CHOICE_RANGE, &[fps, (1, 1), fps]));
+        prop(p, SPA_FORMAT_VIDEO_MAX_FRAMERATE, |v| {
+            pod_choice_frac(v, SPA_CHOICE_RANGE, &[fps, (1, 1), fps])
+        });
     })
 }
 
@@ -240,11 +262,20 @@ fn enum_format_pods(cfg: &StreamConfig) -> Vec<Vec<u8>> {
 /// modifier's presence, three to eight buffers so one can be held retained while another is
 /// in flight and the compositor still has one to fill, plus header, damage, and cursor metas.
 fn negotiated_params(n: &Negotiated, dmabuf: bool) -> Vec<Vec<u8>> {
-    let data_type = 1i32 << if dmabuf { SPA_DATA_DMABUF } else { SPA_DATA_MEMFD };
+    let data_type = 1i32
+        << if dmabuf {
+            SPA_DATA_DMABUF
+        } else {
+            SPA_DATA_MEMFD
+        };
     let buffers = object(SPA_TYPE_OBJECT_PARAM_BUFFERS, SPA_PARAM_BUFFERS, |p| {
-        prop(p, SPA_PARAM_BUFFERS_BUFFERS, |v| pod_choice_int(v, SPA_CHOICE_RANGE, &[4, 3, 8]));
+        prop(p, SPA_PARAM_BUFFERS_BUFFERS, |v| {
+            pod_choice_int(v, SPA_CHOICE_RANGE, &[4, 3, 8])
+        });
         prop(p, SPA_PARAM_BUFFERS_BLOCKS, |v| pod_int(v, 1));
-        prop(p, SPA_PARAM_BUFFERS_SIZE, |v| pod_int(v, n.width * n.height * 4));
+        prop(p, SPA_PARAM_BUFFERS_SIZE, |v| {
+            pod_int(v, n.width * n.height * 4)
+        });
         prop(p, SPA_PARAM_BUFFERS_STRIDE, |v| pod_int(v, n.width * 4));
         prop(p, SPA_PARAM_BUFFERS_ALIGN, |v| pod_int(v, 16));
         prop(p, SPA_PARAM_BUFFERS_DATATYPE, |v| pod_int(v, data_type));
@@ -253,13 +284,23 @@ fn negotiated_params(n: &Negotiated, dmabuf: bool) -> Vec<Vec<u8>> {
     vec![
         buffers,
         meta(SPA_META_HEADER, |v| pod_int(v, SPA_META_HEADER_SIZE as i32)),
-        meta(SPA_META_VIDEO_DAMAGE, |v| pod_choice_int(v, SPA_CHOICE_RANGE, &[4 * region, region, MAX_DAMAGE_REGIONS as i32 * region])),
+        meta(SPA_META_VIDEO_DAMAGE, |v| {
+            pod_choice_int(
+                v,
+                SPA_CHOICE_RANGE,
+                &[4 * region, region, MAX_DAMAGE_REGIONS as i32 * region],
+            )
+        }),
         meta(SPA_META_VIDEO_CROP, |v| pod_int(v, region)),
         meta(SPA_META_CURSOR, |v| {
             pod_choice_int(
                 v,
                 SPA_CHOICE_RANGE,
-                &[cursor_meta_size(64, 64) as i32, cursor_meta_size(1, 1) as i32, cursor_meta_size(MAX_CURSOR_EDGE, MAX_CURSOR_EDGE) as i32],
+                &[
+                    cursor_meta_size(64, 64) as i32,
+                    cursor_meta_size(1, 1) as i32,
+                    cursor_meta_size(MAX_CURSOR_EDGE, MAX_CURSOR_EDGE) as i32,
+                ],
             )
         }),
     ]
@@ -281,11 +322,23 @@ fn parse_format(pod: &[u8]) -> Option<Negotiated> {
     }
     let spa = find_prop(&props, SPA_FORMAT_VIDEO_FORMAT)?.as_u32()?;
     let (w, h) = find_prop(&props, SPA_FORMAT_VIDEO_SIZE)?.as_pair()?;
-    let modifier = find_prop(&props, SPA_FORMAT_VIDEO_MODIFIER).and_then(|p| p.as_i64()).map(|m| m as u64);
-    Some(Negotiated { width: w as i32, height: h as i32, fourcc: spa_to_fourcc(spa)?, modifier })
+    let modifier = find_prop(&props, SPA_FORMAT_VIDEO_MODIFIER)
+        .and_then(|p| p.as_i64())
+        .map(|m| m as u64);
+    Some(Negotiated {
+        width: w as i32,
+        height: h as i32,
+        fourcc: spa_to_fourcc(spa)?,
+        modifier,
+    })
 }
 
-unsafe extern "C" fn on_state_changed(data: *mut c_void, _old: c_int, new: c_int, error: *const c_char) {
+unsafe extern "C" fn on_state_changed(
+    data: *mut c_void,
+    _old: c_int,
+    new: c_int,
+    error: *const c_char,
+) {
     let shared = unsafe { &*(data as *const Shared) };
     shared.state.store(new, Ordering::Release);
     let name = match new {
@@ -295,8 +348,17 @@ unsafe extern "C" fn on_state_changed(data: *mut c_void, _old: c_int, new: c_int
         PW_STREAM_STATE_STREAMING => "streaming",
         _ => "connecting",
     };
-    let msg = if error.is_null() { String::new() } else { unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned() };
-    eprintln!("[HostCapture] output {}: portal stream {name} {msg}", shared.sink.index);
+    let msg = if error.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!(
+        "[HostCapture] output {}: portal stream {name} {msg}",
+        shared.sink.index
+    );
     if new == PW_STREAM_STATE_ERROR {
         shared.errored.store(true, Ordering::Release);
     }
@@ -313,7 +375,10 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
         return;
     }
     let Some(negotiated) = parse_format(unsafe { pod_bytes(param) }) else {
-        eprintln!("[HostCapture] output {}: unusable PipeWire format", shared.sink.index);
+        eprintln!(
+            "[HostCapture] output {}: unusable PipeWire format",
+            shared.sink.index
+        );
         return;
     };
     eprintln!(
@@ -341,11 +406,17 @@ unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const 
 unsafe extern "C" fn on_add_buffer(data: *mut c_void, b: *mut PwBuffer) {
     let shared = unsafe { &*(data as *const Shared) };
     let mut buffers = shared.buffers.lock().unwrap();
-    let idx = buffers.iter().position(|s| s.pw.is_null()).unwrap_or_else(|| {
-        buffers.push(BufferSlot::default());
-        buffers.len() - 1
-    });
-    buffers[idx] = BufferSlot { pw: b, ..BufferSlot::default() };
+    let idx = buffers
+        .iter()
+        .position(|s| s.pw.is_null())
+        .unwrap_or_else(|| {
+            buffers.push(BufferSlot::default());
+            buffers.len() - 1
+        });
+    buffers[idx] = BufferSlot {
+        pw: b,
+        ..BufferSlot::default()
+    };
     unsafe { (*b).user_data = idx as *mut c_void };
 }
 
@@ -367,13 +438,18 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
     if cursor.id == 0 {
         return;
     }
-    shared.cursor_pos.store(((cursor.x as i64) << 32) | (cursor.y as u32 as i64), Ordering::Relaxed);
+    shared.cursor_pos.store(
+        ((cursor.x as i64) << 32) | (cursor.y as u32 as i64),
+        Ordering::Relaxed,
+    );
     if cursor.bitmap_offset < std::mem::size_of::<SpaMetaCursor>() as u32
         || cursor.bitmap_offset + std::mem::size_of::<SpaMetaBitmap>() as u32 > meta.size
     {
         return;
     }
-    let bitmap = unsafe { &*((meta.data as *const u8).add(cursor.bitmap_offset as usize) as *const SpaMetaBitmap) };
+    let bitmap = unsafe {
+        &*((meta.data as *const u8).add(cursor.bitmap_offset as usize) as *const SpaMetaBitmap)
+    };
     if bitmap.format == 0 {
         return;
     }
@@ -385,20 +461,43 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
         return;
     }
     let stride = bitmap.stride.max(0) as usize;
-    let end = cursor.bitmap_offset as usize + bitmap.offset as usize + stride * (h as usize - 1) + w as usize * 4;
+    let end = cursor.bitmap_offset as usize
+        + bitmap.offset as usize
+        + stride * (h as usize - 1)
+        + w as usize * 4;
     if end > meta.size as usize || w > MAX_CURSOR_EDGE || h > MAX_CURSOR_EDGE {
         return;
     }
-    let pixels = unsafe { (meta.data as *const u8).add(cursor.bitmap_offset as usize + bitmap.offset as usize) };
+    let pixels = unsafe {
+        (meta.data as *const u8).add(cursor.bitmap_offset as usize + bitmap.offset as usize)
+    };
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h as usize {
         let row = unsafe { std::slice::from_raw_parts(pixels.add(y * stride), w as usize * 4) };
         for px in row.as_chunks::<4>().0 {
             let (r, g, b, a) = match bitmap.format {
-                SPA_VIDEO_FORMAT_BGRA | SPA_VIDEO_FORMAT_BGRX => (px[2], px[1], px[0], if bitmap.format == SPA_VIDEO_FORMAT_BGRX { 0xff } else { px[3] }),
+                SPA_VIDEO_FORMAT_BGRA | SPA_VIDEO_FORMAT_BGRX => (
+                    px[2],
+                    px[1],
+                    px[0],
+                    if bitmap.format == SPA_VIDEO_FORMAT_BGRX {
+                        0xff
+                    } else {
+                        px[3]
+                    },
+                ),
                 SPA_VIDEO_FORMAT_ARGB => (px[1], px[2], px[3], px[0]),
                 SPA_VIDEO_FORMAT_ABGR => (px[3], px[2], px[1], px[0]),
-                _ => (px[0], px[1], px[2], if bitmap.format == SPA_VIDEO_FORMAT_RGBX { 0xff } else { px[3] }),
+                _ => (
+                    px[0],
+                    px[1],
+                    px[2],
+                    if bitmap.format == SPA_VIDEO_FORMAT_RGBX {
+                        0xff
+                    } else {
+                        px[3]
+                    },
+                ),
             };
             rgba.extend_from_slice(&[r, g, b, a]);
         }
@@ -407,7 +506,10 @@ unsafe fn read_cursor(shared: &Shared, meta: &SpaMeta) {
     let previous = shared.cursor_hash.swap(hash, Ordering::Relaxed);
     if previous != hash {
         if previous == 0 {
-            eprintln!("[HostCapture] output {}: portal cursor sprites arrive ({w}x{h}, hotspot {},{})", shared.sink.index, cursor.hot_x, cursor.hot_y);
+            eprintln!(
+                "[HostCapture] output {}: portal cursor sprites arrive ({w}x{h}, hotspot {},{})",
+                shared.sink.index, cursor.hot_x, cursor.hot_y
+            );
         }
         let _ = shared.cursor_tx.send(CursorJob::Gles {
             hash,
@@ -434,7 +536,10 @@ unsafe fn read_damage(buf: &SpaBuffer, width: i32, height: i32) -> Vec<Rectangle
             if r.width == 0 || r.height == 0 {
                 break;
             }
-            damage.push(Rectangle::new((r.x, r.y).into(), (r.width as i32, r.height as i32).into()));
+            damage.push(Rectangle::new(
+                (r.x, r.y).into(),
+                (r.width as i32, r.height as i32).into(),
+            ));
         }
     }
     if damage.is_empty() {
@@ -473,13 +578,22 @@ unsafe fn import_slot(slot: &mut BufferSlot, buf: &SpaBuffer, n: &Negotiated) ->
                 return false;
             }
             let chunk = unsafe { &*d.chunk };
-            builder.add_plane(unsafe { OwnedFd::from_raw_fd(dup) }, chunk.offset, chunk.stride as u32);
+            builder.add_plane(
+                unsafe { OwnedFd::from_raw_fd(dup) },
+                chunk.offset,
+                chunk.stride as u32,
+            );
         }
         slot.dmabuf = builder.build();
         slot.dmabuf.is_some()
     } else if d0.type_ == SPA_DATA_MEMFD {
         let file = unsafe { std::fs::File::from_raw_fd(libc::dup(d0.fd as c_int)) };
-        let map = unsafe { memmap2::MmapOptions::new().offset(d0.mapoffset as u64).len(d0.maxsize as usize).map(&file) };
+        let map = unsafe {
+            memmap2::MmapOptions::new()
+                .offset(d0.mapoffset as u64)
+                .len(d0.maxsize as usize)
+                .map(&file)
+        };
         match map {
             Ok(m) => {
                 slot.cpu = Some(Arc::new(m));
@@ -501,7 +615,9 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     if stream.is_null() {
         return;
     }
-    let Some(n) = *shared.negotiated.lock().unwrap() else { return };
+    let Some(n) = *shared.negotiated.lock().unwrap() else {
+        return;
+    };
     // Take everything queued: cursor-only buffers go straight back, and of several frames
     // only the newest is worth publishing.
     let mut newest: Option<ptr::NonNull<PwBuffer>> = None;
@@ -551,7 +667,11 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
         let cpu = slot.cpu.as_ref().map(|map| HostCpuFrame {
             map: map.clone(),
             offset: chunk.offset as usize,
-            stride: if chunk.stride > 0 { chunk.stride as usize } else { n.width as usize * 4 },
+            stride: if chunk.stride > 0 {
+                chunk.stride as usize
+            } else {
+                n.width as usize * 4
+            },
             format: shm_code(n.fourcc),
         });
         slot.held = true;
@@ -575,11 +695,16 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
             n.width,
             n.height,
             frame.damage.len(),
-            header_pts(buf).map(|_| format!(", {age_ms:.1} ms after the compositor stamped it")).unwrap_or_default()
+            header_pts(buf)
+                .map(|_| format!(", {age_ms:.1} ms after the compositor stamped it"))
+                .unwrap_or_default()
         );
     }
     if trace() {
-        eprintln!("[HostTrace] output {} frame {count} process +{age_ms:.2}ms", shared.sink.index);
+        eprintln!(
+            "[HostTrace] output {} frame {count} process +{age_ms:.2}ms",
+            shared.sink.index
+        );
     }
     if !shared.sink.send(frame) {
         if let Some(slot) = shared.buffers.lock().unwrap().get_mut(idx) {
@@ -636,13 +761,23 @@ impl PwStream {
             process: Some(on_process),
             ..PwStreamEvents::empty()
         });
-        let mut this = PwStream { core: core.clone(), stream: ptr::null_mut(), shared, _events: events, _hook: Box::new([0u64; 8]) };
+        let mut this = PwStream {
+            core: core.clone(),
+            stream: ptr::null_mut(),
+            shared,
+            _events: events,
+            _hook: Box::new([0u64; 8]),
+        };
         let result = core.locked(|| unsafe {
             let props = (api.properties_new)(ptr::null::<c_char>());
             if props.is_null() {
                 return Err("pw_properties_new failed".to_string());
             }
-            for (k, v) in [(c"media.type", c"Video"), (c"media.category", c"Capture"), (c"media.role", c"Screen")] {
+            for (k, v) in [
+                (c"media.type", c"Video"),
+                (c"media.category", c"Capture"),
+                (c"media.role", c"Screen"),
+            ] {
                 (api.properties_set)(props, k.as_ptr(), v.as_ptr());
             }
             this.stream = (api.stream_new)(core.core, c"pixelflux host capture".as_ptr(), props);
@@ -650,9 +785,22 @@ impl PwStream {
                 return Err("pw_stream_new failed".to_string());
             }
             this.shared.stream.store(this.stream, Ordering::Release);
-            (api.stream_add_listener)(this.stream, this._hook.as_mut_ptr() as *mut c_void, &*this._events, Arc::as_ptr(&this.shared) as *mut c_void);
-            let mut ptrs: Vec<*const c_void> = pods.iter().map(|p| p.as_ptr() as *const c_void).collect();
-            let rc = (api.stream_connect)(this.stream, PW_DIRECTION_INPUT, node_id, PW_STREAM_FLAG_AUTOCONNECT, ptrs.as_mut_ptr(), ptrs.len() as u32);
+            (api.stream_add_listener)(
+                this.stream,
+                this._hook.as_mut_ptr() as *mut c_void,
+                &*this._events,
+                Arc::as_ptr(&this.shared) as *mut c_void,
+            );
+            let mut ptrs: Vec<*const c_void> =
+                pods.iter().map(|p| p.as_ptr() as *const c_void).collect();
+            let rc = (api.stream_connect)(
+                this.stream,
+                PW_DIRECTION_INPUT,
+                node_id,
+                PW_STREAM_FLAG_AUTOCONNECT,
+                ptrs.as_mut_ptr(),
+                ptrs.len() as u32,
+            );
             if rc < 0 {
                 return Err(format!("pw_stream_connect failed ({rc})"));
             }
@@ -674,8 +822,13 @@ impl PwStream {
             enum_format_pods(&cur)
         };
         self.core.locked(|| unsafe {
-            let mut ptrs: Vec<*const c_void> = pods.iter().map(|p| p.as_ptr() as *const c_void).collect();
-            (self.shared.api.stream_update_params)(self.stream, ptrs.as_mut_ptr(), ptrs.len() as u32);
+            let mut ptrs: Vec<*const c_void> =
+                pods.iter().map(|p| p.as_ptr() as *const c_void).collect();
+            (self.shared.api.stream_update_params)(
+                self.stream,
+                ptrs.as_mut_ptr(),
+                ptrs.len() as u32,
+            );
         });
         *self.shared.params.lock().unwrap() = pods;
     }
@@ -706,7 +859,8 @@ impl PwStream {
     }
 
     pub fn set_active(&self, active: bool) {
-        self.core.locked(|| unsafe { (self.shared.api.stream_set_active)(self.stream, active) });
+        self.core
+            .locked(|| unsafe { (self.shared.api.stream_set_active)(self.stream, active) });
     }
 
     pub fn negotiated(&self) -> Option<Negotiated> {
@@ -714,7 +868,8 @@ impl PwStream {
     }
 
     pub fn errored(&self) -> bool {
-        self.shared.errored.load(Ordering::Acquire) || self.shared.state.load(Ordering::Acquire) == PW_STREAM_STATE_ERROR
+        self.shared.errored.load(Ordering::Acquire)
+            || self.shared.state.load(Ordering::Acquire) == PW_STREAM_STATE_ERROR
     }
 
     pub fn frames(&self) -> u64 {
@@ -759,7 +914,10 @@ mod tests {
     fn cfg(zero_copy: bool) -> StreamConfig {
         StreamConfig {
             zero_copy,
-            dma_formats: vec![(FOURCC_XR24, vec![0x0300_0000_0000_0001, 0]), (FOURCC_AR24, vec![0])],
+            dma_formats: vec![
+                (FOURCC_XR24, vec![0x0300_0000_0000_0001, 0]),
+                (FOURCC_AR24, vec![0]),
+            ],
             fps_milli: 59_940,
             expect: (1920, 1080),
         }
@@ -774,11 +932,25 @@ mod tests {
         assert_eq!(pods.len(), 2 + SHM_FORMATS.len());
         let (_, _, first) = object_props(&pods[0]).unwrap();
         let modifier = find_prop(&first, SPA_FORMAT_VIDEO_MODIFIER).unwrap();
-        assert_eq!(modifier.flags, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+        assert_eq!(
+            modifier.flags,
+            SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE
+        );
         assert_eq!(modifier.as_i64(), Some(0x0300_0000_0000_0001));
-        assert_eq!(find_prop(&first, SPA_FORMAT_VIDEO_FORMAT).unwrap().as_u32(), Some(SPA_VIDEO_FORMAT_BGRX));
-        assert_eq!(find_prop(&first, SPA_FORMAT_VIDEO_SIZE).unwrap().as_pair(), Some((1920, 1080)));
-        assert_eq!(find_prop(&first, SPA_FORMAT_VIDEO_MAX_FRAMERATE).unwrap().as_pair(), Some((59_940, 1000)));
+        assert_eq!(
+            find_prop(&first, SPA_FORMAT_VIDEO_FORMAT).unwrap().as_u32(),
+            Some(SPA_VIDEO_FORMAT_BGRX)
+        );
+        assert_eq!(
+            find_prop(&first, SPA_FORMAT_VIDEO_SIZE).unwrap().as_pair(),
+            Some((1920, 1080))
+        );
+        assert_eq!(
+            find_prop(&first, SPA_FORMAT_VIDEO_MAX_FRAMERATE)
+                .unwrap()
+                .as_pair(),
+            Some((59_940, 1000))
+        );
         let (_, _, plain) = object_props(&pods[2]).unwrap();
         assert!(find_prop(&plain, SPA_FORMAT_VIDEO_MODIFIER).is_none());
         let cpu = enum_format_pods(&cfg(false));
@@ -794,28 +966,61 @@ mod tests {
     #[test]
     fn fixated_format_parses_and_selects_buffer_type() {
         let fixated = object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_FORMAT, |p| {
-            prop(p, SPA_FORMAT_MEDIA_TYPE, |v| pod_id(v, SPA_MEDIA_TYPE_VIDEO));
-            prop(p, SPA_FORMAT_MEDIA_SUBTYPE, |v| pod_id(v, SPA_MEDIA_SUBTYPE_RAW));
-            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| pod_id(v, SPA_VIDEO_FORMAT_BGRA));
-            prop(p, SPA_FORMAT_VIDEO_MODIFIER, |v| pod_choice_long(v, SPA_CHOICE_NONE, &[0x0300_0000_0000_0007]));
+            prop(p, SPA_FORMAT_MEDIA_TYPE, |v| {
+                pod_id(v, SPA_MEDIA_TYPE_VIDEO)
+            });
+            prop(p, SPA_FORMAT_MEDIA_SUBTYPE, |v| {
+                pod_id(v, SPA_MEDIA_SUBTYPE_RAW)
+            });
+            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| {
+                pod_id(v, SPA_VIDEO_FORMAT_BGRA)
+            });
+            prop(p, SPA_FORMAT_VIDEO_MODIFIER, |v| {
+                pod_choice_long(v, SPA_CHOICE_NONE, &[0x0300_0000_0000_0007])
+            });
             prop(p, SPA_FORMAT_VIDEO_SIZE, |v| pod_rect(v, 1280, 720));
             prop(p, SPA_FORMAT_VIDEO_FRAMERATE, |v| pod_frac(v, 0, 1));
         });
         let n = parse_format(&fixated).unwrap();
-        assert_eq!(n, Negotiated { width: 1280, height: 720, fourcc: FOURCC_AR24, modifier: Some(0x0300_0000_0000_0007) });
+        assert_eq!(
+            n,
+            Negotiated {
+                width: 1280,
+                height: 720,
+                fourcc: FOURCC_AR24,
+                modifier: Some(0x0300_0000_0000_0007)
+            }
+        );
         let params = negotiated_params(&n, true);
         let (_, _, buffers) = object_props(&params[0]).unwrap();
-        assert_eq!(find_prop(&buffers, SPA_PARAM_BUFFERS_DATATYPE).unwrap().as_u32(), Some(1 << SPA_DATA_DMABUF));
-        assert_eq!(find_prop(&buffers, SPA_PARAM_BUFFERS_BUFFERS).unwrap().as_u32(), Some(4));
+        assert_eq!(
+            find_prop(&buffers, SPA_PARAM_BUFFERS_DATATYPE)
+                .unwrap()
+                .as_u32(),
+            Some(1 << SPA_DATA_DMABUF)
+        );
+        assert_eq!(
+            find_prop(&buffers, SPA_PARAM_BUFFERS_BUFFERS)
+                .unwrap()
+                .as_u32(),
+            Some(4)
+        );
         let memfd = object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_FORMAT, |p| {
-            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| pod_id(v, SPA_VIDEO_FORMAT_RGBX));
+            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| {
+                pod_id(v, SPA_VIDEO_FORMAT_RGBX)
+            });
             prop(p, SPA_FORMAT_VIDEO_SIZE, |v| pod_rect(v, 640, 480));
         });
         let n = parse_format(&memfd).unwrap();
         assert_eq!((n.fourcc, n.modifier), (FOURCC_XB24, None));
         let params = negotiated_params(&n, false);
         let (_, _, buffers) = object_props(&params[0]).unwrap();
-        assert_eq!(find_prop(&buffers, SPA_PARAM_BUFFERS_DATATYPE).unwrap().as_u32(), Some(1 << SPA_DATA_MEMFD));
+        assert_eq!(
+            find_prop(&buffers, SPA_PARAM_BUFFERS_DATATYPE)
+                .unwrap()
+                .as_u32(),
+            Some(1 << SPA_DATA_MEMFD)
+        );
         assert_eq!(shm_code(FOURCC_XR24), 1);
         assert_eq!(shm_code(FOURCC_AR24), 0);
         assert_eq!(shm_code(FOURCC_XB24), FOURCC_XB24);

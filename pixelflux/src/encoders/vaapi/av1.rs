@@ -135,7 +135,10 @@ impl Arm {
         for rows in 1..=sb_rows.min(MAX_TILE_ROWS) {
             let rows_log2 = tile_log2(1, rows);
             let tile_height_sb = (sb_rows + (1 << rows_log2) - 1) >> rows_log2;
-            if sb_cols.div_ceil(tile_width_sb) == cols && sb_rows.div_ceil(tile_height_sb) == rows && tile_height_sb <= max_tile_area_sb / tile_width_sb {
+            if sb_cols.div_ceil(tile_width_sb) == cols
+                && sb_rows.div_ceil(tile_height_sb) == rows
+                && tile_height_sb <= max_tile_area_sb / tile_width_sb
+            {
                 return Ok(Tiles {
                     sb_cols,
                     sb_rows,
@@ -155,12 +158,20 @@ impl Arm {
 
     /// The stream's sequence: its level from the ladder, its tiling, and the sequence header
     /// OBU the key frames carry.
-    pub(super) fn configure(&mut self, n: &Negotiated, surface_width: u32, surface_height: u32) -> Result<(), String> {
+    pub(super) fn configure(
+        &mut self,
+        n: &Negotiated,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Result<(), String> {
         self.tiles = Self::tiles(n.width, n.height)?;
         let tiles = self.tiles.cols * self.tiles.rows;
         let max_tiles = unsafe { self.ext2.bits.max_tile_num_minus1() } + 1;
         if max_tiles > 1 && tiles > max_tiles {
-            return Err(format!("this VA-API driver encodes at most {max_tiles} AV1 tiles, and {}x{} needs {tiles}", n.width, n.height));
+            return Err(format!(
+                "this VA-API driver encodes at most {max_tiles} AV1 tiles, and {}x{} needs {tiles}",
+                n.width, n.height
+            ));
         }
         let _ = (surface_width, surface_height);
         self.level_idx = av1_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64);
@@ -243,10 +254,19 @@ impl Arm {
 
     /// The picture: its slot, references, order hint, the frame header OBU with the
     /// offsets a driver patches, and the one tile group.
-    pub(super) fn picture(&mut self, n: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    pub(super) fn picture(
+        &mut self,
+        n: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         let slot_of = |pts: u64| (pts % REFERENCE_FRAMES as u64) as u8;
         let cbr = n.rc_mode != VA_RC_CQP;
-        let qindex = if cbr { RATE_CONTROLLED_QINDEX } else { frame.qp.clamp(1, 255) };
+        let qindex = if cbr {
+            RATE_CONTROLLED_QINDEX
+        } else {
+            frame.qp.clamp(1, 255)
+        };
         let order_hint = ((frame.pts - frame.key_pts) & ((1 << ORDER_HINT_BITS) - 1)) as u32;
         let slot = slot_of(frame.pts);
         let reference_slot = match (frame.key, frame.reference) {
@@ -352,7 +372,9 @@ impl Arm {
         pic.order_hint = order_hint as u8;
         pic.refresh_frame_flags = if frame.key { 0xff } else { 1 << slot };
         unsafe {
-            pic.ref_frame_ctrl_l0.fields.set_search_idx0(if frame.key { 0 } else { 1 });
+            pic.ref_frame_ctrl_l0
+                .fields
+                .set_search_idx0(if frame.key { 0 } else { 1 });
             let f = &mut pic.picture_flags.bits;
             f.set_frame_type(if frame.key { 0 } else { 1 });
             f.set_error_resilient_mode(frame.key as u32);
@@ -368,21 +390,37 @@ impl Arm {
         let tile_width_sb = (t.sb_cols + (1 << t.cols_log2) - 1) >> t.cols_log2;
         let tile_height_sb = (t.sb_rows + (1 << t.rows_log2) - 1) >> t.rows_log2;
         for i in 0..t.cols as usize {
-            pic.width_in_sbs_minus_1[i] = (if i + 1 == t.cols as usize { t.sb_cols - (t.cols - 1) * tile_width_sb } else { tile_width_sb } - 1) as u16;
+            pic.width_in_sbs_minus_1[i] = (if i + 1 == t.cols as usize {
+                t.sb_cols - (t.cols - 1) * tile_width_sb
+            } else {
+                tile_width_sb
+            } - 1) as u16;
         }
         for i in 0..t.rows as usize {
-            pic.height_in_sbs_minus_1[i] = (if i + 1 == t.rows as usize { t.sb_rows - (t.rows - 1) * tile_height_sb } else { tile_height_sb } - 1) as u16;
+            pic.height_in_sbs_minus_1[i] = (if i + 1 == t.rows as usize {
+                t.sb_rows - (t.rows - 1) * tile_height_sb
+            } else {
+                tile_height_sb
+            } - 1) as u16;
         }
         pic.num_tile_groups_minus1 = 0;
         if cbr {
             pic.min_base_qindex = n.min_qp.clamp(1, 255) as u8;
-            pic.max_base_qindex = if n.max_qp > 0 { n.max_qp.clamp(1, 255) } else { 255 } as u8;
+            pic.max_base_qindex = if n.max_qp > 0 {
+                n.max_qp.clamp(1, 255)
+            } else {
+                255
+            } as u8;
             pic.bit_offset_qindex = qindex_offset;
             pic.bit_offset_loopfilter_params = loopfilter_offset;
             pic.bit_offset_cdef_params = cdef_offset;
             pic.size_in_bits_cdef_params = cdef_size;
             pic.size_in_bits_frame_hdr_obu = frame_header_bits;
-            pic.byte_offset_frame_hdr_obu_size = if frame.key { self.sequence_header.len() as u32 } else { 0 } + 1;
+            pic.byte_offset_frame_hdr_obu_size = if frame.key {
+                self.sequence_header.len() as u32
+            } else {
+                0
+            } + 1;
         }
         out.push(VAEncPictureParameterBufferType, &pic);
         if n.packed & VA_ENC_PACKED_HEADER_PICTURE != 0 {
@@ -411,7 +449,11 @@ mod tests {
         assert_eq!((uhd.cols, uhd.rows), (1, 1));
         let wide = Arm::tiles(5120, 1440).unwrap();
         assert_eq!((wide.cols, wide.cols_log2, wide.min_log2_cols), (2, 1, 1));
-        assert_eq!(Arm::tiles(64, 64).unwrap().max_log2_cols, 0, "a single superblock offers no tile columns to choose");
+        assert_eq!(
+            Arm::tiles(64, 64).unwrap().max_log2_cols,
+            0,
+            "a single superblock offers no tile columns to choose"
+        );
     }
 
     /// An OBU's size field takes the width the driver asked for, and the payload ends in
@@ -426,6 +468,10 @@ mod tests {
         assert_eq!(four, [0x0a, 0x81, 0x80, 0x80, 0x00, 0b1011_0000]);
         let mut w = BitWriter::new();
         w.u(8, 0xff);
-        assert_eq!(obu(OBU_FRAME_HEADER, &w, 1), [0x1a, 0x02, 0xff, 0x80], "an aligned payload takes a trailing byte");
+        assert_eq!(
+            obu(OBU_FRAME_HEADER, &w, 1),
+            [0x1a, 0x02, 0xff, 0x80],
+            "an aligned payload takes a trailing byte"
+        );
     }
 }

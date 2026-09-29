@@ -13,7 +13,7 @@
 
 use va_sys::*;
 
-use super::super::bits::{nal_unit, BitWriter};
+use super::super::bits::{BitWriter, nal_unit};
 use super::super::codec::h264_level;
 use super::{Buffers, Frame, Negotiated};
 
@@ -72,12 +72,19 @@ impl Arm {
     /// The stream's sequence: the level the ladder names at this geometry and rate, never
     /// below the one the decoded picture buffer was sized for, the picture size in macroblocks
     /// with the cropping that trims it, and the SPS and PPS the key frames carry.
-    pub(super) fn configure(&mut self, n: &Negotiated, surface_width: u32, surface_height: u32, slices: (u32, u32)) {
+    pub(super) fn configure(
+        &mut self,
+        n: &Negotiated,
+        surface_width: u32,
+        surface_height: u32,
+        slices: (u32, u32),
+    ) {
         self.mb_width = surface_width / 16;
         self.mb_height = surface_height / 16;
         self.slices = slices;
         self.dpb = n.dpb;
-        self.level_idc = h264_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64).max(n.dpb_level);
+        self.level_idc =
+            h264_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64).max(n.dpb_level);
         let profile_idc = if self.profile == VAProfileH264High {
             100
         } else if self.profile == VAProfileH264Main {
@@ -89,7 +96,12 @@ impl Arm {
 
         let mut w = BitWriter::new();
         w.u(8, profile_idc);
-        let (set1, set3, set4, set5) = (profile_idc != 100, false, profile_idc != 66, profile_idc != 66);
+        let (set1, set3, set4, set5) = (
+            profile_idc != 100,
+            false,
+            profile_idc != 66,
+            profile_idc != 66,
+        );
         w.flag(false);
         w.flag(set1);
         w.flag(false);
@@ -222,11 +234,18 @@ impl Arm {
     /// buffer as `ReferenceFrames`, and every slice with its packed header, whose reference
     /// list modification moves any reference but the newest held frame, which the default
     /// list puts first, to the front by its distance in frame numbers.
-    pub(super) fn picture(&mut self, n: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    pub(super) fn picture(
+        &mut self,
+        n: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         let frame_num = ((frame.pts - frame.key_pts) % self.frame_num_range() as u64) as u32;
         let poc = 2 * (frame.pts - frame.key_pts) as i32;
         if frame.key {
-            self.idr_pic_id = self.idr_pic_id.wrapping_add(if frame.pts == 0 { 0 } else { 1 });
+            self.idr_pic_id = self
+                .idr_pic_id
+                .wrapping_add(if frame.pts == 0 { 0 } else { 1 });
         }
         let picture = |pts: u64, surface: VASurfaceID| VAPictureH264 {
             picture_id: surface,
@@ -236,12 +255,31 @@ impl Arm {
             BottomFieldOrderCnt: 2 * (pts - frame.key_pts) as i32,
             va_reserved: [0; 4],
         };
-        let invalid = VAPictureH264 { picture_id: VA_INVALID_ID, frame_idx: 0, flags: VA_PICTURE_H264_INVALID, TopFieldOrderCnt: 0, BottomFieldOrderCnt: 0, va_reserved: [0; 4] };
+        let invalid = VAPictureH264 {
+            picture_id: VA_INVALID_ID,
+            frame_idx: 0,
+            flags: VA_PICTURE_H264_INVALID,
+            TopFieldOrderCnt: 0,
+            BottomFieldOrderCnt: 0,
+            va_reserved: [0; 4],
+        };
 
         let mut pic: VAEncPictureParameterBufferH264 = unsafe { std::mem::zeroed() };
-        pic.CurrPic = VAPictureH264 { picture_id: frame.recon, frame_idx: frame_num, flags: 0, TopFieldOrderCnt: poc, BottomFieldOrderCnt: poc, va_reserved: [0; 4] };
+        pic.CurrPic = VAPictureH264 {
+            picture_id: frame.recon,
+            frame_idx: frame_num,
+            flags: 0,
+            TopFieldOrderCnt: poc,
+            BottomFieldOrderCnt: poc,
+            va_reserved: [0; 4],
+        };
         pic.ReferenceFrames = [invalid; 16];
-        let mut held: Vec<(u64, VASurfaceID)> = frame.held.iter().filter(|h| !frame.key && h.0 >= frame.key_pts).map(|h| (h.0, h.1)).collect();
+        let mut held: Vec<(u64, VASurfaceID)> = frame
+            .held
+            .iter()
+            .filter(|h| !frame.key && h.0 >= frame.key_pts)
+            .map(|h| (h.0, h.1))
+            .collect();
         held.sort_by_key(|h| std::cmp::Reverse(h.0));
         for (i, &(pts, surface)) in held.iter().take(16).enumerate() {
             pic.ReferenceFrames[i] = picture(pts, surface);
@@ -262,12 +300,20 @@ impl Arm {
         if !frame.key && reference.is_none() {
             return Err("a predicted H.264 picture without a reference".into());
         }
-        let slice_qp = if n.rc_mode == VA_RC_CQP { frame.qp.clamp(MIN_QP, 51) } else { PIC_INIT_QP };
+        let slice_qp = if n.rc_mode == VA_RC_CQP {
+            frame.qp.clamp(MIN_QP, 51)
+        } else {
+            PIC_INIT_QP
+        };
         let slice_qp_delta = slice_qp as i32 - PIC_INIT_QP as i32;
         let (slice_count, slice_rows) = self.slices;
         for i in 0..slice_count {
             let first_row = i * slice_rows;
-            let rows = if i + 1 == slice_count { self.mb_height - first_row } else { slice_rows };
+            let rows = if i + 1 == slice_count {
+                self.mb_height - first_row
+            } else {
+                slice_rows
+            };
             let first_mb = first_row * self.mb_width;
             let mbs = rows * self.mb_width;
             let slice_type = if frame.key { 7 } else { 5 };
@@ -284,11 +330,13 @@ impl Arm {
                 if !frame.key {
                     w.flag(false);
                     let (ref_pts, _) = frame.reference.unwrap();
-                    let ref_frame_num = ((ref_pts - frame.key_pts) % self.frame_num_range() as u64) as u32;
+                    let ref_frame_num =
+                        ((ref_pts - frame.key_pts) % self.frame_num_range() as u64) as u32;
                     let newest = held.first().map(|h| h.0) == Some(ref_pts);
                     w.flag(!newest);
                     if !newest {
-                        let diff = (frame_num + self.frame_num_range() - ref_frame_num) % self.frame_num_range();
+                        let diff = (frame_num + self.frame_num_range() - ref_frame_num)
+                            % self.frame_num_range();
                         w.ue(0);
                         w.ue(diff - 1);
                         w.ue(3);

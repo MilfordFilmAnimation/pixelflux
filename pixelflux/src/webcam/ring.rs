@@ -56,28 +56,66 @@ pub struct RingFormat {
 
 impl RingFormat {
     /// Build the format for a raw fourcc at `width` x `height`; `None` for an unknown fourcc.
-    pub fn raw(fourcc_code: u32, width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<Self> {
+    pub fn raw(
+        fourcc_code: u32,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+    ) -> Option<Self> {
         let (bytesperline, sizeimage) = match fourcc_code {
-            V4L2_PIX_FMT_YUV420 | V4L2_PIX_FMT_NV12 => (width, width * height + 2 * (width.div_ceil(2) * height.div_ceil(2))),
+            V4L2_PIX_FMT_YUV420 | V4L2_PIX_FMT_NV12 => (
+                width,
+                width * height + 2 * (width.div_ceil(2) * height.div_ceil(2)),
+            ),
             V4L2_PIX_FMT_YUYV => (width * 2, width * 2 * height),
             _ => return None,
         };
-        Some(RingFormat { width, height, fourcc: fourcc_code, fps_num, fps_den, bytesperline, sizeimage })
+        Some(RingFormat {
+            width,
+            height,
+            fourcc: fourcc_code,
+            fps_num,
+            fps_den,
+            bytesperline,
+            sizeimage,
+        })
     }
 
     /// Build the format for the compressed fourcc (MJPEG): no stride, and a frame budget of two
     /// bytes per pixel, what UVC cameras advertise for MJPEG and far above what a browser's JPEG
     /// of a camera picture takes.
-    pub fn compressed(fourcc_code: u32, width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<Self> {
+    pub fn compressed(
+        fourcc_code: u32,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+    ) -> Option<Self> {
         if fourcc_code != V4L2_PIX_FMT_MJPEG {
             return None;
         }
-        Some(RingFormat { width, height, fourcc: fourcc_code, fps_num, fps_den, bytesperline: 0, sizeimage: width * height * 2 })
+        Some(RingFormat {
+            width,
+            height,
+            fourcc: fourcc_code,
+            fps_num,
+            fps_den,
+            bytesperline: 0,
+            sizeimage: width * height * 2,
+        })
     }
 
     /// Raw or compressed, by fourcc.
-    pub fn for_fourcc(fourcc_code: u32, width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<Self> {
-        Self::raw(fourcc_code, width, height, fps_num, fps_den).or_else(|| Self::compressed(fourcc_code, width, height, fps_num, fps_den))
+    pub fn for_fourcc(
+        fourcc_code: u32,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+    ) -> Option<Self> {
+        Self::raw(fourcc_code, width, height, fps_num, fps_den)
+            .or_else(|| Self::compressed(fourcc_code, width, height, fps_num, fps_den))
     }
 }
 
@@ -101,8 +139,9 @@ impl Ring {
         let slot_size = page_align(format.sizeimage.max(1) as usize);
         let total = DATA_OFFSET as usize + n_slots as usize * slot_size;
         let name = c"selkies-webcam-staging";
-        let raw: RawFd =
-            unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+        let raw: RawFd = unsafe {
+            libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+        };
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -115,7 +154,14 @@ impl Ring {
         // receives the descriptor under is the kernel's: no peer maps it writable or resizes it
         // (future-write sealing needs Linux 5.1; an older kernel keeps the size seals alone).
         let size_seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, size_seals | libc::F_SEAL_FUTURE_WRITE) } != 0 {
+        if unsafe {
+            libc::fcntl(
+                fd.as_raw_fd(),
+                libc::F_ADD_SEALS,
+                size_seals | libc::F_SEAL_FUTURE_WRITE,
+            )
+        } != 0
+        {
             unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, size_seals) };
         }
         let mut ring = Ring {
@@ -164,9 +210,20 @@ impl Ring {
     pub fn config_bytes(&self) -> [u8; CONFIG_SIZE] {
         let f = &self.format;
         let words = [
-            SHM_MAGIC, SHM_VERSION, f.width, f.height, f.fourcc, f.fps_num, f.fps_den,
-            self.n_slots, self.slot_size as u32, DATA_OFFSET, CTRL_OFFSET, CTRL_STRIDE,
-            f.bytesperline, f.sizeimage,
+            SHM_MAGIC,
+            SHM_VERSION,
+            f.width,
+            f.height,
+            f.fourcc,
+            f.fps_num,
+            f.fps_den,
+            self.n_slots,
+            self.slot_size as u32,
+            DATA_OFFSET,
+            CTRL_OFFSET,
+            CTRL_STRIDE,
+            f.bytesperline,
+            f.sizeimage,
         ];
         let mut out = [0u8; CONFIG_SIZE];
         for (i, w) in words.iter().enumerate() {
@@ -178,14 +235,26 @@ impl Ring {
     fn write_header(&mut self) {
         let f = self.format;
         let words = [
-            SHM_MAGIC, SHM_VERSION, f.width, f.height, f.fourcc, f.fps_num, f.fps_den,
-            self.n_slots, self.slot_size as u32, DATA_OFFSET, f.bytesperline, f.sizeimage,
-            0, 0,
+            SHM_MAGIC,
+            SHM_VERSION,
+            f.width,
+            f.height,
+            f.fourcc,
+            f.fps_num,
+            f.fps_den,
+            self.n_slots,
+            self.slot_size as u32,
+            DATA_OFFSET,
+            f.bytesperline,
+            f.sizeimage,
+            0,
+            0,
         ];
         for (i, w) in words.iter().enumerate() {
             self.map[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
         }
-        self.map[HDR_LATEST_FRAME_SEQ..HDR_LATEST_FRAME_SEQ + 8].copy_from_slice(&0u64.to_le_bytes());
+        self.map[HDR_LATEST_FRAME_SEQ..HDR_LATEST_FRAME_SEQ + 8]
+            .copy_from_slice(&0u64.to_le_bytes());
     }
 
     fn atomic_u32(&self, offset: usize) -> &AtomicU32 {
@@ -204,23 +273,30 @@ impl Ring {
         let data_off = DATA_OFFSET as usize + slot * self.slot_size;
         let seq = self.slot_seq[slot];
 
-        self.atomic_u32(ctrl).store(seq.wrapping_add(1), Ordering::Release);
+        self.atomic_u32(ctrl)
+            .store(seq.wrapping_add(1), Ordering::Release);
         let slot_size = self.slot_size;
         let used = fill(&mut self.map[data_off..data_off + slot_size]);
         if used == 0 || used > slot_size {
-            self.atomic_u32(ctrl).store(seq.wrapping_add(2), Ordering::Release);
+            self.atomic_u32(ctrl)
+                .store(seq.wrapping_add(2), Ordering::Release);
             self.slot_seq[slot] = seq.wrapping_add(2);
             return false;
         }
         self.frame_seq += 1;
-        self.atomic_u32(ctrl + 4).store(used as u32, Ordering::Relaxed);
-        self.atomic_u64(ctrl + 8).store(self.frame_seq, Ordering::Relaxed);
+        self.atomic_u32(ctrl + 4)
+            .store(used as u32, Ordering::Relaxed);
+        self.atomic_u64(ctrl + 8)
+            .store(self.frame_seq, Ordering::Relaxed);
         self.atomic_u64(ctrl + 16).store(ts_ns, Ordering::Relaxed);
-        self.atomic_u32(ctrl).store(seq.wrapping_add(2), Ordering::Release);
+        self.atomic_u32(ctrl)
+            .store(seq.wrapping_add(2), Ordering::Release);
         self.slot_seq[slot] = seq.wrapping_add(2);
 
-        self.atomic_u32(HDR_LATEST_SLOT).store(slot as u32, Ordering::Release);
-        self.atomic_u64(HDR_LATEST_FRAME_SEQ).store(self.frame_seq, Ordering::Release);
+        self.atomic_u32(HDR_LATEST_SLOT)
+            .store(slot as u32, Ordering::Release);
+        self.atomic_u64(HDR_LATEST_FRAME_SEQ)
+            .store(self.frame_seq, Ordering::Release);
         self.last_published = Some((slot, used));
         self.next_slot = (self.next_slot + 1) % self.n_slots;
         true
@@ -229,7 +305,9 @@ impl Ring {
     /// Read back a slot the way a client does, for tests: (bytesused, frame_seq, bytes).
     #[cfg(test)]
     pub fn read_latest(&self) -> Option<(u32, u64, Vec<u8>)> {
-        let fseq = self.atomic_u64(HDR_LATEST_FRAME_SEQ).load(Ordering::Acquire);
+        let fseq = self
+            .atomic_u64(HDR_LATEST_FRAME_SEQ)
+            .load(Ordering::Acquire);
         if fseq == 0 {
             return None;
         }
@@ -266,21 +344,37 @@ mod tests {
         let mut ring = Ring::new(f, 3).unwrap();
         let fd = ring.fd();
         let len = DATA_OFFSET as usize + ring.n_slots() as usize * ring.slot_size();
-        let map = |prot| unsafe { libc::mmap(std::ptr::null_mut(), len, prot, libc::MAP_SHARED, fd, 0) };
+        let map =
+            |prot| unsafe { libc::mmap(std::ptr::null_mut(), len, prot, libc::MAP_SHARED, fd, 0) };
         let ro = map(libc::PROT_READ);
         assert_ne!(ro, libc::MAP_FAILED, "a read-only map is what peers get");
         unsafe { libc::munmap(ro, len) };
         let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
-        assert!(seals & libc::F_SEAL_SHRINK != 0 && seals & libc::F_SEAL_GROW != 0, "seals {seals:#x}");
-        assert_ne!(unsafe { libc::ftruncate(fd, 4096) }, 0, "the size is sealed");
+        assert!(
+            seals & libc::F_SEAL_SHRINK != 0 && seals & libc::F_SEAL_GROW != 0,
+            "seals {seals:#x}"
+        );
+        assert_ne!(
+            unsafe { libc::ftruncate(fd, 4096) },
+            0,
+            "the size is sealed"
+        );
         if seals & libc::F_SEAL_FUTURE_WRITE != 0 {
-            assert_eq!(map(libc::PROT_READ | libc::PROT_WRITE), libc::MAP_FAILED, "no writable map");
+            assert_eq!(
+                map(libc::PROT_READ | libc::PROT_WRITE),
+                libc::MAP_FAILED,
+                "no writable map"
+            );
         }
         assert!(ring.publish(1, |dst| {
             dst[0] = 7;
             1
         }));
-        assert_eq!(ring.latest_frame().unwrap()[0], 7, "the writer's own mapping still writes");
+        assert_eq!(
+            ring.latest_frame().unwrap()[0],
+            7,
+            "the writer's own mapping still writes"
+        );
     }
 
     #[test]
@@ -298,7 +392,10 @@ mod tests {
         assert_eq!((w(5), w(6)), (30, 1));
         assert_eq!(w(7), 3);
         assert_eq!(w(8) as usize, page_align(f.sizeimage as usize));
-        assert_eq!((w(9), w(10), w(11)), (DATA_OFFSET, CTRL_OFFSET, CTRL_STRIDE));
+        assert_eq!(
+            (w(9), w(10), w(11)),
+            (DATA_OFFSET, CTRL_OFFSET, CTRL_STRIDE)
+        );
         assert_eq!((w(12), w(13)), (f.bytesperline, f.sizeimage));
         let hdr = |i: usize| u32::from_le_bytes(ring.map[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!((hdr(10), hdr(11)), (640, f.sizeimage));

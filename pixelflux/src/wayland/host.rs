@@ -53,12 +53,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use gbm::{BufferObjectFlags, Device as GbmDevice, Format as GbmFormat};
-use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Buffer as _;
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::input::keyboard::xkb;
 use smithay::utils::{Physical, Rectangle};
 use wayland_client::protocol::{wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool};
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
     ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
@@ -76,16 +76,16 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
     zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
 };
-use wayland_protocols_wlr::screencopy::v1::client::{
-    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
     zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
     zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::ZwlrOutputModeV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
@@ -97,8 +97,8 @@ use crate::wayland::eiclient::EiInjector;
 use crate::wayland::portal::{self, PortalSession, PortalStream};
 use crate::wayland::pwcapture::{PwCore, PwStream, StreamConfig};
 use crate::wayland::wlclient::{
-    bounded_roundtrip, drain_pipe, impl_sync_callback, memfd_with, socket_path, wait_readable2,
-    wake_pipe, wake_write, SyncState,
+    SyncState, bounded_roundtrip, drain_pipe, impl_sync_callback, memfd_with, socket_path,
+    wait_readable2, wake_pipe, wake_write,
 };
 
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
@@ -125,7 +125,10 @@ pub struct HostFrame {
 
 /// CLOCK_MONOTONIC in nanoseconds, the clock PipeWire stamps frames with.
 pub(crate) fn now_ns() -> i64 {
-    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
     t.tv_sec * 1_000_000_000 + t.tv_nsec
 }
@@ -179,7 +182,12 @@ fn convert_shm_row(src: &[u8], dst: &mut [u8], src_bpp: usize, swap_rb: bool) {
             dst[..n].copy_from_slice(&src[..n]);
         }
         (4, true) => {
-            for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<4>().0)
+            {
                 d[0] = s[2];
                 d[1] = s[1];
                 d[2] = s[0];
@@ -189,12 +197,22 @@ fn convert_shm_row(src: &[u8], dst: &mut [u8], src_bpp: usize, swap_rb: bool) {
         // One 4-byte store per pixel rather than four byte stores: measured ~1.7x on a
         // 3-byte source. The 4-byte arms above vectorize better as they stand.
         (_, true) => {
-            for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<3>().0)
+            {
                 d.copy_from_slice(&[s[2], s[1], s[0], 0xff]);
             }
         }
         (_, false) => {
-            for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<3>().0)
+            {
                 d.copy_from_slice(&[s[0], s[1], s[2], 0xff]);
             }
         }
@@ -254,7 +272,13 @@ struct Want {
 }
 
 enum ToHost {
-    Start { width: i32, height: i32, zero_copy: bool, paint_cursor: bool, fps_milli: u32 },
+    Start {
+        width: i32,
+        height: i32,
+        zero_copy: bool,
+        paint_cursor: bool,
+        fps_milli: u32,
+    },
     /// Slot return; `generation` guards against slots recycled by a renegotiation
     /// while the consumer still held the frame.
     Release { generation: u64, slot: usize },
@@ -358,14 +382,16 @@ struct CtrlState {
     sync_done: bool,
 }
 
-
 /// Natural sort key for an output name: text prefix plus trailing number, so
 /// HEADLESS-2 orders before HEADLESS-10. Unnamed outputs keep registry order
 /// after every named one.
 fn output_order_key(name: Option<&String>, registry_idx: usize) -> (bool, String, u64, usize) {
     match name {
         Some(n) => {
-            let digits_at = n.rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1).unwrap_or(0);
+            let digits_at = n
+                .rfind(|c: char| !c.is_ascii_digit())
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let num = n[digits_at..].parse::<u64>().unwrap_or(0);
             (false, n[..digits_at].to_string(), num, registry_idx)
         }
@@ -389,7 +415,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_seat" if state.seat.is_none() => {
                     state.seat = Some(registry.bind(name, 1, qh, ()))
@@ -408,9 +439,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CtrlState {
                     let out = registry.bind(name, version.min(4), qh, idx);
                     state.outputs.push((out, None));
                 }
-                "zwlr_output_manager_v1" => {
-                    state.output_mgr = Some(registry.bind(name, 1, qh, ()))
-                }
+                "zwlr_output_manager_v1" => state.output_mgr = Some(registry.bind(name, 1, qh, ())),
                 _ => {}
             }
         }
@@ -452,10 +481,14 @@ impl Dispatch<wl_output::WlOutput, usize> for CtrlState {
                     o.1 = Some(name);
                 }
             }
-            wl_output::Event::Mode { flags, width, height, .. }
-                if flags
-                    .into_result()
-                    .is_ok_and(|f| f.contains(wl_output::Mode::Current)) =>
+            wl_output::Event::Mode {
+                flags,
+                width,
+                height,
+                ..
+            } if flags
+                .into_result()
+                .is_ok_and(|f| f.contains(wl_output::Mode::Current)) =>
             {
                 let mut sizes = state.sizes.lock().unwrap();
                 if sizes.len() <= *idx {
@@ -592,7 +625,6 @@ struct CaptureState {
     ext_fail_reason: Option<ext_image_copy_capture_frame_v1::FailureReason>,
 }
 
-
 impl CaptureState {
     fn reset_frame(&mut self) {
         self.announce_dmabuf = None;
@@ -622,7 +654,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CaptureState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "zwp_linux_dmabuf_v1" if version >= 3 => {
@@ -714,11 +751,15 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for CaptureState {
     ) {
         use ext_image_copy_capture_frame_v1::Event;
         match event {
-            Event::Damage { x, y, width, height } => {
-                state.damage.push(Rectangle::new(
-                    (x, y).into(),
-                    (width, height).into(),
-                ));
+            Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                state
+                    .damage
+                    .push(Rectangle::new((x, y).into(), (width, height).into()));
             }
             Event::Ready => state.ready = true,
             Event::Failed { reason } => {
@@ -783,15 +824,27 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
     ) {
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer {
-                format: WEnum::Value(f), width, height, stride,
+                format: WEnum::Value(f),
+                width,
+                height,
+                stride,
             } => {
                 state.announce_shm = Some((f as u32, width as i32, height as i32, stride as i32));
             }
-            zwlr_screencopy_frame_v1::Event::LinuxDmabuf { format, width, height } => {
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => {
                 state.announce_dmabuf = Some((format, width as i32, height as i32));
             }
             zwlr_screencopy_frame_v1::Event::BufferDone => state.buffer_done = true,
-            zwlr_screencopy_frame_v1::Event::Damage { x, y, width, height } => {
+            zwlr_screencopy_frame_v1::Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 state.damage.push(Rectangle::new(
                     (x as i32, y as i32).into(),
                     (width as i32, height as i32).into(),
@@ -925,7 +978,11 @@ impl HostKeyboardState {
     fn base_keysym(&self, xkb_keycode: u32) -> Option<u32> {
         let state = self.state.as_ref()?;
         let layout = state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
-        let sym = state.get_keymap().key_get_syms_by_level(xkb::Keycode::new(xkb_keycode), layout, 0).first()?.raw();
+        let sym = state
+            .get_keymap()
+            .key_get_syms_by_level(xkb::Keycode::new(xkb_keycode), layout, 0)
+            .first()?
+            .raw();
         (sym != 0).then_some(sym)
     }
 
@@ -986,13 +1043,24 @@ impl HostSession {
         let mut state = CtrlState::default();
         bounded_roundtrip(&conn, &mut queue, &mut state)?;
 
-        let seat = state.seat.clone().ok_or("host compositor advertises no wl_seat")?;
+        let seat = state
+            .seat
+            .clone()
+            .ok_or("host compositor advertises no wl_seat")?;
         if state.outputs.is_empty() {
             return Err("host compositor has no wl_output".into());
         }
-        let native_capture = state.has_screencopy || (state.has_ext_capture && state.has_ext_source);
-        let portal_devices = if state.vk_mgr.is_none() { portal::DEVICE_KEYBOARD } else { 0 }
-            | if state.vptr_mgr.is_none() { portal::DEVICE_POINTER } else { 0 };
+        let native_capture =
+            state.has_screencopy || (state.has_ext_capture && state.has_ext_source);
+        let portal_devices = if state.vk_mgr.is_none() {
+            portal::DEVICE_KEYBOARD
+        } else {
+            0
+        } | if state.vptr_mgr.is_none() {
+            portal::DEVICE_POINTER
+        } else {
+            0
+        };
         let portal = if !native_capture || portal_devices != 0 {
             match PortalSession::probe() {
                 Ok(()) => Some(PortalCtl::spawn(!native_capture, portal_devices)),
@@ -1007,7 +1075,9 @@ impl HostSession {
             None
         };
         if !native_capture {
-            println!("[HostCapture] host offers no capture protocol; frames come through the xdg-desktop-portal ScreenCast.");
+            println!(
+                "[HostCapture] host offers no capture protocol; frames come through the xdg-desktop-portal ScreenCast."
+            );
         }
 
         let base_keymap = crate::wayland::vkclient::us_base_text();
@@ -1027,7 +1097,11 @@ impl HostSession {
             None => {
                 eprintln!(
                     "[HostCapture] no zwp_virtual_keyboard_manager_v1: keyboard {}.",
-                    if portal.is_some() { "goes through the portal by keysym" } else { "injection disabled" }
+                    if portal.is_some() {
+                        "goes through the portal by keysym"
+                    } else {
+                        "injection disabled"
+                    }
                 );
                 None
             }
@@ -1037,7 +1111,11 @@ impl HostSession {
             None => {
                 eprintln!(
                     "[HostCapture] no zwlr_virtual_pointer_manager_v1: pointer {}.",
-                    if portal.is_some() { "goes through the portal" } else { "injection disabled" }
+                    if portal.is_some() {
+                        "goes through the portal"
+                    } else {
+                        "injection disabled"
+                    }
                 );
                 None
             }
@@ -1092,14 +1170,25 @@ impl HostSession {
             let gbm_path = gbm_path.clone();
             let alive = alive.clone();
             let portal_ctl = portal.clone().filter(|_| !native_capture);
-            let (dma_formats, cursor_tx, geoms) = (dma_formats.clone(), cursor_tx.clone(), geoms.clone());
+            let (dma_formats, cursor_tx, geoms) =
+                (dma_formats.clone(), cursor_tx.clone(), geoms.clone());
             std::thread::Builder::new()
                 .name(format!("pf-host-cap{i}"))
                 .spawn(move || {
                     crate::boost_thread_priority(-10);
                     let outcome = match portal_ctl {
-                        Some(ctl) => portal_capture_loop(i, ctl, from_main, sink, cursor_tx, dma_formats, geoms),
-                        None => capture_loop(&display, i, expect, gbm_path, from_main, wake_rd, sink),
+                        Some(ctl) => portal_capture_loop(
+                            i,
+                            ctl,
+                            from_main,
+                            sink,
+                            cursor_tx,
+                            dma_formats,
+                            geoms,
+                        ),
+                        None => {
+                            capture_loop(&display, i, expect, gbm_path, from_main, wake_rd, sink)
+                        }
                     };
                     if let Err(e) = outcome {
                         eprintln!("[HostCapture] output {i} capture ended: {e}");
@@ -1141,8 +1230,13 @@ impl HostSession {
 
         let layout = Mutex::new(std::collections::BTreeMap::new());
         let mut keyboard = HostKeyboardState::default();
-        let has_keyboard = vk.is_some() || portal_devices & portal::DEVICE_KEYBOARD != 0 && portal.is_some();
-        if has_keyboard && base_keymap.and_then(|text| keyboard.set_keymap(text)).is_none() {
+        let has_keyboard =
+            vk.is_some() || portal_devices & portal::DEVICE_KEYBOARD != 0 && portal.is_some();
+        if has_keyboard
+            && base_keymap
+                .and_then(|text| keyboard.set_keymap(text))
+                .is_none()
+        {
             eprintln!(
                 "[HostCapture] base keymap unavailable: keys are dropped until selkies uploads its keymap."
             );
@@ -1193,7 +1287,11 @@ impl HostSession {
     /// The display captured from host output `index`, if an active capture sits on it.
     pub fn display_for_output(&self, index: usize) -> Option<u32> {
         let layout = self.layout.lock().unwrap();
-        layout.iter().filter(|(_, s)| s.active).nth(index).map(|(id, _)| *id)
+        layout
+            .iter()
+            .filter(|(_, s)| s.active)
+            .nth(index)
+            .map(|(id, _)| *id)
     }
 
     /// Whether host output `index` has queued a frame no render has taken yet.
@@ -1271,7 +1369,10 @@ impl HostSession {
                 .filter(|(_, s)| s.active)
                 .map(|(id, s)| (*id, *s))
                 .collect();
-            if active.iter().position(|(id, _)| *id == display_id).unwrap_or(usize::MAX)
+            if active
+                .iter()
+                .position(|(id, _)| *id == display_id)
+                .unwrap_or(usize::MAX)
                 >= self.outputs.len()
             {
                 eprintln!(
@@ -1394,11 +1495,17 @@ impl HostSession {
     fn drop_buffered_frames(&self, idx: usize) {
         let handle = &self.outputs[idx];
         if let Some(old) = handle.retained.lock().unwrap().take() {
-            handle.send(ToHost::Release { generation: old.generation, slot: old.slot });
+            handle.send(ToHost::Release {
+                generation: old.generation,
+                slot: old.slot,
+            });
         }
         while let Ok(frame) = handle.frames.try_recv() {
             handle.queued.fetch_sub(1, Ordering::AcqRel);
-            handle.send(ToHost::Release { generation: frame.generation, slot: frame.slot });
+            handle.send(ToHost::Release {
+                generation: frame.generation,
+                slot: frame.slot,
+            });
         }
     }
 
@@ -1408,10 +1515,20 @@ impl HostSession {
     /// would wedge slots until the next renegotiation.
     pub fn idle_output(&self, display_id: u32) {
         let Some(idx) = self.output_index_for(display_id) else {
-            self.layout.lock().unwrap().entry(display_id).or_default().active = false;
+            self.layout
+                .lock()
+                .unwrap()
+                .entry(display_id)
+                .or_default()
+                .active = false;
             return;
         };
-        self.layout.lock().unwrap().entry(display_id).or_default().active = false;
+        self.layout
+            .lock()
+            .unwrap()
+            .entry(display_id)
+            .or_default()
+            .active = false;
         self.outputs[idx].send(ToHost::Idle);
         self.drop_buffered_frames(idx);
     }
@@ -1441,7 +1558,10 @@ impl HostSession {
         while let Ok(frame) = handle.frames.try_recv() {
             handle.queued.fetch_sub(1, Ordering::AcqRel);
             if let Some(stale) = newest.replace(frame) {
-                handle.send(ToHost::Release { generation: stale.generation, slot: stale.slot });
+                handle.send(ToHost::Release {
+                    generation: stale.generation,
+                    slot: stale.slot,
+                });
             }
         }
         newest
@@ -1450,23 +1570,27 @@ impl HostSession {
     /// Keep `frame` as `display_id`'s current content (releasing the one it
     /// replaces).
     pub fn retain_frame(&self, display_id: u32, frame: HostFrame) {
-        let Some(handle) = self.output_index_for(display_id).and_then(|i| self.outputs.get(i))
+        let Some(handle) = self
+            .output_index_for(display_id)
+            .and_then(|i| self.outputs.get(i))
         else {
             return;
         };
         let old = handle.retained.lock().unwrap().replace(frame);
         if let Some(old) = old {
-            handle.send(ToHost::Release { generation: old.generation, slot: old.slot });
+            handle.send(ToHost::Release {
+                generation: old.generation,
+                slot: old.slot,
+            });
         }
     }
 
     /// Run `f` with `display_id`'s retained (current-content) frame, if any.
-    pub fn with_retained<R>(
-        &self,
-        display_id: u32,
-        f: impl FnOnce(Option<&HostFrame>) -> R,
-    ) -> R {
-        match self.output_index_for(display_id).and_then(|i| self.outputs.get(i)) {
+    pub fn with_retained<R>(&self, display_id: u32, f: impl FnOnce(Option<&HostFrame>) -> R) -> R {
+        match self
+            .output_index_for(display_id)
+            .and_then(|i| self.outputs.get(i))
+        {
             Some(handle) => f(handle.retained.lock().unwrap().as_ref()),
             None => f(None),
         }
@@ -1520,8 +1644,11 @@ impl HostSession {
             return;
         }
         if let Some(u) = &self.uinput {
-            let _ = u.keyboard.emit(crate::uinput::EV_KEY, (xkb_keycode - 8) as u16,
-                                    if pressed { 1 } else { 0 });
+            let _ = u.keyboard.emit(
+                crate::uinput::EV_KEY,
+                (xkb_keycode - 8) as u16,
+                if pressed { 1 } else { 0 },
+            );
             return;
         }
         self.with_portal(|p| match sym {
@@ -1569,7 +1696,12 @@ impl HostSession {
         let live = self.portal.as_ref()?.live()?;
         let slots: Vec<LayoutSlot> = {
             let layout = self.layout.lock().unwrap();
-            layout.values().filter(|s| s.active).copied().take(self.outputs.len()).collect()
+            layout
+                .values()
+                .filter(|s| s.active)
+                .copied()
+                .take(self.outputs.len())
+                .collect()
         };
         let rank = nearest_slot(&slots, x, y)?;
         let assignment = assign_streams(&live.session.streams, &self.geoms);
@@ -1594,10 +1726,15 @@ impl HostSession {
                 if w > 1 && h > 1 {
                     let scale = |v: f64, span: i32| {
                         (v.clamp(0.0, (span - 1) as f64) / (span - 1) as f64
-                            * crate::uinput::ABS_RANGE as f64).round() as i32
+                            * crate::uinput::ABS_RANGE as f64)
+                            .round() as i32
                     };
-                    let _ = u.pointer.emit(crate::uinput::EV_ABS, crate::uinput::ABS_X, scale(x, w));
-                    let _ = u.pointer.emit(crate::uinput::EV_ABS, crate::uinput::ABS_Y, scale(y, h));
+                    let _ =
+                        u.pointer
+                            .emit(crate::uinput::EV_ABS, crate::uinput::ABS_X, scale(x, w));
+                    let _ =
+                        u.pointer
+                            .emit(crate::uinput::EV_ABS, crate::uinput::ABS_Y, scale(y, h));
                 }
             } else if let Some((node, sx, sy)) = self.portal_target(x, y) {
                 self.with_portal(|p| p.pointer_motion_abs(node, sx, sy));
@@ -1630,8 +1767,16 @@ impl HostSession {
         }
         let Some(vp) = &self.vptr else {
             if let Some(u) = &self.uinput {
-                let _ = u.pointer.emit(crate::uinput::EV_REL, crate::uinput::REL_X, dx.round() as i32);
-                let _ = u.pointer.emit(crate::uinput::EV_REL, crate::uinput::REL_Y, dy.round() as i32);
+                let _ = u.pointer.emit(
+                    crate::uinput::EV_REL,
+                    crate::uinput::REL_X,
+                    dx.round() as i32,
+                );
+                let _ = u.pointer.emit(
+                    crate::uinput::EV_REL,
+                    crate::uinput::REL_Y,
+                    dy.round() as i32,
+                );
             } else {
                 self.with_portal(|p| p.pointer_motion(dx, dy));
             }
@@ -1644,12 +1789,19 @@ impl HostSession {
 
     pub fn pointer_button(&self, btn: u32, pressed: bool) {
         if let Some(live) = self.portal_ei() {
-            live.ei.as_ref().unwrap().pointer_button(btn as i32, pressed);
+            live.ei
+                .as_ref()
+                .unwrap()
+                .pointer_button(btn as i32, pressed);
             return;
         }
         let Some(vp) = &self.vptr else {
             if let Some(u) = &self.uinput {
-                let _ = u.pointer.emit(crate::uinput::EV_KEY, btn as u16, if pressed { 1 } else { 0 });
+                let _ = u.pointer.emit(
+                    crate::uinput::EV_KEY,
+                    btn as u16,
+                    if pressed { 1 } else { 0 },
+                );
             } else {
                 self.with_portal(|p| p.pointer_button(btn as i32, pressed));
             }
@@ -1658,7 +1810,11 @@ impl HostSession {
         vp.button(
             0,
             btn,
-            if pressed { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released },
+            if pressed {
+                wl_pointer::ButtonState::Pressed
+            } else {
+                wl_pointer::ButtonState::Released
+            },
         );
         vp.frame();
         let _ = self.conn.flush();
@@ -1673,17 +1829,24 @@ impl HostSession {
             return;
         }
         let steps = |value: f64| (value * crate::SCROLL_V120_PER_UNIT / 120.0).round() as i32;
-        let scroll = |axis: u32, value: f64, cont: &dyn Fn(f64, f64, bool), disc: &dyn Fn(u32, i32)| {
-            match steps(value) {
-                0 => cont(if axis == 1 { value } else { 0.0 }, if axis == 0 { value } else { 0.0 }, true),
-                n => disc(axis, n),
-            }
-        };
+        let scroll =
+            |axis: u32, value: f64, cont: &dyn Fn(f64, f64, bool), disc: &dyn Fn(u32, i32)| {
+                match steps(value) {
+                    0 => cont(
+                        if axis == 1 { value } else { 0.0 },
+                        if axis == 0 { value } else { 0.0 },
+                        true,
+                    ),
+                    n => disc(axis, n),
+                }
+            };
         if let Some(live) = self.portal_ei() {
             let ei = live.ei.as_ref().unwrap();
             for (axis, value) in [(0u32, dy), (1u32, dx)] {
                 if value != 0.0 {
-                    scroll(axis, value, &|x, y, f| ei.pointer_axis(x, y, f), &|a, n| ei.pointer_axis_discrete(a, n));
+                    scroll(axis, value, &|x, y, f| ei.pointer_axis(x, y, f), &|a, n| {
+                        ei.pointer_axis_discrete(a, n)
+                    });
                 }
             }
             return;
@@ -1691,18 +1854,24 @@ impl HostSession {
         let Some(vp) = &self.vptr else {
             if let Some(u) = &self.uinput {
                 // A wheel counts up where the axis counts down, so the vertical step is negated.
-                for (code, value, sign) in [(crate::uinput::REL_WHEEL, dy, -1),
-                                            (crate::uinput::REL_HWHEEL, dx, 1)] {
+                for (code, value, sign) in [
+                    (crate::uinput::REL_WHEEL, dy, -1),
+                    (crate::uinput::REL_HWHEEL, dx, 1),
+                ] {
                     match steps(value) {
                         0 => {}
-                        n => { let _ = u.pointer.emit(crate::uinput::EV_REL, code, n * sign); }
+                        n => {
+                            let _ = u.pointer.emit(crate::uinput::EV_REL, code, n * sign);
+                        }
                     }
                 }
             } else {
                 self.with_portal(|p| {
                     for (axis, value) in [(0u32, dy), (1u32, dx)] {
                         if value != 0.0 {
-                            scroll(axis, value, &|x, y, f| p.pointer_axis(x, y, f), &|a, n| p.pointer_axis_discrete(a, n));
+                            scroll(axis, value, &|x, y, f| p.pointer_axis(x, y, f), &|a, n| {
+                                p.pointer_axis_discrete(a, n)
+                            });
                         }
                     }
                 });
@@ -1773,10 +1942,17 @@ fn nearest_slot(slots: &[LayoutSlot], x: f64, y: f64) -> Option<usize> {
 /// its output at physical size `want`, the portal addresses it at logical size `logical`.
 fn stream_point(slot: &LayoutSlot, logical: (i32, i32), x: f64, y: f64) -> (f64, f64) {
     let scale = |v: f64, from: i32, to: i32| {
-        let mapped = if from > 0 { v * to as f64 / from as f64 } else { v };
+        let mapped = if from > 0 {
+            v * to as f64 / from as f64
+        } else {
+            v
+        };
         mapped.clamp(0.0, (to.max(1) - 1) as f64)
     };
-    (scale(x - slot.pos.0 as f64, slot.want.0, logical.0), scale(y - slot.pos.1 as f64, slot.want.1, logical.1))
+    (
+        scale(x - slot.pos.0 as f64, slot.want.0, logical.0),
+        scale(y - slot.pos.1 as f64, slot.want.1, logical.1),
+    )
 }
 
 /// Wait, bounded, until the GPU work the compositor queued on a host dmabuf has finished:
@@ -1785,7 +1961,11 @@ fn stream_point(slot: &LayoutSlot, logical: (i32, i32), x: f64, y: f64) -> (f64,
 /// that attach no fence return at once.
 pub fn wait_gpu_done(dmabuf: &Dmabuf) {
     for fd in dmabuf.handles() {
-        let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         unsafe { libc::poll(&mut pfd, 1, 50) };
     }
 }
@@ -1810,7 +1990,9 @@ fn assign_streams(streams: &[PortalStream], geoms: &[OutputGeom]) -> Vec<Option<
     let mut taken = vec![false; streams.len()];
     let mut out = vec![None; geoms.len()];
     for (rank, g) in geoms.iter().enumerate() {
-        if let Some(i) = streams.iter().position(|s| s.position == Some(g.pos)) && !taken[i] {
+        if let Some(i) = streams.iter().position(|s| s.position == Some(g.pos))
+            && !taken[i]
+        {
             out[rank] = Some(i);
             taken[i] = true;
         }
@@ -1819,7 +2001,10 @@ fn assign_streams(streams: &[PortalStream], geoms: &[OutputGeom]) -> Vec<Option<
         if out[rank].is_some() {
             continue;
         }
-        let mut same_size = streams.iter().enumerate().filter(|(i, s)| !taken[*i] && s.position.is_none() && s.size == Some(g.logical));
+        let mut same_size = streams
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| !taken[*i] && s.position.is_none() && s.size == Some(g.logical));
         if let (Some((i, _)), None) = (same_size.next(), same_size.next()) {
             out[rank] = Some(i);
             taken[i] = true;
@@ -1877,7 +2062,9 @@ impl PortalCtl {
             devices,
         });
         let worker = ctl.clone();
-        let _ = std::thread::Builder::new().name("pf-host-portal".into()).spawn(move || portal_thread(worker));
+        let _ = std::thread::Builder::new()
+            .name("pf-host-portal".into())
+            .spawn(move || portal_thread(worker));
         ctl
     }
 
@@ -1931,7 +2118,13 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                 if let Some(p) = inner.paint
                     && inner.live.as_ref().is_none_or(|l| l.paint != p)
                 {
-                    break (p, inner.restore_token.clone().or_else(portal::saved_restore_token));
+                    break (
+                        p,
+                        inner
+                            .restore_token
+                            .clone()
+                            .or_else(portal::saved_restore_token),
+                    );
                 }
                 inner = ctl.changed.wait(inner).unwrap();
             }
@@ -1940,19 +2133,31 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
         // streams before the new session asks for them again.
         let old = ctl.inner.lock().unwrap().live.take();
         drop(old);
-        let cursor_mode = if ctl.capture && !paint { portal::CURSOR_METADATA } else { portal::CURSOR_EMBEDDED };
+        let cursor_mode = if ctl.capture && !paint {
+            portal::CURSOR_METADATA
+        } else {
+            portal::CURSOR_EMBEDDED
+        };
         let open = |devices: u32| {
-            PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref()).and_then(|session| {
-                let core = if ctl.capture { Some(PwCore::connect(session.open_pipewire_remote()?)?) } else { None };
-                Ok((session, core))
-            })
+            PortalSession::open(ctl.capture, devices, cursor_mode, token.as_deref()).and_then(
+                |session| {
+                    let core = if ctl.capture {
+                        Some(PwCore::connect(session.open_pipewire_remote()?)?)
+                    } else {
+                        None
+                    };
+                    Ok((session, core))
+                },
+            )
         };
         // A host that grants the screen but refuses the input devices answers the whole request as
         // a refusal, so asking again for capture alone is what turns that into a session with
         // video and no injection, rather than no session at all.
         let opened = match open(ctl.devices) {
             Err(e) if ctl.capture && ctl.devices != 0 => {
-                eprintln!("[HostCapture] portal refused keyboard and pointer ({e}); capturing without them.");
+                eprintln!(
+                    "[HostCapture] portal refused keyboard and pointer ({e}); capturing without them."
+                );
                 open(0)
             }
             other => other,
@@ -1973,16 +2178,34 @@ fn portal_thread(ctl: Arc<PortalCtl>) {
                 println!(
                     "[HostCapture] portal session open: {} stream(s), devices {}{}, cursor {}, input via {}.",
                     session.streams.len(),
-                    if session.devices & portal::DEVICE_KEYBOARD != 0 { "keyboard " } else { "" },
-                    if session.devices & portal::DEVICE_POINTER != 0 { "pointer" } else { "" },
+                    if session.devices & portal::DEVICE_KEYBOARD != 0 {
+                        "keyboard "
+                    } else {
+                        ""
+                    },
+                    if session.devices & portal::DEVICE_POINTER != 0 {
+                        "pointer"
+                    } else {
+                        ""
+                    },
                     match session.cursor_mode {
                         portal::CURSOR_METADATA => "metadata",
                         portal::CURSOR_EMBEDDED => "embedded",
                         _ => "hidden",
                     },
-                    if ei.is_some() { "libei" } else { "portal notify" }
+                    if ei.is_some() {
+                        "libei"
+                    } else {
+                        "portal notify"
+                    }
                 );
-                inner.live = Some(Arc::new(PortalLive { session, core, epoch: inner.epoch, paint, ei }));
+                inner.live = Some(Arc::new(PortalLive {
+                    session,
+                    core,
+                    epoch: inner.epoch,
+                    paint,
+                    ei,
+                }));
             }
             Err(e) => {
                 eprintln!("[HostCapture] portal session failed: {e}");
@@ -1999,14 +2222,18 @@ fn open_eis(session: &PortalSession) -> Option<EiInjector> {
     let fd = match session.connect_to_eis() {
         Ok(fd) => fd,
         Err(e) => {
-            eprintln!("[HostCapture] portal offers no EIS socket ({e}); input goes through the portal.");
+            eprintln!(
+                "[HostCapture] portal offers no EIS socket ({e}); input goes through the portal."
+            );
             return None;
         }
     };
     match EiInjector::spawn(fd) {
         Ok(ei) => Some(ei),
         Err(e) => {
-            eprintln!("[HostCapture] EIS injector unavailable ({e}); input goes through the portal.");
+            eprintln!(
+                "[HostCapture] EIS injector unavailable ({e}); input goes through the portal."
+            );
             None
         }
     }
@@ -2056,8 +2283,19 @@ fn portal_capture_loop(
                         s.set_active(false);
                     }
                 }
-                ToHost::Start { width, height, zero_copy, paint_cursor, fps_milli } => {
-                    want = Some(Want { size: (width, height), zero_copy, paint_cursor, fps_milli });
+                ToHost::Start {
+                    width,
+                    height,
+                    zero_copy,
+                    paint_cursor,
+                    fps_milli,
+                } => {
+                    want = Some(Want {
+                        size: (width, height),
+                        zero_copy,
+                        paint_cursor,
+                        fps_milli,
+                    });
                 }
             }
         }
@@ -2069,7 +2307,9 @@ fn portal_capture_loop(
         }
         let Some(w) = want else { continue };
         let Some(live) = live else { continue };
-        let Some(core) = live.core.as_ref() else { continue };
+        let Some(core) = live.core.as_ref() else {
+            continue;
+        };
         let cfg = StreamConfig {
             zero_copy: w.zero_copy && !dma_formats.is_empty(),
             dma_formats: dma_formats.clone(),
@@ -2086,14 +2326,26 @@ fn portal_capture_loop(
                 }
             }
             None => {
-                let Some(si) = assign_streams(&live.session.streams, &geoms).get(index).copied().flatten() else {
+                let Some(si) = assign_streams(&live.session.streams, &geoms)
+                    .get(index)
+                    .copied()
+                    .flatten()
+                else {
                     if !warned_unshared {
                         warned_unshared = true;
-                        eprintln!("[HostCapture] output {index}: the portal shares no stream for it; nothing captured.");
+                        eprintln!(
+                            "[HostCapture] output {index}: the portal shares no stream for it; nothing captured."
+                        );
                     }
                     continue;
                 };
-                match PwStream::connect(core, live.session.streams[si].node_id, sink.clone(), cursor_tx.clone(), cfg) {
+                match PwStream::connect(
+                    core,
+                    live.session.streams[si].node_id,
+                    sink.clone(),
+                    cursor_tx.clone(),
+                    cfg,
+                ) {
                     Ok(s) => stream = Some((s, live.epoch)),
                     Err(e) => {
                         ctl.mark_dead(format!("output {index}: {e}"));
@@ -2176,7 +2428,9 @@ fn apply_layout(
     slots: &[LayoutSlot],
 ) -> bool {
     let Some(mgr) = state.output_mgr.clone() else {
-        eprintln!("[HostCapture] host lacks zwlr_output_manager_v1; capture follows the host's own size.");
+        eprintln!(
+            "[HostCapture] host lacks zwlr_output_manager_v1; capture follows the host's own size."
+        );
         return false;
     };
     let deadline = Instant::now() + LAYOUT_DEADLINE;
@@ -2210,7 +2464,9 @@ fn apply_layout(
             {
                 Some((h, _)) => h.clone(),
                 None => {
-                    eprintln!("[HostCapture] no output-management head for output {i}; not resized.");
+                    eprintln!(
+                        "[HostCapture] no output-management head for output {i}; not resized."
+                    );
                     continue;
                 }
             };
@@ -2238,7 +2494,9 @@ fn apply_layout(
             continue;
         }
         if state.cfg_result != Some(true) {
-            eprintln!("[HostCapture] host refused the layout; capture follows the host's own size.");
+            eprintln!(
+                "[HostCapture] host refused the layout; capture follows the host's own size."
+            );
             return false;
         }
         return true;
@@ -2252,7 +2510,9 @@ fn pump_ctrl(conn: &Connection, queue: &mut EventQueue<CtrlState>, state: &mut C
         return false;
     }
     let _ = queue.flush();
-    let Some(guard) = conn.prepare_read() else { return true };
+    let Some(guard) = conn.prepare_read() else {
+        return true;
+    };
     match crate::wayland::wlclient::wait_readable(
         guard.connection_fd().as_raw_fd(),
         Duration::from_millis(200),
@@ -2337,9 +2597,14 @@ fn alloc_gpu_slot(
     state.params_failed = false;
     params.create(w, h, fourcc, zwp_linux_buffer_params_v1::Flags::empty());
     loop {
-        match pump_until(conn, queue, state, wake, Some(Duration::from_secs(2)), |s| {
-            s.params_created.is_some() || s.params_failed
-        })? {
+        match pump_until(
+            conn,
+            queue,
+            state,
+            wake,
+            Some(Duration::from_secs(2)),
+            |s| s.params_created.is_some() || s.params_failed,
+        )? {
             Pump::Done => break,
             Pump::Control => continue,
             Pump::Timeout => {
@@ -2350,7 +2615,11 @@ fn alloc_gpu_slot(
     }
     params.destroy();
     match state.params_created.take() {
-        Some(wl) => Ok(Some(SlotBuffer::Gpu { _bo: bo, dmabuf, wl })),
+        Some(wl) => Ok(Some(SlotBuffer::Gpu {
+            _bo: bo,
+            dmabuf,
+            wl,
+        })),
         None => Ok(None),
     }
 }
@@ -2372,13 +2641,21 @@ fn alloc_cpu_slot(
         w,
         h,
         stride,
-        WEnum::<wl_shm::Format>::from(format).into_result().unwrap_or(wl_shm::Format::Xrgb8888),
+        WEnum::<wl_shm::Format>::from(format)
+            .into_result()
+            .unwrap_or(wl_shm::Format::Xrgb8888),
         qh,
         (),
     );
     let file = File::from(fd);
     let map = unsafe { memmap2::MmapMut::map_mut(&file) }.map_err(|e| format!("shm map: {e}"))?;
-    Ok(SlotBuffer::Cpu { _pool: pool, map: Arc::new(map), stride, format, wl })
+    Ok(SlotBuffer::Cpu {
+        _pool: pool,
+        map: Arc::new(map),
+        stride,
+        format,
+        wl,
+    })
 }
 
 /// What a control-channel drain decided while a capture wait was in progress.
@@ -2409,7 +2686,9 @@ fn pump_until(
 ) -> Result<Pump, String> {
     let deadline = timeout.map(|t| Instant::now() + t);
     loop {
-        queue.dispatch_pending(state).map_err(|e| format!("dispatch: {e}"))?;
+        queue
+            .dispatch_pending(state)
+            .map_err(|e| format!("dispatch: {e}"))?;
         if done(state) {
             return Ok(Pump::Done);
         }
@@ -2421,7 +2700,9 @@ fn pump_until(
             },
             None => None,
         };
-        let Some(guard) = conn.prepare_read() else { continue };
+        let Some(guard) = conn.prepare_read() else {
+            continue;
+        };
         let (wl, wake) = wait_readable2(guard.connection_fd().as_raw_fd(), wake_rd, remaining)?;
         if wake {
             drop(guard);
@@ -2462,7 +2743,11 @@ fn capture_loop(
     // Select this thread's output by the name the control connection assigned
     // it; ordering fallback only when the host names nothing.
     let by_name = expect_name.as_ref().and_then(|expect| {
-        state.outputs.iter().find(|(_, n)| n.as_ref() == Some(expect)).cloned()
+        state
+            .outputs
+            .iter()
+            .find(|(_, n)| n.as_ref() == Some(expect))
+            .cloned()
     });
     let (output, _name) = match by_name {
         Some(o) => o,
@@ -2491,17 +2776,30 @@ fn capture_loop(
     let force = std::env::var("PIXELFLUX_HOST_CAPTURE").unwrap_or_default();
     if force != "zwlr" && state.ext_capture.is_some() && state.ext_source_mgr.is_some() {
         match capture_loop_ext(
-            &conn, &mut queue, &mut state, &output, gbm.as_ref(), wake, index, &from_main,
-            &frames, &mut want,
+            &conn,
+            &mut queue,
+            &mut state,
+            &output,
+            gbm.as_ref(),
+            wake,
+            index,
+            &from_main,
+            &frames,
+            &mut want,
         ) {
             ExtOutcome::Finished => return Ok(()),
             ExtOutcome::Unavailable(e) => {
-                eprintln!("[HostCapture] output {index}: ext capture unavailable ({e}); using wlr-screencopy.");
+                eprintln!(
+                    "[HostCapture] output {index}: ext capture unavailable ({e}); using wlr-screencopy."
+                );
             }
         }
     }
 
-    let screencopy = state.screencopy.clone().ok_or("no zwlr_screencopy_manager_v1")?;
+    let screencopy = state
+        .screencopy
+        .clone()
+        .ok_or("no zwlr_screencopy_manager_v1")?;
 
     let mut slots: Vec<Option<SlotBuffer>> = (0..SLOTS).map(|_| None).collect();
     let mut free: Vec<usize> = (0..SLOTS).collect();
@@ -2530,14 +2828,28 @@ fn capture_loop(
                 }
             };
             match msg {
-                ToHost::Release { generation: g, slot } => {
+                ToHost::Release {
+                    generation: g,
+                    slot,
+                } => {
                     if g == generation {
                         free.push(slot);
                     }
                 }
                 ToHost::Idle => want = None,
-                ToHost::Start { width, height, zero_copy, paint_cursor, fps_milli } => {
-                    let next = Want { size: (width, height), zero_copy, paint_cursor, fps_milli };
+                ToHost::Start {
+                    width,
+                    height,
+                    zero_copy,
+                    paint_cursor,
+                    fps_milli,
+                } => {
+                    let next = Want {
+                        size: (width, height),
+                        zero_copy,
+                        paint_cursor,
+                        fps_milli,
+                    };
                     if want != Some(next) {
                         warned_mismatch = false;
                     }
@@ -2577,7 +2889,9 @@ fn capture_loop(
             frame.destroy();
             consecutive_failures += 1;
             if consecutive_failures == 3 {
-                eprintln!("[HostCapture] output {index}: repeated screencopy failures; is the output alive?");
+                eprintln!(
+                    "[HostCapture] output {index}: repeated screencopy failures; is the output alive?"
+                );
             }
             let _ = pump_until(
                 &conn,
@@ -2658,7 +2972,16 @@ fn capture_loop(
                     (gbm.as_ref(), dmabuf_global.as_ref(), state.announce_dmabuf)
                 {
                     match alloc_gpu_slot(
-                        &conn, &mut queue, &mut state, wake, dev, dmabuf_global, fourcc, w, h, &[],
+                        &conn,
+                        &mut queue,
+                        &mut state,
+                        wake,
+                        dev,
+                        dmabuf_global,
+                        fourcc,
+                        w,
+                        h,
+                        &[],
                     )? {
                         Some(slot) => built = Some(slot),
                         None => {
@@ -2693,7 +3016,9 @@ fn capture_loop(
         queue.flush().map_err(|e| format!("flush: {e}"))?;
         let mut aborted = false;
         loop {
-            match pump_until(&conn, &mut queue, &mut state, wake, None, |s| s.ready || s.failed)? {
+            match pump_until(&conn, &mut queue, &mut state, wake, None, |s| {
+                s.ready || s.failed
+            })? {
                 Pump::Done => break,
                 Pump::Control => match drain_ctl(&from_main, generation, &mut free, &mut want) {
                     Ctl::None => {}
@@ -2718,7 +3043,9 @@ fn capture_loop(
             free.push(slot_idx);
             consecutive_failures += 1;
             if consecutive_failures == 3 {
-                eprintln!("[HostCapture] output {index}: repeated screencopy failures; is the output alive?");
+                eprintln!(
+                    "[HostCapture] output {index}: repeated screencopy failures; is the output alive?"
+                );
             }
             let _ = pump_until(
                 &conn,
@@ -2744,7 +3071,12 @@ fn capture_loop(
                 damage,
                 stamp_ns: now_ns(),
             },
-            SlotBuffer::Cpu { map, stride, format, .. } => HostFrame {
+            SlotBuffer::Cpu {
+                map,
+                stride,
+                format,
+                ..
+            } => HostFrame {
                 generation,
                 slot: slot_idx,
                 dmabuf: None,
@@ -2809,8 +3141,17 @@ fn capture_loop_ext(
     // queued; before any Start the consumer's default (drawing the cursor itself) applies.
     let mut session_paints = false;
     let (mut source, mut session) = match open_ext_session(
-        conn, queue, state, output, wake, index, from_main, session_paints, generation,
-        &mut free, want,
+        conn,
+        queue,
+        state,
+        output,
+        wake,
+        index,
+        from_main,
+        session_paints,
+        generation,
+        &mut free,
+        want,
     ) {
         Ok(opened) => opened,
         Err(outcome) => return outcome,
@@ -2839,14 +3180,28 @@ fn capture_loop_ext(
                 }
             };
             match msg {
-                ToHost::Release { generation: g, slot } => {
+                ToHost::Release {
+                    generation: g,
+                    slot,
+                } => {
                     if g == generation {
                         free.push(slot);
                     }
                 }
                 ToHost::Idle => *want = None,
-                ToHost::Start { width, height, zero_copy, paint_cursor, fps_milli } => {
-                    let next = Want { size: (width, height), zero_copy, paint_cursor, fps_milli };
+                ToHost::Start {
+                    width,
+                    height,
+                    zero_copy,
+                    paint_cursor,
+                    fps_milli,
+                } => {
+                    let next = Want {
+                        size: (width, height),
+                        zero_copy,
+                        paint_cursor,
+                        fps_milli,
+                    };
                     if *want != Some(next) {
                         warned_mismatch = false;
                     }
@@ -2903,9 +3258,14 @@ fn capture_loop_ext(
                     "[HostCapture] output {index}: waiting for host {want_w}x{want_h} (currently {cw}x{ch})."
                 );
             }
-            let _ = pump_until(conn, queue, state, wake, Some(Duration::from_millis(150)), |s| {
-                s.ext_serial != seen_serial
-            });
+            let _ = pump_until(
+                conn,
+                queue,
+                state,
+                wake,
+                Some(Duration::from_millis(150)),
+                |s| s.ext_serial != seen_serial,
+            );
             continue;
         }
         warned_mismatch = false;
@@ -2928,7 +3288,16 @@ fn capture_loop_ext(
                     (gbm, dmabuf_global.as_ref(), dma_choice)
                 {
                     match alloc_gpu_slot(
-                        conn, queue, state, wake, dev, dmabuf_global, fourcc, cw, ch, &modifiers,
+                        conn,
+                        queue,
+                        state,
+                        wake,
+                        dev,
+                        dmabuf_global,
+                        fourcc,
+                        cw,
+                        ch,
+                        &modifiers,
                     ) {
                         Ok(Some(built)) => slot = Some(built),
                         Ok(None) => {
@@ -3037,9 +3406,18 @@ fn capture_loop_ext(
             }
             consecutive_failures += 1;
             if consecutive_failures == 3 {
-                eprintln!("[HostCapture] output {index}: repeated capture failures; is the output alive?");
+                eprintln!(
+                    "[HostCapture] output {index}: repeated capture failures; is the output alive?"
+                );
             }
-            let _ = pump_until(conn, queue, state, wake, Some(Duration::from_millis(50)), |_| false);
+            let _ = pump_until(
+                conn,
+                queue,
+                state,
+                wake,
+                Some(Duration::from_millis(50)),
+                |_| false,
+            );
             continue;
         }
         consecutive_failures = 0;
@@ -3056,7 +3434,12 @@ fn capture_loop_ext(
                 damage,
                 stamp_ns: now_ns(),
             },
-            SlotBuffer::Cpu { map, stride, format, .. } => HostFrame {
+            SlotBuffer::Cpu {
+                map,
+                stride,
+                format,
+                ..
+            } => HostFrame {
                 generation,
                 slot: slot_idx,
                 dmabuf: None,
@@ -3118,9 +3501,14 @@ fn open_ext_session(
     state.ext_pending_dma.clear();
     let before = state.ext_serial;
     loop {
-        match pump_until(conn, queue, state, wake, Some(Duration::from_secs(5)), |s| {
-            s.ext_serial > before || s.ext_stopped
-        }) {
+        match pump_until(
+            conn,
+            queue,
+            state,
+            wake,
+            Some(Duration::from_secs(5)),
+            |s| s.ext_serial > before || s.ext_stopped,
+        ) {
             Ok(Pump::Done) => break,
             Ok(Pump::Control) => match drain_ctl(from_main, generation, free, want) {
                 Ctl::Dead => {
@@ -3131,7 +3519,9 @@ fn open_ext_session(
             },
             Ok(Pump::Timeout) => {
                 teardown(&session, &source);
-                return Err(ExtOutcome::Unavailable("no buffer constraints within 5s".into()));
+                return Err(ExtOutcome::Unavailable(
+                    "no buffer constraints within 5s".into(),
+                ));
             }
             Err(e) => {
                 teardown(&session, &source);
@@ -3141,7 +3531,9 @@ fn open_ext_session(
     }
     if state.ext_stopped {
         teardown(&session, &source);
-        return Err(ExtOutcome::Unavailable("session stopped before constraints".into()));
+        return Err(ExtOutcome::Unavailable(
+            "session stopped before constraints".into(),
+        ));
     }
     eprintln!(
         "[HostCapture] output {index} ext session: {:?} dma_formats={} shm_formats={} cursor={}",
@@ -3164,13 +3556,27 @@ fn drain_ctl(
     let mut out = Ctl::None;
     loop {
         match rx.try_recv() {
-            Ok(ToHost::Release { generation: g, slot }) => {
+            Ok(ToHost::Release {
+                generation: g,
+                slot,
+            }) => {
                 if g == generation {
                     free.push(slot);
                 }
             }
-            Ok(ToHost::Start { width, height, zero_copy, paint_cursor, fps_milli }) => {
-                let next = Want { size: (width, height), zero_copy, paint_cursor, fps_milli };
+            Ok(ToHost::Start {
+                width,
+                height,
+                zero_copy,
+                paint_cursor,
+                fps_milli,
+            }) => {
+                let next = Want {
+                    size: (width, height),
+                    zero_copy,
+                    paint_cursor,
+                    fps_milli,
+                };
                 if *want != Some(next) {
                     *want = Some(next);
                     out = Ctl::Renegotiate;
@@ -3201,10 +3607,26 @@ mod tests {
     #[test]
     fn shm_rows_reach_bgra_from_each_announced_layout() {
         let cases = [
-            (wl_shm::Format::Xrgb8888 as u32, vec![1u8, 2, 3, 4], vec![1u8, 2, 3, 4]),
-            (wl_shm::Format::Xbgr8888 as u32, vec![1u8, 2, 3, 9], vec![3u8, 2, 1, 9]),
-            (wl_shm::Format::Bgr888 as u32, vec![1u8, 2, 3], vec![3u8, 2, 1, 0xff]),
-            (wl_shm::Format::Rgb888 as u32, vec![1u8, 2, 3], vec![1u8, 2, 3, 0xff]),
+            (
+                wl_shm::Format::Xrgb8888 as u32,
+                vec![1u8, 2, 3, 4],
+                vec![1u8, 2, 3, 4],
+            ),
+            (
+                wl_shm::Format::Xbgr8888 as u32,
+                vec![1u8, 2, 3, 9],
+                vec![3u8, 2, 1, 9],
+            ),
+            (
+                wl_shm::Format::Bgr888 as u32,
+                vec![1u8, 2, 3],
+                vec![3u8, 2, 1, 0xff],
+            ),
+            (
+                wl_shm::Format::Rgb888 as u32,
+                vec![1u8, 2, 3],
+                vec![1u8, 2, 3, 0xff],
+            ),
         ];
         for (format, src, want) in cases {
             let (bpp, swap) = shm_src_layout(format);
@@ -3341,8 +3763,14 @@ mod tests {
 
     #[test]
     fn four_byte_formats_convert_to_bgra() {
-        assert_eq!(convert(wl_shm::Format::Xbgr8888, &[0x11, 0x22, 0x33, 0x44]), [0x33, 0x22, 0x11, 0x44]);
-        assert_eq!(convert(wl_shm::Format::Xrgb8888, &[0x33, 0x22, 0x11, 0x44]), [0x33, 0x22, 0x11, 0x44]);
+        assert_eq!(
+            convert(wl_shm::Format::Xbgr8888, &[0x11, 0x22, 0x33, 0x44]),
+            [0x33, 0x22, 0x11, 0x44]
+        );
+        assert_eq!(
+            convert(wl_shm::Format::Xrgb8888, &[0x33, 0x22, 0x11, 0x44]),
+            [0x33, 0x22, 0x11, 0x44]
+        );
     }
 
     /// The layout ledger the calloop polls: a request is unanswered until the control

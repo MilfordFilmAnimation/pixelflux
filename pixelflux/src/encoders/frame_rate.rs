@@ -34,12 +34,19 @@ impl FrameRate {
     /// The fraction `fps` names (see the module docs), within one to 1000 frames per second; a
     /// rate that is not a number reads as one.
     pub fn of(fps: f64) -> Self {
-        let fps = if fps.is_nan() { MIN_FPS } else { fps.clamp(MIN_FPS, MAX_FPS) };
+        let fps = if fps.is_nan() {
+            MIN_FPS
+        } else {
+            fps.clamp(MIN_FPS, MAX_FPS)
+        };
         let bits = fps.to_bits();
         let mantissa = ((bits & ((1 << 52) - 1)) | (1 << 52)) as u128;
         let shift = 1075 - ((bits >> 52) & 0x7ff) as i32;
         let (num, den) = limit_denominator(mantissa, 1 << shift, MAX_DENOMINATOR);
-        Self { num: num as u32, den: den as u32 }
+        Self {
+            num: num as u32,
+            den: den as u32,
+        }
     }
 
     /// The rate in frames per second.
@@ -59,7 +66,10 @@ impl FrameRate {
         loop {
             let (num, den) = limit_denominator(self.num as u128, self.den as u128, bound);
             if num <= max as u128 || bound == 1 {
-                return Self { num: num.min(max as u128) as u32, den: den as u32 };
+                return Self {
+                    num: num.min(max as u128) as u32,
+                    den: den as u32,
+                };
             }
             bound -= 1;
         }
@@ -116,7 +126,11 @@ mod tests {
         for n in [24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240] {
             assert_eq!(FrameRate::of(n as f64), rate(n, 1));
             let g = gcd(n as u128 * 1000, 1001) as u32;
-            assert_eq!(FrameRate::of(n as f64 * 1000.0 / 1001.0), rate(n * 1000 / g, 1001 / g), "{n}000/1001");
+            assert_eq!(
+                FrameRate::of(n as f64 * 1000.0 / 1001.0),
+                rate(n * 1000 / g, 1001 / g),
+                "{n}000/1001"
+            );
         }
         assert_eq!(FrameRate::of(60000.0 / 1001.0).fps(), 60000.0 / 1001.0);
     }
@@ -142,7 +156,17 @@ mod tests {
     /// off an NTSC fraction lands on it.
     #[test]
     fn any_other_rate_reads_within_a_thousandth() {
-        for fps in [53.28900001, 59.9512345, 143.98123, 7.3, 999.9999, 1.0000001, 164.987654321, 60.0005, 1.0004999] {
+        for fps in [
+            53.28900001,
+            59.9512345,
+            143.98123,
+            7.3,
+            999.9999,
+            1.0000001,
+            164.987654321,
+            60.0005,
+            1.0004999,
+        ] {
             let r = FrameRate::of(fps);
             assert!(r.den <= 1001, "{fps}: {r:?}");
             assert!((r.fps() - fps).abs() < 1e-3, "{fps}: {r:?} = {}", r.fps());
@@ -179,7 +203,10 @@ mod tests {
             let exact = rate(n * 1000, 1001);
             let fit = exact.within(0xffff);
             assert!(fit.num <= 0xffff && fit.den <= 0xffff, "{fit:?}");
-            assert!((fit.fps() - exact.fps()).abs() / exact.fps() < 1e-7, "{n}: {fit:?}");
+            assert!(
+                (fit.fps() - exact.fps()).abs() / exact.fps() < 1e-7,
+                "{n}: {fit:?}"
+            );
         }
         assert_eq!(rate(1000, 1).within(0xffff), rate(1000, 1));
     }

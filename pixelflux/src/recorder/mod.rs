@@ -43,15 +43,15 @@ use std::collections::VecDeque;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
-use crate::encoders::software::EncodedStripe;
 use crate::RustCaptureSettings;
 use crate::ThreadCommand;
+use crate::encoders::software::EncodedStripe;
 
 /// Recorder queue bound, matching the socket sink's stalled-consumer policy: a writer that
 /// falls this far behind loses frames instead of growing memory or blocking the encoder.
@@ -125,7 +125,11 @@ impl RecordOptions {
     }
 
     fn effective_keyframe_s(&self) -> f64 {
-        if self.keyframe_interval_s > 0.0 { self.keyframe_interval_s } else { 2.0 }
+        if self.keyframe_interval_s > 0.0 {
+            self.keyframe_interval_s
+        } else {
+            2.0
+        }
     }
 }
 
@@ -214,7 +218,9 @@ struct IdrRequester {
 
 impl IdrRequester {
     fn request(&self) {
-        let _ = self.tx.send(ThreadCommand::RequestIdr { display_id: self.display_id });
+        let _ = self.tx.send(ThreadCommand::RequestIdr {
+            display_id: self.display_id,
+        });
     }
 }
 
@@ -258,7 +264,9 @@ pub(crate) fn wayland_tap(display_id: u32, stripes: &[EncodedStripe]) {
     if !WL_TAP_ARMED.load(Ordering::Relaxed) {
         return;
     }
-    let Some(tap) = WL_TAP.lock().unwrap().clone() else { return };
+    let Some(tap) = WL_TAP.lock().unwrap().clone() else {
+        return;
+    };
     if tap.display_id != display_id {
         return;
     }
@@ -293,7 +301,10 @@ fn offer_frame(shared: &RecShared, tx: &Sender<Tap>, stripes: &[EncodedStripe]) 
     if stripes.is_empty() {
         return;
     }
-    if stripes.len() != 1 || stripes[0].codec != crate::encoders::Codec::H264 || stripes[0].stripe_y_start != 0 {
+    if stripes.len() != 1
+        || stripes[0].codec != crate::encoders::Codec::H264
+        || stripes[0].stripe_y_start != 0
+    {
         shared.skipped_non_h264.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -301,7 +312,11 @@ fn offer_frame(shared: &RecShared, tx: &Sender<Tap>, stripes: &[EncodedStripe]) 
     if s.data.is_empty() {
         return;
     }
-    let offset = if s.data.len() >= 10 && s.data[0] == 0x04 { 10 } else { 0 };
+    let offset = if s.data.len() >= 10 && s.data[0] == 0x04 {
+        10
+    } else {
+        0
+    };
     if s.data.len() == offset {
         return;
     }
@@ -350,11 +365,15 @@ fn writer_thread(
                     shared.set_error(format!("MP4 write failed: {e}"));
                     break 'recv;
                 }
-                shared.audio_muxed.store(writer.stats().audio_samples, Ordering::Relaxed);
+                shared
+                    .audio_muxed
+                    .store(writer.stats().audio_samples, Ordering::Relaxed);
                 continue;
             }
         };
-        let Some(sample) = builder.build_sample(&buf[offset..]) else { continue };
+        let Some(sample) = builder.build_sample(&buf[offset..]) else {
+            continue;
+        };
         if !writer.init_written() {
             if !sample.sync || !builder.have_parameter_sets() {
                 continue;
@@ -420,7 +439,12 @@ fn writer_thread(
     };
     println!(
         "[recorder] finished {}: {} frames ({} sync), {} audio packets, {:.2}s, {} bytes",
-        status.path, status.frames, status.sync_frames, status.audio_frames, status.duration_s, status.bytes
+        status.path,
+        status.frames,
+        status.sync_frames,
+        status.audio_frames,
+        status.duration_s,
+        status.bytes
     );
     *LAST_FINISHED.lock().unwrap() = Some(status);
 }
@@ -439,7 +463,9 @@ fn open_audio(path: &str) -> Result<(ogg::PageReader<UnixStream>, ogg::OpusHead)
             Err(e) => return Err(format!("audio socket {path}: {e}")),
         }
     };
-    stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
     let mut reader = ogg::PageReader::new(stream);
     let (first, _) = reader
         .next_packet()
@@ -447,7 +473,9 @@ fn open_audio(path: &str) -> Result<(ogg::PageReader<UnixStream>, ogg::OpusHead)
         .ok_or_else(|| format!("audio socket {path} closed before its headers"))?;
     let head = ogg::parse_opus_head(&first)
         .ok_or_else(|| format!("audio socket {path} does not start with OpusHead"))?;
-    reader.next_packet().map_err(|e| format!("audio socket {path}: {e}"))?;
+    reader
+        .next_packet()
+        .map_err(|e| format!("audio socket {path}: {e}"))?;
     Ok((reader, head))
 }
 
@@ -464,9 +492,15 @@ fn page_start(position: u64, granule: u64, samples: u64) -> u64 {
 /// clock from the first packet's arrival. Packets wait for their page's last, which carries
 /// the granule; an unfinished page's packets at the stream's end follow the page before. Ends
 /// with the stream, or on stop.
-fn audio_thread(mut reader: ogg::PageReader<UnixStream>, tx: Sender<Tap>, shared: Arc<RecShared>,
-                stop: Arc<AtomicBool>) {
-    let _ = reader.inner_mut().set_read_timeout(Some(Duration::from_millis(200)));
+fn audio_thread(
+    mut reader: ogg::PageReader<UnixStream>,
+    tx: Sender<Tap>,
+    shared: Arc<RecShared>,
+    stop: Arc<AtomicBool>,
+) {
+    let _ = reader
+        .inner_mut()
+        .set_read_timeout(Some(Duration::from_millis(200)));
     let mut position: u64 = 0;
     let mut anchor: Option<(u64, u64)> = None;
     let mut page: Vec<(Vec<u8>, u64)> = Vec::new();
@@ -485,7 +519,14 @@ fn audio_thread(mut reader: ogg::PageReader<UnixStream>, tx: Sender<Tap>, shared
                     }
                 }
                 Ok(None) => None,
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[recorder] audio stream ended: {e}");
                     None
@@ -496,7 +537,11 @@ fn audio_thread(mut reader: ogg::PageReader<UnixStream>, tx: Sender<Tap>, shared
         let samples: u64 = page.iter().map(|p| p.1).sum();
         position = granule.map_or(position, |g| page_start(position, g, samples));
         let (clock, base) = *anchor.get_or_insert_with(|| {
-            (shared.start.elapsed().as_micros() as u64 * (mp4::OPUS_TIMESCALE as u64) / 1_000_000, position)
+            (
+                shared.start.elapsed().as_micros() as u64 * (mp4::OPUS_TIMESCALE as u64)
+                    / 1_000_000,
+                position,
+            )
         });
         for (packet, samples) in page.drain(..) {
             let dts = clock + position.saturating_sub(base);
@@ -556,9 +601,10 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
         return Err("recording path is empty".to_string());
     }
     if let Some(cap) = &opts.capture
-        && cap.codec != crate::encoders::Codec::H264 {
-            return Err("recording requires H.264 capture settings (codec='h264')".to_string());
-        }
+        && cap.codec != crate::encoders::Codec::H264
+    {
+        return Err("recording requires H.264 capture settings (codec='h264')".to_string());
+    }
 
     let wl_tx = crate::computer_use::wayland_command_sender();
     let backend = match opts.backend {
@@ -572,7 +618,10 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
         None => {
             if wl_tx.is_some() {
                 PreferredBackend::Wayland
-            } else if std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
+            } else if std::env::var("DISPLAY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
                 PreferredBackend::X11
             } else {
                 return Err(
@@ -617,7 +666,10 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
                     display_id,
                     tx: tx.clone(),
                     shared: shared.clone(),
-                    idr: Some(IdrRequester { tx: cmd_tx.clone(), display_id }),
+                    idr: Some(IdrRequester {
+                        tx: cmd_tx.clone(),
+                        display_id,
+                    }),
                     keyframe_interval_us: (opts.effective_keyframe_s() * 1e6) as u64,
                 });
                 WL_TAP_ARMED.store(true, Ordering::Relaxed);
@@ -652,7 +704,11 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
                 });
                 WL_TAP_ARMED.store(true, Ordering::Relaxed);
                 cmd_tx
-                    .send(ThreadCommand::StartCapture { display_id, callback: None, settings })
+                    .send(ThreadCommand::StartCapture {
+                        display_id,
+                        callback: None,
+                        settings,
+                    })
                     .map_err(|_| {
                         disarm_tap();
                         "wayland compositor is not accepting commands".to_string()
@@ -671,7 +727,11 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
                     }
                     thread::sleep(Duration::from_millis(20));
                 }
-                (RecordingMode::WaylandOwn { display_id }, "own-capture", "wayland")
+                (
+                    RecordingMode::WaylandOwn { display_id },
+                    "own-capture",
+                    "wayland",
+                )
             }
         }
         PreferredBackend::X11 => {
@@ -697,7 +757,10 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let _ = join.join();
-                    crate::live_x11().lock().unwrap().retain(|c| !Arc::ptr_eq(c, &controls));
+                    crate::live_x11()
+                        .lock()
+                        .unwrap()
+                        .retain(|c| !Arc::ptr_eq(c, &controls));
                     let msg = err_slot
                         .lock()
                         .unwrap()
@@ -708,14 +771,20 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
                 // Slow X server setup: the capture is still coming up; proceed.
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            (RecordingMode::X11Own { controls, join }, "own-capture", "x11")
+            (
+                RecordingMode::X11Own { controls, join },
+                "own-capture",
+                "x11",
+            )
         }
     };
 
     let audio_stop = Arc::new(AtomicBool::new(false));
     let (audio_cfg, audio) = match audio_source {
         Some((reader, head)) => {
-            let cfg = mp4::AudioTrackConfig { sample_entry: mp4::opus_sample_entry(&head) };
+            let cfg = mp4::AudioTrackConfig {
+                sample_entry: mp4::opus_sample_entry(&head),
+            };
             let (tx, shared, stop) = (tx.clone(), shared.clone(), audio_stop.clone());
             let join = thread::Builder::new()
                 .name("pf-recorder-audio".to_string())
@@ -730,7 +799,9 @@ pub fn start(opts: RecordOptions) -> Result<RecordingStatus, String> {
         let path = opts.path.clone();
         thread::Builder::new()
             .name("pf-recorder".to_string())
-            .spawn(move || writer_thread(rx, file, path, backend_name, mode_name, audio_cfg, shared))
+            .spawn(move || {
+                writer_thread(rx, file, path, backend_name, mode_name, audio_cfg, shared)
+            })
             .map_err(|e| format!("failed to spawn recorder writer thread: {e}"))?
     };
 
@@ -786,23 +857,28 @@ pub fn stop() -> Result<RecordingStatus, String> {
         RecordingMode::X11Own { controls, join } => {
             controls.stop.store(true, Ordering::Relaxed);
             let _ = join.join();
-            crate::live_x11().lock().unwrap().retain(|c| !Arc::ptr_eq(c, &controls));
+            crate::live_x11()
+                .lock()
+                .unwrap()
+                .retain(|c| !Arc::ptr_eq(c, &controls));
         }
         RecordingMode::WaylandOwn { display_id } => {
             // A streaming client that reconfigured this display now owns it; the capture
             // must survive the recorder's exit.
-            let client_owns = crate::wayland_owners().lock().unwrap().contains_key(&display_id);
-            if !client_owns
-                && let Some(tx) = crate::computer_use::wayland_command_sender() {
-                    let _ = tx.send(ThreadCommand::StopCapture { display_id });
-                    // The next start classifies attached-vs-own against wayland_alive:
-                    // wait for the compositor to drain the stop, or an immediate restart
-                    // attaches to the dying capture and records nothing.
-                    let (ack_tx, ack_rx) = mpsc::channel();
-                    if tx.send(ThreadCommand::Barrier { reply: ack_tx }).is_ok() {
-                        let _ = ack_rx.recv_timeout(Duration::from_secs(2));
-                    }
+            let client_owns = crate::wayland_owners()
+                .lock()
+                .unwrap()
+                .contains_key(&display_id);
+            if !client_owns && let Some(tx) = crate::computer_use::wayland_command_sender() {
+                let _ = tx.send(ThreadCommand::StopCapture { display_id });
+                // The next start classifies attached-vs-own against wayland_alive:
+                // wait for the compositor to drain the stop, or an immediate restart
+                // attaches to the dying capture and records nothing.
+                let (ack_tx, ack_rx) = mpsc::channel();
+                if tx.send(ThreadCommand::Barrier { reply: ack_tx }).is_ok() {
+                    let _ = ack_rx.recv_timeout(Duration::from_secs(2));
                 }
+            }
         }
         RecordingMode::WaylandAttached => {}
     }
@@ -814,9 +890,11 @@ pub fn stop() -> Result<RecordingStatus, String> {
     }
     drop(active.tx);
     let _ = active.writer.join();
-    let finished = LAST_FINISHED.lock().unwrap().clone().ok_or_else(|| {
-        format!("recording of {} produced no final status", active.path)
-    })?;
+    let finished = LAST_FINISHED
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| format!("recording of {} produced no final status", active.path))?;
     match finished.error {
         Some(ref e) => Err(e.clone()),
         None => Ok(finished),
@@ -863,7 +941,9 @@ pub fn finalize_on_exit() {
 pub fn autostart_from_env() {
     use std::sync::OnceLock;
     static STARTED: OnceLock<()> = OnceLock::new();
-    let Ok(path) = std::env::var("PIXELFLUX_RECORD") else { return };
+    let Ok(path) = std::env::var("PIXELFLUX_RECORD") else {
+        return;
+    };
     if path.is_empty() {
         return;
     }
@@ -878,7 +958,9 @@ pub fn autostart_from_env() {
         let mut last_err = String::new();
         loop {
             let wayland_up = crate::computer_use::wayland_command_sender().is_some();
-            let x11_up = std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
+            let x11_up = std::env::var("DISPLAY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
             let ready = match opts.backend {
                 Some(PreferredBackend::X11) => x11_up,
                 Some(PreferredBackend::Wayland) => wayland_up,
@@ -893,7 +975,11 @@ pub fn autostart_from_env() {
             if Instant::now() >= deadline {
                 eprintln!(
                     "[recorder] PIXELFLUX_RECORD autostart gave up: {}",
-                    if last_err.is_empty() { "no capture backend appeared" } else { &last_err }
+                    if last_err.is_empty() {
+                        "no capture backend appeared"
+                    } else {
+                        &last_err
+                    }
                 );
                 return;
             }
@@ -945,15 +1031,28 @@ mod tests {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         let packet: &[u8] = &[0xf8, 0, 0];
         for (granule, packets) in [(960, 1), (1_920, 1), (50_880, 1), (52_800, 2), (53_000, 1)] {
-            writer.write_all(&ogg_page(granule, &vec![packet; packets])).unwrap();
+            writer
+                .write_all(&ogg_page(granule, &vec![packet; packets]))
+                .unwrap();
         }
         drop(writer);
         let (tx, rx) = bounded::<Tap>(16);
-        audio_thread(ogg::PageReader::new(reader), tx, RecShared::new(), Arc::new(AtomicBool::new(false)));
-        let dts: Vec<u64> = rx.try_iter().map(|t| match t {
-            Tap::Audio(_, dts) => dts,
-            _ => unreachable!(),
-        }).collect();
-        assert_eq!(dts.iter().map(|d| d - dts[0]).collect::<Vec<_>>(), [0, 960, 49_920, 50_880, 51_840, 52_800]);
+        audio_thread(
+            ogg::PageReader::new(reader),
+            tx,
+            RecShared::new(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let dts: Vec<u64> = rx
+            .try_iter()
+            .map(|t| match t {
+                Tap::Audio(_, dts) => dts,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            dts.iter().map(|d| d - dts[0]).collect::<Vec<_>>(),
+            [0, 960, 49_920, 50_880, 51_840, 52_800]
+        );
     }
 }

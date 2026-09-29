@@ -25,16 +25,16 @@
 //! from memory, and `abi_matches` checks the sizes those numbers encode.
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_uint, c_void, CString};
+use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 use std::mem::size_of;
-use std::sync::OnceLock;
 use std::ptr;
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 
 use super::codec::{
-    av1_is_key, frame_type_from_key, h264_dpb_frames, h264_frame_type, h265_dpb_frames,
-    h265_frame_type, push_video_header, Codec, FRAME_KEY, VIDEO_HEADER_LEN,
+    Codec, FRAME_KEY, VIDEO_HEADER_LEN, av1_is_key, frame_type_from_key, h264_dpb_frames,
+    h264_frame_type, h265_dpb_frames, h265_frame_type, push_video_header,
 };
 use super::reference::{Reference, ReferenceWindow};
 use crate::RustCaptureSettings;
@@ -372,7 +372,11 @@ impl Default for NvSurfConfigParams {
 /// a frame of pure red and decoding it back: B,G,R,A bytes come out right as `XRGB32`, and the
 /// mirrored R,G,B,A order as `ABGR32`, whatever the names suggest.
 fn staging_format(rgba: bool) -> i32 {
-    if rgba { NVBUF_COLOR_ABGR32 } else { NVBUF_COLOR_XRGB32 }
+    if rgba {
+        NVBUF_COLOR_ABGR32
+    } else {
+        NVBUF_COLOR_XRGB32
+    }
 }
 
 /// What a caller reads off a surface's first plane: the DMABUF the encoder is fed, and the
@@ -395,17 +399,39 @@ fn abi_matches() -> Result<(), String> {
         ("v4l2_streamparm", size_of::<StreamParm>(), 204),
         ("v4l2_ext_control", size_of::<ExtControl>(), 20),
         ("v4l2_ext_controls", size_of::<ExtControls>(), 32),
-        ("NvBufferCreateParams", size_of::<NvBufferCreateParams>(), 28),
-        ("NvBufSurfaceCreateParams", size_of::<NvSurfCreateParams>(), 32),
-        ("NvBufSurfaceAllocateParams", size_of::<NvSurfAllocateParams>(), 80),
+        (
+            "NvBufferCreateParams",
+            size_of::<NvBufferCreateParams>(),
+            28,
+        ),
+        (
+            "NvBufSurfaceCreateParams",
+            size_of::<NvSurfCreateParams>(),
+            32,
+        ),
+        (
+            "NvBufSurfaceAllocateParams",
+            size_of::<NvSurfAllocateParams>(),
+            80,
+        ),
         ("NvBufSurface", size_of::<NvSurf>(), 64),
         ("NvBufSurfaceParams", size_of::<NvSurfParams>(), 384),
-        ("NvBufSurfTransformParams", size_of::<NvSurfTransformParams>(), 32),
-        ("NvBufSurfTransformConfigParams", size_of::<NvSurfConfigParams>(), 16),
+        (
+            "NvBufSurfTransformParams",
+            size_of::<NvSurfTransformParams>(),
+            32,
+        ),
+        (
+            "NvBufSurfTransformConfigParams",
+            size_of::<NvSurfConfigParams>(),
+            16,
+        ),
     ];
     for (name, got, want) in expected {
         if got != want {
-            return Err(format!("{name} is {got} bytes here, the kernel ABI is {want}"));
+            return Err(format!(
+                "{name} is {got} bytes here, the kernel ABI is {want}"
+            ));
         }
     }
     Ok(())
@@ -430,8 +456,22 @@ struct RpsLayout {
     config_store: usize,
 }
 
-const RPS_R32: RpsLayout = RpsLayout { enable: 12, num_ref: 4, prop: 8, params: 84, metadata: 56, config_store: 48 };
-const RPS_R36: RpsLayout = RpsLayout { enable: 28, num_ref: 20, prop: 24, params: 232, metadata: 72, config_store: 56 };
+const RPS_R32: RpsLayout = RpsLayout {
+    enable: 12,
+    num_ref: 4,
+    prop: 8,
+    params: 84,
+    metadata: 56,
+    config_store: 48,
+};
+const RPS_R36: RpsLayout = RpsLayout {
+    enable: 28,
+    num_ref: 20,
+    prop: 24,
+    params: 232,
+    metadata: 72,
+    config_store: 56,
+};
 
 /// The layout for the release `/etc/nv_tegra_release` names; the surface library an image ships
 /// says nothing about it.
@@ -445,7 +485,10 @@ fn rps_layout() -> Option<&'static RpsLayout> {
 
 fn rps_layout_for(release: &str) -> Option<&'static RpsLayout> {
     // "# R36 (release), REVISION: 4.3, ..."
-    let major = release.trim_start_matches(['#', ' ']).split([' ', '(']).next()?;
+    let major = release
+        .trim_start_matches(['#', ' '])
+        .split([' ', '('])
+        .next()?;
     match major {
         "R32" => Some(&RPS_R32),
         "R36" => Some(&RPS_R36),
@@ -606,18 +649,17 @@ fn load_surfaces() -> Result<Surfaces, String> {
                 sym(&nvbuf, b"NvBufferTransform\0")?,
                 sym(&nvbuf, b"NvBufferDestroy\0")?,
             );
-        Ok(Surfaces::Utils(UtilsApi {
+            Ok(Surfaces::Utils(UtilsApi {
                 create: unsafe { std::mem::transmute::<*const c_void, NvCreate>(create) },
                 raw2buf: unsafe { std::mem::transmute::<*const c_void, NvRaw2Buf>(raw2buf) },
                 transform: unsafe { std::mem::transmute::<*const c_void, NvTransform>(transform) },
                 destroy: unsafe { std::mem::transmute::<*const c_void, NvDestroy>(destroy) },
                 _lib: nvbuf,
-        }))
+            }))
         }
         Err(utils_error) => {
-            let surface = open_lib("libnvbufsurface.so").map_err(|e| {
-                format!("neither surface API is loadable: {utils_error}; {e}")
-            })?;
+            let surface = open_lib("libnvbufsurface.so")
+                .map_err(|e| format!("neither surface API is loadable: {utils_error}; {e}"))?;
             let xform = open_lib("libnvbufsurftransform.so")?;
             let (alloc, destroy, map, unmap, sync) = (
                 sym(&surface, b"NvBufSurfaceAllocate\0")?,
@@ -630,17 +672,21 @@ fn load_surfaces() -> Result<Surfaces, String> {
                 sym(&xform, b"NvBufSurfTransform\0")?,
                 sym(&xform, b"NvBufSurfTransformSetSessionParams\0")?,
             );
-        Ok(Surfaces::Surface(SurfaceApi {
+            Ok(Surfaces::Surface(SurfaceApi {
                 alloc: unsafe { std::mem::transmute::<*const c_void, NvSurfAlloc>(alloc) },
                 destroy: unsafe { std::mem::transmute::<*const c_void, NvSurfDestroy>(destroy) },
                 map: unsafe { std::mem::transmute::<*const c_void, NvSurfMap>(map) },
                 unmap: unsafe { std::mem::transmute::<*const c_void, NvSurfUnMap>(unmap) },
                 sync: unsafe { std::mem::transmute::<*const c_void, NvSurfSync>(sync) },
-                transform: unsafe { std::mem::transmute::<*const c_void, NvSurfTransform>(transform) },
-                set_session: unsafe { std::mem::transmute::<*const c_void, NvSurfSetSession>(set_session) },
+                transform: unsafe {
+                    std::mem::transmute::<*const c_void, NvSurfTransform>(transform)
+                },
+                set_session: unsafe {
+                    std::mem::transmute::<*const c_void, NvSurfSetSession>(set_session)
+                },
                 _surface: surface,
                 _transform: xform,
-        }))
+            }))
         }
     }
 }
@@ -665,7 +711,10 @@ pub fn coded_fourcc(codec: Codec) -> Option<u32> {
 /// that does carry it.
 pub fn served() -> Vec<Codec> {
     static COMPATIBLE: OnceLock<Vec<u8>> = OnceLock::new();
-    served_on(COMPATIBLE.get_or_init(|| std::fs::read("/proc/device-tree/compatible").unwrap_or_default()))
+    served_on(
+        COMPATIBLE
+            .get_or_init(|| std::fs::read("/proc/device-tree/compatible").unwrap_or_default()),
+    )
 }
 
 /// `served` for a board whose device tree `compatible` list, NUL-separated `nvidia,<name>`
@@ -674,7 +723,11 @@ fn served_on(compatible: &[u8]) -> Vec<Codec> {
     let without_av1 = compatible
         .split(|&b| b == 0)
         .filter_map(|entry| std::str::from_utf8(entry).ok()?.rsplit(',').next())
-        .any(|soc| ["tegra21", "tegra18", "tegra19"].iter().any(|generation| soc.starts_with(generation)));
+        .any(|soc| {
+            ["tegra21", "tegra18", "tegra19"]
+                .iter()
+                .any(|generation| soc.starts_with(generation))
+        });
     let mut served = vec![Codec::H264, Codec::H265];
     if !without_av1 {
         served.push(Codec::Av1);
@@ -701,7 +754,9 @@ pub fn available() -> bool {
             return false;
         }
         ENCODER_NODES.iter().any(|node| {
-            let Ok(path) = CString::new(*node) else { return false };
+            let Ok(path) = CString::new(*node) else {
+                return false;
+            };
             let mut info: libc::stat = unsafe { std::mem::zeroed() };
             let found = unsafe { libc::stat(path.as_ptr(), &mut info) } == 0;
             found && (info.st_mode & libc::S_IFMT) == libc::S_IFCHR
@@ -790,7 +845,9 @@ impl TegraEncoder {
         let fps = settings.target_fps.max(1.0);
         let bitrate_bps = (settings.video_bitrate_kbps.max(1) as u32).saturating_mul(1000);
         if width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0 {
-            return Err(format!("the encoder needs even dimensions, got {width}x{height}"));
+            return Err(format!(
+                "the encoder needs even dimensions, got {width}x{height}"
+            ));
         }
         let vendor = vendor().ok_or("the Tegra vendor libraries are unavailable")?;
         // The surface library loads before the node is opened, and that order is the shim's, not
@@ -802,7 +859,8 @@ impl TegraEncoder {
         let mut opened = "";
         for node in ENCODER_NODES {
             let path = CString::new(node).unwrap();
-            let candidate = unsafe { (vendor.open)(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+            let candidate =
+                unsafe { (vendor.open)(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
             if candidate >= 0 {
                 fd = candidate;
                 opened = node;
@@ -861,7 +919,10 @@ impl TegraEncoder {
     fn ioctl<T>(&self, request: u64, arg: &mut T, what: &str) -> Result<(), String> {
         let rc = unsafe { (self.vendor.ioctl)(self.fd, request, arg as *mut T as *mut c_void) };
         if rc < 0 {
-            return Err(format!("{what} failed: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "{what} failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Ok(())
     }
@@ -879,7 +940,9 @@ impl TegraEncoder {
             return Err(format!("NvBufSurfaceAllocate for {what} failed"));
         }
         let Some(batch) = (unsafe { surf.as_mut() }) else {
-            return Err(format!("NvBufSurfaceAllocate for {what} returned no surface"));
+            return Err(format!(
+                "NvBufSurfaceAllocate for {what} returned no surface"
+            ));
         };
         // `numFilled` is what the transform reads to know the batch carries a frame.
         batch.num_filled = 1;
@@ -887,7 +950,14 @@ impl TegraEncoder {
             unsafe { (api.destroy)(surf) };
             return Err(format!("{what} came back carrying no plane"));
         };
-        Ok((surf, SurfacePlane { desc: plane.buffer_desc, pitch: plane.pitch as usize, height: plane.height }))
+        Ok((
+            surf,
+            SurfacePlane {
+                desc: plane.buffer_desc,
+                pitch: plane.pitch as usize,
+                height: plane.height,
+            },
+        ))
     }
 
     /// Where the staging plane is mapped, or `None` if the batch, its plane, or the mapping is
@@ -936,20 +1006,29 @@ impl TegraEncoder {
                 // Pinned to the VIC block. The default engine and the VIC both cost 4.9 ms a
                 // frame at 1080p on an AGX Orin and the GPU 0.9 ms, but that GPU is busy with
                 // the work the board exists for.
-                let mut cfg = NvSurfConfigParams { compute_mode: NVBUF_SURF_COMPUTE_VIC, ..Default::default() };
+                let mut cfg = NvSurfConfigParams {
+                    compute_mode: NVBUF_SURF_COMPUTE_VIC,
+                    ..Default::default()
+                };
                 if unsafe { (api.set_session)(&mut cfg) } != NVBUF_SURF_TRANSFORM_SUCCESS {
-                    eprintln!("[pixelflux] Tegra: the transform session would not take the VIC; using its default engine.");
+                    eprintln!(
+                        "[pixelflux] Tegra: the transform session would not take the VIC; using its default engine."
+                    );
                 }
 
                 let mut params = NvSurfAllocateParams::default();
                 params.params.width = self.width as u32;
                 params.params.height = self.height as u32;
                 params.params.layout = NVBUF_LAYOUT_PITCH;
-                params.params.color_format =
-                    if rgba { NVBUF_SURF_COLOR_RGBA } else { NVBUF_SURF_COLOR_BGRX };
+                params.params.color_format = if rgba {
+                    NVBUF_SURF_COLOR_RGBA
+                } else {
+                    NVBUF_SURF_COLOR_BGRX
+                };
                 params.params.mem_type = NVBUF_MEM_SURFACE_ARRAY;
                 params.memtag = NVBUF_SURF_TAG_NONE;
-                let (surf, plane) = Self::allocate_surface(api, &mut params, "the staging surface")?;
+                let (surf, plane) =
+                    Self::allocate_surface(api, &mut params, "the staging surface")?;
                 self.staging_surf = surf;
                 self.staging_fd = plane.desc as c_int;
                 self.staging_pitch = plane.pitch;
@@ -970,7 +1049,8 @@ impl TegraEncoder {
                 params.params.color_format = NVBUF_SURF_COLOR_NV12;
                 params.memtag = NVBUF_SURF_TAG_VIDEO_ENC;
                 for slot in 0..OUTPUT_BUFFERS {
-                    let (surf, plane) = Self::allocate_surface(api, &mut params, "an NV12 surface")?;
+                    let (surf, plane) =
+                        Self::allocate_surface(api, &mut params, "an NV12 surface")?;
                     self.nv12_surf[slot] = surf;
                     self.nv12_fd[slot] = plane.desc as c_int;
                 }
@@ -1082,8 +1162,17 @@ impl TegraEncoder {
     /// the number happens to name, which silently wrecks the rest of the configuration.
     fn set_control(&self, id: u32, value: i64, what: &str) -> Result<(), String> {
         let mut vbv = value as u32;
-        let value = if id == CID_VBV_SIZE { &mut vbv as *mut u32 as i64 } else { value };
-        let mut control = ExtControl { id, size: 0, reserved2: 0, value };
+        let value = if id == CID_VBV_SIZE {
+            &mut vbv as *mut u32 as i64
+        } else {
+            value
+        };
+        let mut control = ExtControl {
+            id,
+            size: 0,
+            reserved2: 0,
+            value,
+        };
         let mut controls = ExtControls {
             which: V4L2_CTRL_CLASS_MPEG,
             count: 1,
@@ -1098,7 +1187,12 @@ impl TegraEncoder {
 
     /// Set a compound control, whose value the driver reads through the pointer in the union.
     fn set_pointer_control(&self, id: u32, value: *const u8, what: &str) -> Result<(), String> {
-        let mut control = ExtControl { id, size: 0, reserved2: 0, value: value as i64 };
+        let mut control = ExtControl {
+            id,
+            size: 0,
+            reserved2: 0,
+            value: value as i64,
+        };
         let mut controls = ExtControls {
             which: V4L2_CTRL_CLASS_MPEG,
             count: 1,
@@ -1127,12 +1221,15 @@ impl TegraEncoder {
             _ => return,
         };
         let Some(layout) = rps_layout() else {
-            crate::log::debug!("[pixelflux] Tegra: no external RPS layout known for this L4T release");
+            crate::log::debug!(
+                "[pixelflux] Tegra: no external RPS layout known for this L4T release"
+            );
             return;
         };
         let mut enable = Fields::new(layout.enable);
         enable.u8(0, 1).u32(at, bits);
-        if let Err(e) = self.set_pointer_control(CID_EXTERNAL_RPS, enable.as_ptr(), "external RPS") {
+        if let Err(e) = self.set_pointer_control(CID_EXTERNAL_RPS, enable.as_ptr(), "external RPS")
+        {
             crate::log::debug!("[pixelflux] Tegra: {e}; a lost frame costs a key frame");
             return;
         }
@@ -1141,7 +1238,9 @@ impl TegraEncoder {
         // encoder keeps its default of one, and the window holds what the encoder does.
         let mut count = Fields::new(layout.num_ref);
         count.u32(0, self.dpb);
-        if let Err(e) = self.set_pointer_control(CID_NUM_REFERENCE_FRAMES, count.as_ptr(), "reference frames") {
+        if let Err(e) =
+            self.set_pointer_control(CID_NUM_REFERENCE_FRAMES, count.as_ptr(), "reference frames")
+        {
             eprintln!("[pixelflux] Tegra: {e}; predicting from one reference frame");
             self.dpb = 1;
         }
@@ -1153,13 +1252,26 @@ impl TegraEncoder {
     /// what that makes it predict from. An empty set is a key frame — the first, one asked for,
     /// one the window needs because nothing it holds is left, and the periodic one, coded here
     /// since the encoder's own interval is parked.
-    fn queue_references(&mut self, layout: &RpsLayout, slot: usize, frame_number: u64, force_idr: bool) -> Result<(), String> {
-        let references = self.references.as_ref().ok_or("the reference window is missing")?;
+    fn queue_references(
+        &mut self,
+        layout: &RpsLayout,
+        slot: usize,
+        frame_number: u64,
+        force_idr: bool,
+    ) -> Result<(), String> {
+        let references = self
+            .references
+            .as_ref()
+            .ok_or("the reference window is missing")?;
         let key = force_idr
             || self.resync
             || self.since_key >= self.keyframe_every
             || !references.has_reference();
-        let held: Vec<u64> = if key { Vec::new() } else { references.held().filter(|f| !f.2).map(|f| f.1).collect() };
+        let held: Vec<u64> = if key {
+            Vec::new()
+        } else {
+            references.held().filter(|f| !f.2).map(|f| f.1).collect()
+        };
         let held = &held[held.len().saturating_sub(RPS_LIST_LEN)..];
 
         // The encoder's own ids are the window's timestamps, which do not wrap the way the frame
@@ -1181,7 +1293,10 @@ impl TegraEncoder {
             .u32(layout.config_store, slot as u32);
         self.set_pointer_control(CID_INPUT_METADATA, metadata.as_ptr(), "frame references")?;
 
-        let reference = self.references.as_mut().map_or(Reference::Untracked, |w| w.record(frame_number as u16, key));
+        let reference = self
+            .references
+            .as_mut()
+            .map_or(Reference::Untracked, |w| w.record(frame_number as u16, key));
         // A unit comes back one or two frames later; one the encoder never returns must not pin
         // the rest of the queue behind it.
         if self.in_flight.len() >= OUTPUT_BUFFERS + CAPTURE_BUFFERS {
@@ -1211,7 +1326,9 @@ impl TegraEncoder {
     /// still lists, so the next frame is a key frame to make them agree again.
     fn note_key_frame(&mut self, reference: Reference) {
         if self.references.is_some() && reference != Reference::None {
-            eprintln!("[pixelflux] Tegra: the encoder coded a key frame the session did not ask for; resynchronizing its references");
+            eprintln!(
+                "[pixelflux] Tegra: the encoder coded a key frame the session did not ask for; resynchronizing its references"
+            );
             self.resync = true;
         }
     }
@@ -1277,8 +1394,12 @@ impl TegraEncoder {
         coded: u32,
     ) -> Result<(), String> {
         let pixels = self.width as u32 * self.height as u32;
-        let mut capture_format =
-            self.format(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, coded, 1, pixels.max(2 << 20));
+        let mut capture_format = self.format(
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            coded,
+            1,
+            pixels.max(2 << 20),
+        );
         self.ioctl(VIDIOC_S_FMT, &mut capture_format, "S_FMT capture")?;
         let mut output_format =
             self.format(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_NV12M, 2, 0);
@@ -1287,11 +1408,19 @@ impl TegraEncoder {
 
         // No infinite GOP here either: a session that asks for none gets ten seconds, long enough
         // not to spend bitrate on key frames and short enough to bound recovery when one is lost.
-        let seconds = if settings.keyframe_interval_s > 0.0 { settings.keyframe_interval_s } else { 10.0 };
+        let seconds = if settings.keyframe_interval_s > 0.0 {
+            settings.keyframe_interval_s
+        } else {
+            10.0
+        };
         let keyframe = ((fps * seconds) as i64).clamp(1, 600);
         let vbv = (bitrate_bps as f64 / fps.max(1.0)) as i64;
         self.set_control(CID_BITRATE, bitrate_bps as i64, "bitrate")?;
-        self.set_control(CID_BITRATE_MODE, BITRATE_MODE_CBR as i64, "rate control mode")?;
+        self.set_control(
+            CID_BITRATE_MODE,
+            BITRATE_MODE_CBR as i64,
+            "rate control mode",
+        )?;
         // AV1 has no profile control in the vendor header; the other two carry their own.
         let profile = match self.codec {
             Codec::H264 => Some((CID_H264_PROFILE, H264_PROFILE_MAIN)),
@@ -1327,7 +1456,11 @@ impl TegraEncoder {
         // parked and the session asks for each key frame with an empty set.
         self.keyframe_every = keyframe as u64;
         self.enable_external_rps();
-        let idr_interval = if self.rps.is_some() { i32::MAX as i64 } else { keyframe };
+        let idr_interval = if self.rps.is_some() {
+            i32::MAX as i64
+        } else {
+            keyframe
+        };
         self.set_control(CID_IDR_INTERVAL, idr_interval, "IDR interval")?;
         if self.rps.is_some() {
             self.set_control(CID_GOP_SIZE, i32::MAX as i64, "GOP size")?;
@@ -1384,7 +1517,10 @@ impl TegraEncoder {
             };
             unsafe { libc::close(export.fd) };
             if data == libc::MAP_FAILED {
-                return Err(format!("mmap of a capture plane failed: {}", std::io::Error::last_os_error()));
+                return Err(format!(
+                    "mmap of a capture plane failed: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
             self.capture[index] = (data, length);
             self.ioctl(VIDIOC_QBUF, &mut buffer, "QBUF capture")?;
@@ -1397,7 +1533,14 @@ impl TegraEncoder {
         Ok(())
     }
 
-    fn buffer(&self, type_: u32, memory: u32, index: u32, planes: *mut Plane, count: u32) -> Buffer {
+    fn buffer(
+        &self,
+        type_: u32,
+        memory: u32,
+        index: u32,
+        planes: *mut Plane,
+        count: u32,
+    ) -> Buffer {
         Buffer {
             index,
             type_,
@@ -1456,7 +1599,11 @@ impl TegraEncoder {
             return Ok(());
         }
         self.set_control(CID_BITRATE, wanted as i64, "bitrate")?;
-        self.set_control(CID_VBV_SIZE, (wanted as f64 / settings.target_fps.max(1.0)) as i64, "VBV size")?;
+        self.set_control(
+            CID_VBV_SIZE,
+            (wanted as f64 / settings.target_fps.max(1.0)) as i64,
+            "VBV size",
+        )?;
         self.bitrate_bps = wanted;
         Ok(())
     }
@@ -1497,7 +1644,12 @@ impl TegraEncoder {
     /// Queue the staging frame and take what the engine has ready, waiting for it where a unit
     /// is expected. A wait that runs out raises the number in flight one is expected from, so a
     /// deeper engine costs one wait per depth rather than one per frame.
-    fn submit(&mut self, frame_number: u64, force_idr: bool, repeat: bool) -> Result<Vec<u8>, String> {
+    fn submit(
+        &mut self,
+        frame_number: u64,
+        force_idr: bool,
+        repeat: bool,
+    ) -> Result<Vec<u8>, String> {
         let slot = if self.queued < OUTPUT_BUFFERS {
             self.queued
         } else {
@@ -1537,7 +1689,11 @@ impl TegraEncoder {
             self.held = Some((frame_number, slot));
         }
         if self.outstanding >= self.wait_from {
-            let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
+            let mut poll = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             if unsafe { libc::poll(&mut poll, 1, OUTPUT_WAIT_MS) } != 1 {
                 self.wait_from = self.outstanding + 1;
             }
@@ -1559,7 +1715,11 @@ impl TegraEncoder {
                 2,
             );
             let rc = unsafe {
-                (self.vendor.ioctl)(self.fd, VIDIOC_DQBUF, &mut buffer as *mut Buffer as *mut c_void)
+                (self.vendor.ioctl)(
+                    self.fd,
+                    VIDIOC_DQBUF,
+                    &mut buffer as *mut Buffer as *mut c_void,
+                )
             };
             if rc >= 0 {
                 return Ok(buffer.index as usize);
@@ -1571,7 +1731,11 @@ impl TegraEncoder {
             if std::time::Instant::now() > deadline {
                 return Err("the encoder did not return an output buffer in 500 ms".into());
             }
-            let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+            let mut poll = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
             unsafe { libc::poll(&mut poll, 1, 20) };
         }
     }
@@ -1591,7 +1755,11 @@ impl TegraEncoder {
                 1,
             );
             let rc = unsafe {
-                (self.vendor.ioctl)(self.fd, VIDIOC_DQBUF, &mut buffer as *mut Buffer as *mut c_void)
+                (self.vendor.ioctl)(
+                    self.fd,
+                    VIDIOC_DQBUF,
+                    &mut buffer as *mut Buffer as *mut c_void,
+                )
             };
             if rc < 0 {
                 // EAGAIN is the only answer that means "nothing ready yet" on a non-blocking
@@ -1607,7 +1775,10 @@ impl TegraEncoder {
             let index = buffer.index as usize;
             let length = planes[0].bytesused as usize;
             self.outstanding = self.outstanding.saturating_sub(1);
-            if self.held.is_some_and(|(number, _)| number == buffer.timestamp[0] as u64) {
+            if self
+                .held
+                .is_some_and(|(number, _)| number == buffer.timestamp[0] as u64)
+            {
                 self.held = None;
             }
             if length > 0 {
@@ -1706,13 +1877,27 @@ mod tests {
     /// a session that sent the kernel's fourcc would be refused a format the device does serve.
     #[test]
     fn hevc_is_spelled_the_way_the_vendor_library_spells_it() {
-        assert_eq!(coded_fourcc(Codec::H264), Some(u32::from_le_bytes(*b"H264")));
-        assert_eq!(coded_fourcc(Codec::H265), Some(u32::from_le_bytes(*b"H265")));
+        assert_eq!(
+            coded_fourcc(Codec::H264),
+            Some(u32::from_le_bytes(*b"H264"))
+        );
+        assert_eq!(
+            coded_fourcc(Codec::H265),
+            Some(u32::from_le_bytes(*b"H265"))
+        );
         assert_eq!(coded_fourcc(Codec::Av1), Some(u32::from_le_bytes(*b"AV10")));
-        assert_ne!(coded_fourcc(Codec::H265), Some(u32::from_le_bytes(*b"HEVC")),
-                   "the kernel's HEVC fourcc is not the vendor library's");
+        assert_ne!(
+            coded_fourcc(Codec::H265),
+            Some(u32::from_le_bytes(*b"HEVC")),
+            "the kernel's HEVC fourcc is not the vendor library's"
+        );
         for codec in [Codec::Vp8, Codec::Vp9, Codec::Jpeg] {
-            assert_eq!(coded_fourcc(codec), None, "{} has no vendor encoder here", codec.display());
+            assert_eq!(
+                coded_fourcc(codec),
+                None,
+                "{} has no vendor encoder here",
+                codec.display()
+            );
         }
     }
 
@@ -1724,15 +1909,32 @@ mod tests {
     fn every_codec_reported_is_one_a_session_can_be_opened_for() {
         let nano = b"nvidia,p3449-0000-b00+p3448-0000-b00\0nvidia,jetson-nano\0nvidia,tegra210\0";
         let tx2 = b"nvidia,quill\0nvidia,tegra186\0";
-        let xavier = b"nvidia,galen\0nvidia,jetson-xavier\0nvidia,p2822-0000+p2888-0001\0nvidia,tegra194\0";
+        let xavier =
+            b"nvidia,galen\0nvidia,jetson-xavier\0nvidia,p2822-0000+p2888-0001\0nvidia,tegra194\0";
         let orin = b"nvidia,p3737-0000+p3701-0000\0nvidia,p3701-0000\0nvidia,tegra234\0";
         let thor = b"nvidia,tegra264\0";
-        for (board, av1) in [(&nano[..], false), (tx2, false), (xavier, false), (orin, true), (thor, true), (b"", true)] {
+        for (board, av1) in [
+            (&nano[..], false),
+            (tx2, false),
+            (xavier, false),
+            (orin, true),
+            (thor, true),
+            (b"", true),
+        ] {
             let served = served_on(board);
-            assert_eq!(served.contains(&Codec::Av1), av1, "{}", String::from_utf8_lossy(board));
+            assert_eq!(
+                served.contains(&Codec::Av1),
+                av1,
+                "{}",
+                String::from_utf8_lossy(board)
+            );
             assert!(served.contains(&Codec::H264) && served.contains(&Codec::H265));
             for codec in &served {
-                assert!(coded_fourcc(*codec).is_some(), "{} is reported but has no format", codec.display());
+                assert!(
+                    coded_fourcc(*codec).is_some(),
+                    "{} is reported but has no format",
+                    codec.display()
+                );
             }
         }
         assert!(!served().is_empty());
@@ -1744,8 +1946,16 @@ mod tests {
     #[test]
     fn the_profile_control_is_the_codec_s_own() {
         assert_ne!(CID_H264_PROFILE, CID_H265_PROFILE);
-        assert_eq!(CID_H265_PROFILE, 0x0099_0900 + 513, "V4L2_CID_MPEG_BASE + 513");
-        assert_eq!(CID_H264_PROFILE, 0x0099_0900 + 363, "V4L2_CID_MPEG_VIDEO_H264_PROFILE");
+        assert_eq!(
+            CID_H265_PROFILE,
+            0x0099_0900 + 513,
+            "V4L2_CID_MPEG_BASE + 513"
+        );
+        assert_eq!(
+            CID_H264_PROFILE,
+            0x0099_0900 + 363,
+            "V4L2_CID_MPEG_VIDEO_H264_PROFILE"
+        );
     }
 
     /// The external-RPS layout follows the release the host runs, and only the two measured:
@@ -1756,16 +1966,28 @@ mod tests {
         let nano = "# R32 (release), REVISION: 6.1, GCID: 27863751, BOARD: t210ref, EABI: aarch64";
         assert_eq!(rps_layout_for(orin).map(|l| l.metadata), Some(72));
         assert_eq!(rps_layout_for(nano).map(|l| l.metadata), Some(56));
-        assert!(rps_layout_for("# R35 (release), REVISION: 6.0").is_none(), "JetPack 5 was never measured");
+        assert!(
+            rps_layout_for("# R35 (release), REVISION: 6.0").is_none(),
+            "JetPack 5 was never measured"
+        );
         assert!(rps_layout_for("").is_none());
         assert_eq!(CID_INPUT_METADATA, 0x0099_0900 + 541);
         assert_eq!(CID_EXTERNAL_RPS, 0x0099_0900 + 542);
         assert_eq!(CID_NUM_REFERENCE_FRAMES, 0x0099_0900 + 532);
         for layout in [&RPS_R32, &RPS_R36] {
-            assert!(20 + RPS_LIST_LEN * layout.prop <= layout.params, "the list fits its structure");
+            assert!(
+                20 + RPS_LIST_LEN * layout.prop <= layout.params,
+                "the list fits its structure"
+            );
             assert!(layout.config_store + 4 <= layout.metadata);
-            assert!(layout.config_store >= 40, "past the pointers the metadata leads with");
-            assert!(8 + 4 <= layout.enable, "both counts fit the enable structure");
+            assert!(
+                layout.config_store >= 40,
+                "past the pointers the metadata leads with"
+            );
+            assert!(
+                8 + 4 <= layout.enable,
+                "both counts fit the enable structure"
+            );
         }
     }
 
@@ -1808,18 +2030,35 @@ mod tests {
 
     /// Test helper: encode frame `i` and wait for its own unit, so each call answers for that
     /// frame alone although the encoder hands units back a frame or two late.
-    fn encode_one(enc: &mut TegraEncoder, i: u64, w: usize, h: usize, key: bool) -> (Vec<u8>, Reference) {
+    fn encode_one(
+        enc: &mut TegraEncoder,
+        i: u64,
+        w: usize,
+        h: usize,
+        key: bool,
+    ) -> (Vec<u8>, Reference) {
         encode_frame(enc, &moving(w, h, i), w, i, key)
     }
 
     /// Test helper: `encode_one` for a frame of the caller's. Waits by the units handed back,
     /// which a session names whether or not it names references.
-    fn encode_frame(enc: &mut TegraEncoder, pixels: &[u8], w: usize, i: u64, key: bool) -> (Vec<u8>, Reference) {
-        let mut out = enc.encode_host(pixels, w * 4, false, i, 25, key).expect("encode");
+    fn encode_frame(
+        enc: &mut TegraEncoder,
+        pixels: &[u8],
+        w: usize,
+        i: u64,
+        key: bool,
+    ) -> (Vec<u8>, Reference) {
+        let mut out = enc
+            .encode_host(pixels, w * 4, false, i, 25, key)
+            .expect("encode");
         let mut came = enc.units.iter().any(|u| u.0 == i as u16);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !came {
-            assert!(std::time::Instant::now() < deadline, "frame {i} never came back");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "frame {i} never came back"
+            );
             std::thread::sleep(std::time::Duration::from_millis(2));
             out.extend(enc.collect().expect("collect"));
             came = enc.units.iter().any(|u| u.0 == i as u16);
@@ -1832,7 +2071,8 @@ mod tests {
     fn carries_parameter_sets(codec: Codec, unit: &[u8]) -> bool {
         match codec {
             Codec::H265 => {
-                let types: Vec<u8> = unit.windows(4)
+                let types: Vec<u8> = unit
+                    .windows(4)
                     .filter(|w| w[..3] == [0, 0, 1])
                     .map(|w| (w[3] >> 1) & 0x3f)
                     .collect();
@@ -1852,7 +2092,9 @@ mod tests {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (1280usize, 720usize);
         for codec in [Codec::H264, Codec::H265] {
-            let Some(mut enc) = session(codec, w, h, 10.0) else { continue };
+            let Some(mut enc) = session(codec, w, h, 10.0) else {
+                continue;
+            };
             let (first, reference) = encode_one(&mut enc, 0, w, h, true);
             if reference == Reference::Untracked {
                 println!("{codec:?}: this encoder takes no reference set, so nothing is tracked");
@@ -1863,31 +2105,49 @@ mod tests {
             let mut frames = vec![first];
             for i in 1..8u64 {
                 let (out, reference) = encode_one(&mut enc, i, w, h, false);
-                assert_eq!(reference, Reference::Frame(i as u16 - 1), "{codec:?} frame {i}");
+                assert_eq!(
+                    reference,
+                    Reference::Frame(i as u16 - 1),
+                    "{codec:?} frame {i}"
+                );
                 frames.push(out);
             }
             assert!(enc.invalidate_reference(5));
             let (out, reference) = encode_one(&mut enc, 8, w, h, false);
-            assert_eq!(reference, Reference::Frame(4), "{codec:?}: frame 8 predicts past the lost 5-7");
+            assert_eq!(
+                reference,
+                Reference::Frame(4),
+                "{codec:?}: frame 8 predicts past the lost 5-7"
+            );
             frames.push(out);
             let (out, reference) = encode_one(&mut enc, 9, w, h, false);
             assert_eq!(reference, Reference::Frame(8), "{codec:?}");
             frames.push(out);
 
-            let (mut whole, mut lossy) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
+            let (mut whole, mut lossy) = (
+                VideoDecoder::new(codec).unwrap(),
+                VideoDecoder::new(codec).unwrap(),
+            );
             for (i, f) in frames.iter().enumerate() {
                 assert!(whole.decode(f).expect("decode"), "{codec:?} frame {i}");
                 if !(5..8).contains(&i) {
-                    assert!(lossy.decode(f).expect("decode without 5-7"), "{codec:?} frame {i}");
+                    assert!(
+                        lossy.decode(f).expect("decode without 5-7"),
+                        "{codec:?} frame {i}"
+                    );
                 }
             }
             let (a, b) = (whole.frame().unwrap(), lossy.frame().unwrap());
-            let differ = a.y.chunks(a.y_stride)
-                .zip(b.y.chunks(b.y_stride))
-                .take(a.height)
-                .filter(|(ra, rb)| ra[..a.width] != rb[..a.width])
-                .count();
-            assert_eq!(differ, 0, "{codec:?}: frame 9 without frames 5-7 differs from the complete decode in {differ} rows");
+            let differ =
+                a.y.chunks(a.y_stride)
+                    .zip(b.y.chunks(b.y_stride))
+                    .take(a.height)
+                    .filter(|(ra, rb)| ra[..a.width] != rb[..a.width])
+                    .count();
+            assert_eq!(
+                differ, 0,
+                "{codec:?}: frame 9 without frames 5-7 differs from the complete decode in {differ} rows"
+            );
 
             // Frame 1 has left the window, and everything held predicts through it: a key frame,
             // asked for with an empty set, which a client that saw nothing before it starts on.
@@ -1898,13 +2158,30 @@ mod tests {
             }
             assert!(enc.invalidate_reference(1));
             let (key, reference) = encode_one(&mut enc, i, w, h, false);
-            assert_eq!(reference, Reference::None, "{codec:?}: a loss out of the window costs a key frame");
+            assert_eq!(
+                reference,
+                Reference::None,
+                "{codec:?}: a loss out of the window costs a key frame"
+            );
             assert_eq!(enc.frame_type(&key), FRAME_KEY, "{codec:?}");
-            assert!(carries_parameter_sets(codec, &key), "{codec:?}: the key frame the session asked for carries its parameter sets");
+            assert!(
+                carries_parameter_sets(codec, &key),
+                "{codec:?}: the key frame the session asked for carries its parameter sets"
+            );
             let mut fresh = VideoDecoder::new(codec).unwrap();
-            assert!(fresh.decode(&key).expect("decode"), "{codec:?}: a client starts on it alone");
-            assert_eq!(encode_one(&mut enc, i + 1, w, h, false).1, Reference::Frame(i as u16), "{codec:?}");
-            assert!(!enc.resync, "{codec:?}: the encoder coded no key frame the session did not ask for");
+            assert!(
+                fresh.decode(&key).expect("decode"),
+                "{codec:?}: a client starts on it alone"
+            );
+            assert_eq!(
+                encode_one(&mut enc, i + 1, w, h, false).1,
+                Reference::Frame(i as u16),
+                "{codec:?}"
+            );
+            assert!(
+                !enc.resync,
+                "{codec:?}: the encoder coded no key frame the session did not ask for"
+            );
         }
     }
 
@@ -1916,7 +2193,9 @@ mod tests {
     fn tegra_codes_the_key_frames_the_session_asks_for_and_no_other() {
         let (w, h) = (1280usize, 720usize);
         for codec in [Codec::H264, Codec::H265] {
-            let Some(mut enc) = session(codec, w, h, 1.0) else { continue };
+            let Some(mut enc) = session(codec, w, h, 1.0) else {
+                continue;
+            };
             if encode_one(&mut enc, 0, w, h, true).1 == Reference::Untracked {
                 println!("{codec:?}: this encoder takes no reference set, so nothing is tracked");
                 continue;
@@ -1924,17 +2203,40 @@ mod tests {
             for i in 1..95u64 {
                 let (out, reference) = encode_one(&mut enc, i, w, h, false);
                 let key = enc.frame_type(&out) == FRAME_KEY;
-                assert_eq!(key, i % 30 == 0, "{codec:?} frame {i}: a key frame every second at 30 fps, and only then");
-                assert_eq!(reference == Reference::None, key, "{codec:?} frame {i}: the header says what the bitstream is");
-                assert!(!enc.resync, "{codec:?} frame {i}: the encoder coded a key frame nobody asked for");
+                assert_eq!(
+                    key,
+                    i % 30 == 0,
+                    "{codec:?} frame {i}: a key frame every second at 30 fps, and only then"
+                );
+                assert_eq!(
+                    reference == Reference::None,
+                    key,
+                    "{codec:?} frame {i}: the header says what the bitstream is"
+                );
+                assert!(
+                    !enc.resync,
+                    "{codec:?} frame {i}: the encoder coded a key frame nobody asked for"
+                );
             }
             // Asked for between two periodic ones, and the count restarts there.
             let (out, reference) = encode_one(&mut enc, 95, w, h, true);
-            assert_eq!((enc.frame_type(&out), reference), (FRAME_KEY, Reference::None), "{codec:?}");
+            assert_eq!(
+                (enc.frame_type(&out), reference),
+                (FRAME_KEY, Reference::None),
+                "{codec:?}"
+            );
             for i in 96..125u64 {
-                assert_ne!(encode_one(&mut enc, i, w, h, false).1, Reference::None, "{codec:?} frame {i}");
+                assert_ne!(
+                    encode_one(&mut enc, i, w, h, false).1,
+                    Reference::None,
+                    "{codec:?} frame {i}"
+                );
             }
-            assert_eq!(encode_one(&mut enc, 125, w, h, false).1, Reference::None, "{codec:?}: thirty frames after the one asked for");
+            assert_eq!(
+                encode_one(&mut enc, 125, w, h, false).1,
+                Reference::None,
+                "{codec:?}: thirty frames after the one asked for"
+            );
         }
     }
 
@@ -1961,9 +2263,13 @@ mod tests {
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
         let (w, h) = (1280usize, 720usize);
         for codec in [Codec::H264, Codec::H265] {
-            let Some(mut enc) = session(codec, w, h, 10.0) else { continue };
+            let Some(mut enc) = session(codec, w, h, 10.0) else {
+                continue;
+            };
             if enc.references.is_none() {
-                println!("{codec:?}: this session takes no reference set, so a loss costs a key frame");
+                println!(
+                    "{codec:?}: this session takes no reference set, so a loss costs a key frame"
+                );
                 continue;
             }
             let mut dec = VideoDecoder::new(codec).unwrap();
@@ -1988,7 +2294,10 @@ mod tests {
                 }
                 let first = *first.get_or_insert(luma);
                 worst = worst.max(luma.abs_diff(first));
-                assert!(luma.abs_diff(first) <= 6, "{codec:?} frame {i}: the bar reads {luma}, the key frame {first}");
+                assert!(
+                    luma.abs_diff(first) <= 6,
+                    "{codec:?} frame {i}: the bar reads {luma}, the key frame {first}"
+                );
             }
             println!("{codec:?}: the bar held within {worst} of the key frame's luma");
         }
@@ -2008,12 +2317,16 @@ mod tests {
         let noise: Vec<Vec<u8>> = (0..4u32)
             .map(|k| {
                 (0..w * 240)
-                    .map(|i| ((i as u32).wrapping_mul(2654435761).wrapping_add(k * 77777) >> 24) as u8)
+                    .map(|i| {
+                        ((i as u32).wrapping_mul(2654435761).wrapping_add(k * 77777) >> 24) as u8
+                    })
                     .collect()
             })
             .collect();
         for codec in [Codec::H264, Codec::H265] {
-            let Some(mut enc) = session(codec, w, h, 10.0) else { continue };
+            let Some(mut enc) = session(codec, w, h, 10.0) else {
+                continue;
+            };
             let mut dec = VideoDecoder::new(codec).unwrap();
             let mut worst = 0f64;
             for i in 0..60u64 {
@@ -2038,13 +2351,17 @@ mod tests {
                 for row in 8..232 {
                     let decoded = &f.y[(h - 240 + row) * f.y_stride..][..w];
                     for (x, &y) in decoded.iter().enumerate() {
-                        off += (y as f64 - (16.0 + 219.0 * strip[row * w + x] as f64 / 255.0)).abs();
+                        off +=
+                            (y as f64 - (16.0 + 219.0 * strip[row * w + x] as f64 / 255.0)).abs();
                     }
                 }
                 worst = worst.max(off / (224 * w) as f64);
             }
             println!("{codec:?}: the repeating strip held within {worst:.2} of the source's luma");
-            assert!(worst < 8.0, "{codec:?}: the repeating strip drifted {worst:.2} from the source");
+            assert!(
+                worst < 8.0,
+                "{codec:?}: the repeating strip drifted {worst:.2} from the source"
+            );
         }
     }
 }

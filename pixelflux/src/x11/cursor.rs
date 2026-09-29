@@ -26,14 +26,12 @@ use std::thread::JoinHandle;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use x11rb::connection::Connection;
-use x11rb::protocol::xfixes::{
-    ConnectionExt as XfixesExt, CursorNotifyMask, GetCursorImageReply,
-};
-use x11rb::protocol::xproto::{
-    ClientMessageEvent, ConnectionExt as XprotoExt, CreateWindowAux, EventMask, WindowClass,
-    CLIENT_MESSAGE_EVENT,
-};
 use x11rb::protocol::Event;
+use x11rb::protocol::xfixes::{ConnectionExt as XfixesExt, CursorNotifyMask, GetCursorImageReply};
+use x11rb::protocol::xproto::{
+    CLIENT_MESSAGE_EVENT, ClientMessageEvent, ConnectionExt as XprotoExt, CreateWindowAux,
+    EventMask, WindowClass,
+};
 use x11rb::rust_connection::RustConnection;
 
 /// The Python cursor callback from `set_cursor_callback`, shared by every X11 capture.
@@ -58,7 +56,10 @@ struct Slot {
     monitor: Option<Monitor>,
 }
 
-static SLOT: Mutex<Slot> = Mutex::new(Slot { users: 0, monitor: None });
+static SLOT: Mutex<Slot> = Mutex::new(Slot {
+    users: 0,
+    monitor: None,
+});
 
 /// Register/replace the callback and re-deliver the current cursor to it. `None` withdraws
 /// it, releasing what the callback holds: the slot is process-wide and outlives the capture
@@ -95,7 +96,14 @@ pub fn acquire() {
                 let _done = done_tx;
                 monitor_thread(tstop, twin);
             }) {
-            Ok(join) => slot.monitor = Some(Monitor { stop, wake_win, done_rx, join }),
+            Ok(join) => {
+                slot.monitor = Some(Monitor {
+                    stop,
+                    wake_win,
+                    done_rx,
+                    join,
+                })
+            }
             Err(e) => eprintln!("[X11] cursor monitor spawn failed: {e}"),
         }
     }
@@ -321,13 +329,7 @@ fn deliver(payload: Option<&Payload>) {
         return;
     }
     Python::attach(|py| {
-        let cb = {
-            CALLBACK
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|c| c.clone_ref(py))
-        };
+        let cb = { CALLBACK.lock().unwrap().as_ref().map(|c| c.clone_ref(py)) };
         if let Some(cb) = cb {
             let py_bytes = PyBytes::new(py, png);
             if let Err(e) = cb.call1(py, (*msg_type, py_bytes, *hot_x, *hot_y)) {
@@ -496,7 +498,8 @@ mod tests {
     /// hotspot scaled by the same factor.
     #[test]
     fn oversized_cursor_capped() {
-        let (t, data, hx, hy) = cursor_to_png(&reply(64, 64, 32, 32, vec![0xFFFF_FFFF; 64 * 64]), 16);
+        let (t, data, hx, hy) =
+            cursor_to_png(&reply(64, 64, 32, 32, vec![0xFFFF_FFFF; 64 * 64]), 16);
         assert_eq!(t, "png");
         let img = image::load_from_memory(&data).unwrap();
         assert_eq!((img.width(), img.height()), (16, 16));

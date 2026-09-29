@@ -48,9 +48,10 @@ impl Server {
     pub fn bind(path: &str, config: [u8; CONFIG_SIZE], ring_fd: RawFd) -> io::Result<Self> {
         use std::os::unix::fs::MetadataExt;
         if let Some(dir) = std::path::Path::new(path).parent()
-            && !dir.as_os_str().is_empty() {
-                std::fs::create_dir_all(dir)?;
-            }
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(dir)?;
+        }
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.uid() != unsafe { libc::geteuid() } => {
                 return Err(io::Error::new(
@@ -79,7 +80,12 @@ impl Server {
         let thread = thread::Builder::new()
             .name("pixelflux-webcam-ctl".into())
             .spawn(move || serve(listener, t_wake, config, ring_fd, t_shared))?;
-        Ok(Server { path: path.to_string(), shared, wake, thread: Some(thread) })
+        Ok(Server {
+            path: path.to_string(),
+            shared,
+            wake,
+            thread: Some(thread),
+        })
     }
 
     pub fn path(&self) -> &str {
@@ -94,7 +100,11 @@ impl Server {
     /// Wake every ready client: one byte per published frame. A full socket buffer means a
     /// wakeup is already pending, so `EAGAIN` is not an error; a dead peer is retired here.
     pub fn ring_doorbell(&self) {
-        let mut clients = self.shared.clients.lock().unwrap_or_else(|e| e.into_inner());
+        let mut clients = self
+            .shared
+            .clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut i = 0;
         while i < clients.len() {
             if !clients[i].ready {
@@ -103,8 +113,12 @@ impl Server {
             }
             let byte = [1u8];
             let n = unsafe {
-                libc::send(clients[i].fd.as_raw_fd(), byte.as_ptr() as *const _, 1,
-                           libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL)
+                libc::send(
+                    clients[i].fd.as_raw_fd(),
+                    byte.as_ptr() as *const _,
+                    1,
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
             };
             if n < 0 {
                 let err = io::Error::last_os_error();
@@ -136,7 +150,11 @@ impl Drop for Server {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.shared
+            .clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.shared.ready_count.store(0, Ordering::Relaxed);
         let _ = std::fs::remove_file(&self.path);
     }
@@ -144,7 +162,10 @@ impl Drop for Server {
 
 /// Send the configuration struct with the ring memfd attached as `SCM_RIGHTS`.
 fn send_config_with_fd(sock: RawFd, config: &[u8], fd: RawFd) -> io::Result<()> {
-    let mut iov = libc::iovec { iov_base: config.as_ptr() as *mut libc::c_void, iov_len: config.len() };
+    let mut iov = libc::iovec {
+        iov_base: config.as_ptr() as *mut libc::c_void,
+        iov_len: config.len(),
+    };
     let space = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize;
     let mut cbuf = vec![0u64; space.div_ceil(mem::size_of::<u64>())];
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -169,23 +190,44 @@ fn send_config_with_fd(sock: RawFd, config: &[u8], fd: RawFd) -> io::Result<()> 
             return Err(err);
         }
         if n as usize != config.len() {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "short config send"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short config send",
+            ));
         }
         return Ok(());
     }
 }
 
-fn serve(listener: UnixListener, wake: RawFd, config: [u8; CONFIG_SIZE], ring_fd: RawFd, shared: Arc<Shared>) {
+fn serve(
+    listener: UnixListener,
+    wake: RawFd,
+    config: [u8; CONFIG_SIZE],
+    ring_fd: RawFd,
+    shared: Arc<Shared>,
+) {
     let listen_fd = listener.as_raw_fd();
     let mut pollfds: Vec<libc::pollfd> = Vec::new();
     while !shared.stop.load(Ordering::Acquire) {
         pollfds.clear();
-        pollfds.push(libc::pollfd { fd: listen_fd, events: libc::POLLIN, revents: 0 });
-        pollfds.push(libc::pollfd { fd: wake, events: libc::POLLIN, revents: 0 });
+        pollfds.push(libc::pollfd {
+            fd: listen_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        pollfds.push(libc::pollfd {
+            fd: wake,
+            events: libc::POLLIN,
+            revents: 0,
+        });
         {
             let clients = shared.clients.lock().unwrap_or_else(|e| e.into_inner());
             for c in clients.iter() {
-                pollfds.push(libc::pollfd { fd: c.fd.as_raw_fd(), events: libc::POLLIN | libc::POLLRDHUP, revents: 0 });
+                pollfds.push(libc::pollfd {
+                    fd: c.fd.as_raw_fd(),
+                    events: libc::POLLIN | libc::POLLRDHUP,
+                    revents: 0,
+                });
             }
         }
         let n = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, -1) };
@@ -220,7 +262,14 @@ fn serve(listener: UnixListener, wake: RawFd, config: [u8; CONFIG_SIZE], ring_fd
                 continue;
             }
             let mut buf = [0u8; 64];
-            let r = unsafe { libc::recv(clients[idx].fd.as_raw_fd(), buf.as_mut_ptr() as *mut _, buf.len(), libc::MSG_DONTWAIT) };
+            let r = unsafe {
+                libc::recv(
+                    clients[idx].fd.as_raw_fd(),
+                    buf.as_mut_ptr() as *mut _,
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
             let closed = if r > 0 {
                 if !clients[idx].ready {
                     clients[idx].ready = true;
@@ -230,9 +279,14 @@ fn serve(listener: UnixListener, wake: RawFd, config: [u8; CONFIG_SIZE], ring_fd
             } else if r == 0 {
                 true
             } else {
-                !matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR))
+                !matches!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR)
+                )
             };
-            if closed || pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLRDHUP) != 0 && r <= 0 {
+            if closed
+                || pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLRDHUP) != 0 && r <= 0
+            {
                 if clients[idx].ready {
                     shared.ready_count.fetch_sub(1, Ordering::Relaxed);
                 }
@@ -244,7 +298,12 @@ fn serve(listener: UnixListener, wake: RawFd, config: [u8; CONFIG_SIZE], ring_fd
     }
 }
 
-fn accept_clients(listener: &UnixListener, config: &[u8; CONFIG_SIZE], ring_fd: RawFd, shared: &Shared) {
+fn accept_clients(
+    listener: &UnixListener,
+    config: &[u8; CONFIG_SIZE],
+    ring_fd: RawFd,
+    shared: &Shared,
+) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -252,7 +311,11 @@ fn accept_clients(listener: &UnixListener, config: &[u8; CONFIG_SIZE], ring_fd: 
                 let fd = OwnedFd::from(stream);
                 match send_config_with_fd(fd.as_raw_fd(), config, ring_fd) {
                     Ok(()) => {
-                        shared.clients.lock().unwrap_or_else(|e| e.into_inner()).push(Client { fd, ready: false });
+                        shared
+                            .clients
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(Client { fd, ready: false });
                     }
                     Err(e) => eprintln!("[webcam] interposer handshake failed: {}", e),
                 }
@@ -276,7 +339,10 @@ mod tests {
 
     fn recv_config(stream: &UnixStream) -> (Vec<u8>, RawFd) {
         let mut data = vec![0u8; CONFIG_SIZE];
-        let mut iov = libc::iovec { iov_base: data.as_mut_ptr() as *mut _, iov_len: data.len() };
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr() as *mut _,
+            iov_len: data.len(),
+        };
         let space = unsafe { libc::CMSG_SPACE(4) } as usize;
         let mut cbuf = vec![0u64; space.div_ceil(8)];
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -321,7 +387,9 @@ mod tests {
         }
         assert_eq!(server.client_count(), 1);
         server.ring_doorbell();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut b = [0u8; 1];
         client.read_exact(&mut b).unwrap();
         assert_eq!(b[0], 1);

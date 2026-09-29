@@ -26,7 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use wayland_client::protocol::wl_registry;
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
@@ -35,7 +35,7 @@ use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
 };
 
-use crate::wayland::wlclient::{bounded_roundtrip, impl_sync_callback, SyncState, IO_TIMEOUT};
+use crate::wayland::wlclient::{IO_TIMEOUT, SyncState, bounded_roundtrip, impl_sync_callback};
 
 /// What a scale request did, from the caller's point of view.
 pub enum ScaleOutcome {
@@ -65,7 +65,10 @@ struct Screen {
 
 /// The logical size wlroots gives a mode at a scale (each axis truncated).
 fn logical_size(mode: (i32, i32), scale: f64) -> (i32, i32) {
-    ((mode.0 as f64 / scale) as i32, (mode.1 as f64 / scale) as i32)
+    (
+        (mode.0 as f64 / scale) as i32,
+        (mode.1 as f64 / scale) as i32,
+    )
 }
 
 /// Rectangles arranged in one space, each about to take a new size: the same
@@ -78,20 +81,29 @@ pub(crate) fn close_gaps(
     rects: &[(i32, i32, i32, i32)],
     sizes: &[(i32, i32)],
 ) -> Vec<(i32, i32, i32, i32)> {
-    let mut out: Vec<(i32, i32, i32, i32)> =
-        rects.iter().zip(sizes).map(|(r, s)| (r.0, r.1, s.0, s.1)).collect();
+    let mut out: Vec<(i32, i32, i32, i32)> = rects
+        .iter()
+        .zip(sizes)
+        .map(|(r, s)| (r.0, r.1, s.0, s.1))
+        .collect();
     // Each axis in the order of the old coordinate, so a neighbor is placed
     // before the rectangle that follows it.
     let mut order: Vec<usize> = (0..out.len()).collect();
     order.sort_by_key(|&i| rects[i].0);
     for &i in &order {
-        if let Some(&j) = order.iter().find(|&&j| rects[j].0 < rects[i].0 && rects[j].0 + rects[j].2 == rects[i].0) {
+        if let Some(&j) = order
+            .iter()
+            .find(|&&j| rects[j].0 < rects[i].0 && rects[j].0 + rects[j].2 == rects[i].0)
+        {
             out[i].0 = out[j].0 + out[j].2;
         }
     }
     order.sort_by_key(|&i| rects[i].1);
     for &i in &order {
-        if let Some(&j) = order.iter().find(|&&j| rects[j].1 < rects[i].1 && rects[j].1 + rects[j].3 == rects[i].1) {
+        if let Some(&j) = order
+            .iter()
+            .find(|&&j| rects[j].1 < rects[i].1 && rects[j].1 + rects[j].3 == rects[i].1)
+        {
             out[i].1 = out[j].1 + out[j].3;
         }
     }
@@ -166,7 +178,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for OutState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
             && interface == "zwlr_output_manager_v1"
             && state.manager.is_none()
         {
@@ -285,8 +301,13 @@ pub fn set_output_scale(
     if !(0.1..=16.0).contains(&scale) {
         return Err(format!("scale {scale} out of range"));
     }
-    configure(socket_path, |screens| rescale(screens, index, None, scale))
-        .map(|changed| if changed == 0 { ScaleOutcome::Unsupported } else { ScaleOutcome::Applied })
+    configure(socket_path, |screens| rescale(screens, index, None, scale)).map(|changed| {
+        if changed == 0 {
+            ScaleOutcome::Unsupported
+        } else {
+            ScaleOutcome::Applied
+        }
+    })
 }
 
 /// The plan that gives screen `index` a scale, and the mode asked for, and
@@ -315,7 +336,10 @@ fn rescale(
         .enumerate()
         .filter_map(|(i, s)| {
             let position = (placed[i].0, placed[i].1);
-            let mut plan = Plan { position: (position != s.pos).then_some(position), ..Plan::default() };
+            let mut plan = Plan {
+                position: (position != s.pos).then_some(position),
+                ..Plan::default()
+            };
             if i == index {
                 plan.mode = mode;
                 plan.scale = Some(scale);
@@ -344,8 +368,16 @@ pub fn set_screen_geometry(
     if size.0 <= 0 || size.1 <= 0 {
         return Err(format!("size {}x{} out of range", size.0, size.1));
     }
-    configure(socket_path, move |screens| rescale(screens, index, Some(size), scale))
-        .map(|changed| if changed == 0 { ScaleOutcome::Unsupported } else { ScaleOutcome::Applied })
+    configure(socket_path, move |screens| {
+        rescale(screens, index, Some(size), scale)
+    })
+    .map(|changed| {
+        if changed == 0 {
+            ScaleOutcome::Unsupported
+        } else {
+            ScaleOutcome::Applied
+        }
+    })
 }
 
 /// The session's enabled screens as `(name, x, y, width, height)`, in screen
@@ -407,15 +439,25 @@ pub fn set_screen_layout(
     }
     configure(socket_path, move |screens| {
         let n = screens.len().min(rects.len());
-        let sizes: Vec<(i32, i32)> =
-            screens.iter().zip(&rects).map(|(s, r)| logical_size((r.2, r.3), s.scale)).collect();
+        let sizes: Vec<(i32, i32)> = screens
+            .iter()
+            .zip(&rects)
+            .map(|(s, r)| logical_size((r.2, r.3), s.scale))
+            .collect();
         let placed = close_gaps(&rects[..n], &sizes);
         Ok(screens
             .iter()
             .zip(&rects)
             .zip(placed)
             .map(|((s, r), p)| {
-                (s.head.clone(), Plan { mode: Some((r.2, r.3)), position: Some((p.0, p.1)), ..Plan::default() })
+                (
+                    s.head.clone(),
+                    Plan {
+                        mode: Some((r.2, r.3)),
+                        position: Some((p.0, p.1)),
+                        ..Plan::default()
+                    },
+                )
             })
             .collect())
     })
@@ -434,15 +476,32 @@ pub fn hold_spare_screens(
         Ok(screens
             .iter()
             .skip(keep)
-            .map(|s| (s.head.clone(), Plan { mode: Some(size), ..Plan::default() }))
+            .map(|s| {
+                (
+                    s.head.clone(),
+                    Plan {
+                        mode: Some(size),
+                        ..Plan::default()
+                    },
+                )
+            })
             .collect())
     })
 }
 
 /// The number a screen's name ends in (WL-2 -> 2), or none, which sorts first.
 pub(crate) fn trailing_number(name: &str) -> u32 {
-    let digits: String = name.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
-    digits.chars().rev().collect::<String>().parse().unwrap_or(0)
+    let digits: String = name
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// What a head is being asked to change; an unset field keeps its current value.
@@ -553,7 +612,9 @@ where
         }
     }
     config.apply();
-    queue.flush().map_err(|e| format!("flush configuration: {e}"))?;
+    queue
+        .flush()
+        .map_err(|e| format!("flush configuration: {e}"))?;
     state.applied = None;
     let deadline = Instant::now() + IO_TIMEOUT;
     while state.applied.is_none() && Instant::now() < deadline {
@@ -600,7 +661,11 @@ mod tests {
             close_gaps(&below, &[(1920, 992), (1512, 882)]),
             vec![(0, 882, 1920, 992), (0, 0, 1512, 882)]
         );
-        let chain = [(0, 0, 1000, 500), (1000, 0, 1000, 500), (2000, 0, 1000, 500)];
+        let chain = [
+            (0, 0, 1000, 500),
+            (1000, 0, 1000, 500),
+            (2000, 0, 1000, 500),
+        ];
         assert_eq!(
             close_gaps(&chain, &[(500, 250), (500, 250), (1000, 500)]),
             vec![(0, 0, 500, 250), (500, 0, 500, 250), (1000, 0, 1000, 500)]

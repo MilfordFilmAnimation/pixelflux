@@ -40,7 +40,9 @@ pub mod x265 {
         pic_in: *mut x265_picture,
         out: *mut x265_picture,
     ) -> ::std::os::raw::c_int {
-        let encode = api.encoder_encode.expect("x265's API table names encoder_encode");
+        let encode = api
+            .encoder_encode
+            .expect("x265's API table names encoder_encode");
         #[cfg(x265_layer_pointers)]
         {
             let mut layers = [out, unsafe { out.add(1) }];
@@ -86,20 +88,36 @@ pub mod svtav1 {
     ///
     /// # Safety
     /// `handle` is an initialized encoder and `header` a picture it may read.
-    pub unsafe fn send_picture(handle: *mut EbComponentType, header: *mut EbBufferHeaderType, events: Events) -> EbErrorType {
+    pub unsafe fn send_picture(
+        handle: *mut EbComponentType,
+        header: *mut EbBufferHeaderType,
+        events: Events,
+    ) -> EbErrorType {
         #[cfg(svtav1_events)]
         if events != Events::default() {
             fn node<T>(node_type: PrivDataType, data: &mut T) -> EbPrivDataNode {
                 let size = std::mem::size_of::<T>() as u32;
-                EbPrivDataNode { node_type, data: (data as *mut T).cast(), size, next: std::ptr::null_mut() }
+                EbPrivDataNode {
+                    node_type,
+                    data: (data as *mut T).cast(),
+                    size,
+                    next: std::ptr::null_mut(),
+                }
             }
-            let mut rate = SvtAv1RateInfo { seq_qp: 0, target_bit_rate: events.target_bit_rate };
-            let mut ids = [events.store, events.clear, events.predict_from].map(|pic_id| SvtAv1RefFrameCmd { pic_id });
+            let mut rate = SvtAv1RateInfo {
+                seq_qp: 0,
+                target_bit_rate: events.target_bit_rate,
+            };
+            let mut ids = [events.store, events.clear, events.predict_from]
+                .map(|pic_id| SvtAv1RefFrameCmd { pic_id });
             let mut nodes = Vec::with_capacity(4);
             if events.target_bit_rate != 0 {
                 nodes.push(node(RATE_CHANGE_EVENT, &mut rate));
             }
-            for (node_type, cmd) in [REF_STORE_EVENT, REF_CLEAR_EVENT, REF_USE_EVENT].into_iter().zip(&mut ids) {
+            for (node_type, cmd) in [REF_STORE_EVENT, REF_CLEAR_EVENT, REF_USE_EVENT]
+                .into_iter()
+                .zip(&mut ids)
+            {
                 if cmd.pic_id != 0 {
                     nodes.push(node(node_type, cmd));
                 }
@@ -134,7 +152,10 @@ pub mod svtav1 {
     ///
     /// # Safety
     /// `handle` and `config` are valid for writes.
-    pub unsafe fn init_handle(handle: *mut *mut EbComponentType, config: *mut EbSvtAv1EncConfiguration) -> EbErrorType {
+    pub unsafe fn init_handle(
+        handle: *mut *mut EbComponentType,
+        config: *mut EbSvtAv1EncConfiguration,
+    ) -> EbErrorType {
         #[cfg(svtav1_handle_priv)]
         {
             unsafe { svt_av1_enc_init_handle(handle, ::std::ptr::null_mut(), config) }

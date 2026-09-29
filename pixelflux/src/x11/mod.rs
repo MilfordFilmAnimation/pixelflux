@@ -29,29 +29,31 @@
 //! connection, so there is no shared X state to serialize here.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::Event;
 use x11rb::protocol::damage::{ConnectionExt as DamageExt, Damage, ReportLevel};
 use x11rb::protocol::shm::ConnectionExt as ShmExt;
 use x11rb::protocol::xfixes::ConnectionExt as XfixesExt;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as XprotoExt, ImageFormat, PropMode, Window};
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{
+    Atom, AtomEnum, ConnectionExt as XprotoExt, ImageFormat, PropMode, Window,
+};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::pace::{FramePace, TickTrigger};
 
+use crate::RustCaptureSettings;
 use crate::encoders::overlay::blend_pixel_premultiplied;
 use crate::encoders::software::{EncodedStripe, FrameTiming};
 use crate::pipeline::X11Pipeline;
 use crate::recording_sink::RecordingSink;
-use crate::RustCaptureSettings;
 
 pub mod computer_use;
 pub mod cursor;
@@ -382,8 +384,14 @@ impl RootDamage {
     fn create(conn: &RustConnection, root: Window) -> Option<Self> {
         conn.damage_query_version(1, 1).ok()?.reply().ok()?;
         let id = conn.generate_id().ok()?;
-        conn.damage_create(id, root, ReportLevel::NON_EMPTY).ok()?.check().ok()?;
-        Some(Self { id, reported: Cell::new(false) })
+        conn.damage_create(id, root, ReportLevel::NON_EMPTY)
+            .ok()?
+            .check()
+            .ok()?;
+        Some(Self {
+            id,
+            reported: Cell::new(false),
+        })
     }
 
     /// Whether the server has reported a change since the last [`Self::clear`], taking in
@@ -500,8 +508,18 @@ fn grab_frame(
 /// The result may go negative near the frame edges, which `overlay_cursor` clips per pixel to match
 /// the server's own edge clipping.
 #[inline]
-pub(crate) fn cursor_image_origin(x: i16, y: i16, xhot: u16, yhot: u16, cap_x: i32, cap_y: i32) -> (i32, i32) {
-    (x as i32 - xhot as i32 - cap_x, y as i32 - yhot as i32 - cap_y)
+pub(crate) fn cursor_image_origin(
+    x: i16,
+    y: i16,
+    xhot: u16,
+    yhot: u16,
+    cap_x: i32,
+    cap_y: i32,
+) -> (i32, i32) {
+    (
+        x as i32 - xhot as i32 - cap_x,
+        y as i32 - yhot as i32 - cap_y,
+    )
 }
 
 /// Composite the XFixes cursor (ARGB `u32` per pixel, premultiplied by the XFixes
@@ -598,7 +616,10 @@ impl FramePool {
     /// Create a pool with `n` free surfaces, an empty handoff slot, and generation 0.
     fn new(n: usize) -> Self {
         Self {
-            inner: Mutex::new(PoolInner { free: (0..n).collect(), slot: None }),
+            inner: Mutex::new(PoolInner {
+                free: (0..n).collect(),
+                slot: None,
+            }),
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
             generation: AtomicU64::new(0),
@@ -755,8 +776,12 @@ impl FramePool {
 /// owned outside the pipeline, so pipeline rebuilds on resize keep the socket listener and any
 /// attached recorders alive. It can only carry a single full-frame H.264 stream, so configurations
 /// that cannot produce one (JPEG output, or a striped CPU encoder) are warned about up front.
-fn encode_loop<F>(pool: &FramePool, controls: &Controls, settings: &RustCaptureSettings, on_frame: &mut F)
-where
+fn encode_loop<F>(
+    pool: &FramePool,
+    controls: &Controls,
+    settings: &RustCaptureSettings,
+    on_frame: &mut F,
+) where
     F: FnMut(Vec<EncodedStripe>),
 {
     let _report = crate::report::enter(&controls.report);
@@ -764,9 +789,13 @@ where
     let recording_sink = RecordingSink::try_bind(&settings.recording_socket, settings.target_fps);
     if recording_sink.is_some() {
         if !settings.codec.is_video() {
-            eprintln!("[recording_sink] recording_socket set but the codec is JPEG; no recordable video stream.");
+            eprintln!(
+                "[recording_sink] recording_socket set but the codec is JPEG; no recordable video stream."
+            );
         } else if settings.use_cpu && !settings.video_fullframe {
-            eprintln!("[recording_sink] recording_socket set but the CPU encoder is striped; set video_fullframe=true for a recordable stream.");
+            eprintln!(
+                "[recording_sink] recording_socket set but the CPU encoder is striped; set video_fullframe=true for a recordable stream."
+            );
         }
     }
     let mut pipeline: Option<X11Pipeline> = None;
@@ -785,7 +814,8 @@ where
             psettings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
             psettings.video_vbv_multiplier =
                 controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
-            psettings.target_fps = f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
+            psettings.target_fps =
+                f64::from_bits(controls.fps_bits.load(Ordering::Relaxed)).max(1.0);
             let reshaped = pipeline
                 .as_mut()
                 .is_some_and(|pl| pl.reshape(&psettings, size_changed));
@@ -795,12 +825,19 @@ where
                 if let Some(pl) = &pipeline {
                     let mut log_msg = format!(
                         "[X11] Stream settings active -> Res: {}x{} | FPS: {:.1} | Encoder: {}",
-                        psettings.width, psettings.height, psettings.target_fps, pl.encoder_name()
+                        psettings.width,
+                        psettings.height,
+                        psettings.target_fps,
+                        pl.encoder_name()
                     );
                     let fixed = pl.fixed_rate_control();
-                    let paint_over = crate::encoders::paint_over_desc(&psettings, fixed, pl.holds_quantizer());
+                    let paint_over =
+                        crate::encoders::paint_over_desc(&psettings, fixed, pl.holds_quantizer());
                     if !pl.codec().is_video() {
-                        log_msg.push_str(&format!(" | Mode: JPEG | Quality: {}", psettings.jpeg_quality));
+                        log_msg.push_str(&format!(
+                            " | Mode: JPEG | Quality: {}",
+                            psettings.jpeg_quality
+                        ));
                         if let Some(paint_over) = paint_over {
                             log_msg.push_str(&format!(" | {paint_over}"));
                         }
@@ -847,10 +884,11 @@ where
             pl.update_rate(b, v, fps);
         }
         if controls.tunables_dirty.swap(false, Ordering::Acquire)
-            && let Some(t) = controls.tunables.lock().unwrap().take() {
-                t.apply_to(&mut psettings);
-                pl.update_tunables(&t);
-            }
+            && let Some(t) = controls.tunables.lock().unwrap().take()
+        {
+            t.apply_to(&mut psettings);
+            pl.update_tunables(&t);
+        }
 
         let buf = unsafe { std::slice::from_raw_parts(frame.ptr, frame.len) };
         let encode_start_ns = crate::wayland::host::now_ns();
@@ -873,8 +911,11 @@ where
         if elapsed >= 1.0 {
             crate::log::debug!(
                 "[X11] Res: {}x{} Encoder: {} EncFPS: {:.2} EncStripes/s: {:.2}",
-                psettings.width, psettings.height, pl.encoder_name(),
-                frame_count as f64 / elapsed, stripe_count as f64 / elapsed
+                psettings.width,
+                psettings.height,
+                pl.encoder_name(),
+                frame_count as f64 / elapsed,
+                stripe_count as f64 / elapsed
             );
             frame_count = 0;
             stripe_count = 0;
@@ -894,15 +935,22 @@ struct VblankRate {
     conn: Option<(RustConnection, Window, Atom)>,
 }
 
-static VBLANK_RATE: Mutex<VblankRate> =
-    Mutex::new(VblankRate { captures: Vec::new(), published: 0, conn: None });
+static VBLANK_RATE: Mutex<VblankRate> = Mutex::new(VblankRate {
+    captures: Vec::new(),
+    published: 0,
+    conn: None,
+});
 
 impl VblankRate {
     fn publish(&mut self) {
         let want = self
             .captures
             .iter()
-            .map(|c| f64::from_bits(c.fps_bits.load(Ordering::Relaxed)).round().clamp(1.0, 1000.0) as u32)
+            .map(|c| {
+                f64::from_bits(c.fps_bits.load(Ordering::Relaxed))
+                    .round()
+                    .clamp(1.0, 1000.0) as u32
+            })
             .max()
             .unwrap_or(0);
         if want == self.published {
@@ -911,7 +959,12 @@ impl VblankRate {
         if self.conn.is_none() {
             self.conn = x11rb::connect(None).ok().and_then(|(conn, screen)| {
                 let root = conn.setup().roots[screen].root;
-                let atom = conn.intern_atom(false, b"_FAKE_SCREEN_FPS").ok()?.reply().ok()?.atom;
+                let atom = conn
+                    .intern_atom(false, b"_FAKE_SCREEN_FPS")
+                    .ok()?
+                    .reply()
+                    .ok()?
+                    .atom;
                 Some((conn, root, atom))
             });
         }
@@ -924,7 +977,12 @@ impl VblankRate {
             };
             // A round trip, not a flush: a server may drop what is still queued when a client
             // closes, and the connection closes right after the last capture's delete.
-            queued && conn.get_input_focus().ok().and_then(|c| c.reply().ok()).is_some()
+            queued
+                && conn
+                    .get_input_focus()
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .is_some()
         });
         self.published = if sent { want } else { 0 };
         if !sent || want == 0 {
@@ -1260,10 +1318,19 @@ where
                         }
                         std::thread::sleep(Duration::from_secs(1));
                         match try_rebuild_channel(
-                            &mut conn, &mut root, &rsettings,
-                            &mut cap_x, &mut cap_y, &mut cap_w, &mut cap_h,
-                            &mut root_w, &mut root_h,
-                            POOL_N, &pool, &mut surfaces, &controls.stop,
+                            &mut conn,
+                            &mut root,
+                            &rsettings,
+                            &mut cap_x,
+                            &mut cap_y,
+                            &mut cap_w,
+                            &mut cap_h,
+                            &mut root_w,
+                            &mut root_h,
+                            POOL_N,
+                            &pool,
+                            &mut surfaces,
+                            &controls.stop,
                         ) {
                             Ok(()) => {
                                 // The reported region belonged to the server that went away.
@@ -1283,7 +1350,10 @@ where
                     geometry_check = 0;
                     reconnect_streak += 1;
                     if reconnect_streak >= 4 {
-                        return Err("capture recovered its channel but the region never grabbed again".to_string());
+                        return Err(
+                            "capture recovered its channel but the region never grabbed again"
+                                .to_string(),
+                        );
                     }
                 }
                 continue;
@@ -1302,31 +1372,27 @@ where
                     .xfixes_get_cursor_image()
                     .ok()
                     .and_then(|c| c.reply().ok())
-                    && c.width > 0 && c.height > 0 {
-                        // Translate from root coordinates using the LIVE grab origin
-                        // (cap_x/cap_y follow region_dirty pans and clamp negatives
-                        // exactly like the grab itself), never the immutable startup
-                        // settings — those go stale on the first live region move.
-                        let (img_x, img_y) = cursor_image_origin(
-                            c.x,
-                            c.y,
-                            c.xhot,
-                            c.yhot,
-                            cap_x as i32,
-                            cap_y as i32,
-                        );
-                        overlay_cursor(
-                            buf,
-                            stride,
-                            frame_w,
-                            frame_h,
-                            c.width as i32,
-                            c.height as i32,
-                            &c.cursor_image,
-                            img_x,
-                            img_y,
-                        );
-                    }
+                && c.width > 0
+                && c.height > 0
+            {
+                // Translate from root coordinates using the LIVE grab origin
+                // (cap_x/cap_y follow region_dirty pans and clamp negatives
+                // exactly like the grab itself), never the immutable startup
+                // settings — those go stale on the first live region move.
+                let (img_x, img_y) =
+                    cursor_image_origin(c.x, c.y, c.xhot, c.yhot, cap_x as i32, cap_y as i32);
+                overlay_cursor(
+                    buf,
+                    stride,
+                    frame_w,
+                    frame_h,
+                    c.width as i32,
+                    c.height as i32,
+                    &c.cursor_image,
+                    img_x,
+                    img_y,
+                );
+            }
 
             if watermark.is_active() {
                 watermark.update_position(frame_w, frame_h, settings.watermark_location_enum);
@@ -1372,9 +1438,9 @@ where
 pub(crate) mod gpu_test_support {
     use std::time::Duration;
 
-    use crate::encoders::codec::Codec;
-    use crate::webcam::decode::{VideoDecoder, Decoder};
     use crate::RustCaptureSettings;
+    use crate::encoders::codec::Codec;
+    use crate::webcam::decode::{Decoder, VideoDecoder};
 
     /// Full-frame capture settings for `codec` at CRF 25, streaming every frame, on the render
     /// node `auto_gpu` picks first.
@@ -1398,10 +1464,17 @@ pub(crate) mod gpu_test_support {
     /// with the default ten-minute blanking timeout hands the capture a black screen and every
     /// color comparison fails for a reason that has nothing to do with the capture.
     pub(crate) fn paint_root(rgb: (u8, u8, u8)) -> bool {
-        let _ = std::process::Command::new("xset").args(["s", "off", "s", "noblank"]).output();
-        let _ = std::process::Command::new("xset").arg("s").arg("reset").output();
+        let _ = std::process::Command::new("xset")
+            .args(["s", "off", "s", "noblank"])
+            .output();
+        let _ = std::process::Command::new("xset")
+            .arg("s")
+            .arg("reset")
+            .output();
         let spec = format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
-        let out = std::process::Command::new("xsetroot").args(["-solid", &spec]).output();
+        let out = std::process::Command::new("xsetroot")
+            .args(["-solid", &spec])
+            .output();
         if !out.map(|o| o.status.success()).unwrap_or(false) {
             return false;
         }
@@ -1412,13 +1485,16 @@ pub(crate) mod gpu_test_support {
     /// Limited-range Y/Cb/Cr of an 8-bit RGB triple, what the chroma convert emits for a
     /// captured surface.
     pub(crate) fn painted_ycbcr(rgb: (u8, u8, u8)) -> [f64; 3] {
-        use crate::encoders::chroma_siting::{ycbcr, BT709};
+        use crate::encoders::chroma_siting::{BT709, ycbcr};
         ycbcr([rgb.0, rgb.1, rgb.2].map(f64::from), BT709)
     }
 
     /// Mean Y/Cb/Cr of a decoded picture.
     pub(crate) fn decoded_mean(dec: &mut VideoDecoder, payload: &[u8]) -> [f64; 3] {
-        assert!(dec.decode(payload).expect("decode"), "no picture from this access unit");
+        assert!(
+            dec.decode(payload).expect("decode"),
+            "no picture from this access unit"
+        );
         let v = dec.frame().expect("decoded frame");
         let mut acc = [0f64; 3];
         let mut n = 0f64;
@@ -1540,7 +1616,12 @@ mod pool_tests {
         let stop = AtomicBool::new(false);
         let a = p.acquire(&stop).unwrap();
         assert!(p.publish(
-            RawFrame { generation: p.generation(), width: 1920, height: 1080, ..dummy(a) },
+            RawFrame {
+                generation: p.generation(),
+                width: 1920,
+                height: 1080,
+                ..dummy(a)
+            },
             &stop
         ));
         let f = p.take().unwrap();
@@ -1550,20 +1631,37 @@ mod pool_tests {
         p.bump_generation();
         let b = p.acquire(&stop).unwrap();
         assert!(p.publish(
-            RawFrame { generation: p.generation(), width: 2560, height: 1600, ..dummy(b) },
+            RawFrame {
+                generation: p.generation(),
+                width: 2560,
+                height: 1600,
+                ..dummy(b)
+            },
             &stop
         ));
         assert!(p.drain_for_resize(3, &stop));
         p.bump_generation();
         let c = p.acquire(&stop).unwrap();
         assert!(p.publish(
-            RawFrame { generation: p.generation(), width: 1920, height: 1080, ..dummy(c) },
+            RawFrame {
+                generation: p.generation(),
+                width: 1920,
+                height: 1080,
+                ..dummy(c)
+            },
             &stop
         ));
         let g = p.take().unwrap();
-        assert_eq!((g.width, g.height), last_dims, "flap lands on identical dimensions");
+        assert_eq!(
+            (g.width, g.height),
+            last_dims,
+            "flap lands on identical dimensions"
+        );
         assert_eq!(g.generation, 2);
-        assert_ne!(g.generation, last_gen, "generation is the only rebuild signal");
+        assert_ne!(
+            g.generation, last_gen,
+            "generation is the only rebuild signal"
+        );
     }
 
     /// Recreating the surfaces bumps the generation, and frames published afterwards carry the
@@ -1574,13 +1672,25 @@ mod pool_tests {
         let stop = AtomicBool::new(false);
         assert_eq!(p.generation(), 0);
         let a = p.acquire(&stop).unwrap();
-        assert!(p.publish(RawFrame { generation: p.generation(), ..dummy(a) }, &stop));
+        assert!(p.publish(
+            RawFrame {
+                generation: p.generation(),
+                ..dummy(a)
+            },
+            &stop
+        ));
         let f = p.take().unwrap();
         assert_eq!(f.generation, 0);
         p.recycle(f.idx);
         p.bump_generation();
         let b = p.acquire(&stop).unwrap();
-        assert!(p.publish(RawFrame { generation: p.generation(), ..dummy(b) }, &stop));
+        assert!(p.publish(
+            RawFrame {
+                generation: p.generation(),
+                ..dummy(b)
+            },
+            &stop
+        ));
         assert_eq!(p.take().unwrap().generation, 1);
     }
 }
@@ -1637,7 +1747,10 @@ mod cursor_tests {
             ..Default::default()
         };
         let (w, h) = resolve_dims(1920, 1080, &s);
-        assert!(w >= 2 && h >= 2, "a past-end offset now degrades to a small grab, not death");
+        assert!(
+            w >= 2 && h >= 2,
+            "a past-end offset now degrades to a small grab, not death"
+        );
         assert_eq!(w % 2, 0);
         assert_eq!(h % 2, 0);
     }
@@ -1653,7 +1766,10 @@ mod cursor_tests {
         let pixels = [0x8000_8040u32; 4];
         overlay_cursor(&mut frame, stride, 4, 4, 2, 2, &pixels, 0, 0);
         assert_eq!(frame[0], 64, "blue channel: dst = 64 over black");
-        assert_eq!(frame[1], 128, "premultiplied half-alpha stays 128, not darkened to 64");
+        assert_eq!(
+            frame[1], 128,
+            "premultiplied half-alpha stays 128, not darkened to 64"
+        );
     }
 
     /// `overlay_cursor` clips a negative origin at the frame edge: with the origin at (-1,-1)
@@ -1666,7 +1782,10 @@ mod cursor_tests {
         let (ox, oy) = cursor_image_origin(0, 0, 1, 1, 0, 0);
         overlay_cursor(&mut frame, stride, 4, 4, 2, 2, &pixels, ox, oy);
         assert_eq!(frame[0], 255);
-        assert!(frame[4..].iter().all(|&b| b == 0), "no writes outside (0,0)");
+        assert!(
+            frame[4..].iter().all(|&b| b == 0),
+            "no writes outside (0,0)"
+        );
     }
 }
 
@@ -1684,9 +1803,19 @@ mod damage_tests {
         let (conn, screen) = x11rb::connect(None).expect("connect");
         let root = conn.setup().roots[screen].root;
         let gc = conn.generate_id().expect("id");
-        conn.create_gc(gc, root, &CreateGCAux::new().foreground(color)).expect("gc");
-        conn.poly_fill_rectangle(root, gc, &[Rectangle { x: 0, y: 0, width: 64, height: 64 }])
-            .expect("fill");
+        conn.create_gc(gc, root, &CreateGCAux::new().foreground(color))
+            .expect("gc");
+        conn.poly_fill_rectangle(
+            root,
+            gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            }],
+        )
+        .expect("fill");
         conn.flush().expect("flush");
     }
 
@@ -1705,8 +1834,15 @@ mod damage_tests {
         let start = Instant::now();
         let quiet = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
         let waited = start.elapsed();
-        assert_eq!(quiet, TickTrigger::Timer, "a quiet screen is the timer's to pace");
-        assert!(waited >= PERIOD.mul_f64(0.9), "the timer's own tick came after {waited:?}");
+        assert_eq!(
+            quiet,
+            TickTrigger::Timer,
+            "a quiet screen is the timer's to pace"
+        );
+        assert!(
+            waited >= PERIOD.mul_f64(0.9),
+            "the timer's own tick came after {waited:?}"
+        );
 
         pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
         damage.clear(&conn);
@@ -1718,9 +1854,19 @@ mod damage_tests {
         let pulled = wait_for_frame(&conn, Some(&damage), &pace, PERIOD);
         let waited = start.elapsed();
         painter.join().expect("painter");
-        assert_eq!(pulled, TickTrigger::Damage, "the repaint is what asked for the frame");
-        assert!(waited < PERIOD.mul_f64(0.9), "the repaint was published after {waited:?}");
-        println!("repaint at 0.6 of a period published after {:.0}ms", waited.as_secs_f64() * 1000.0);
+        assert_eq!(
+            pulled,
+            TickTrigger::Damage,
+            "the repaint is what asked for the frame"
+        );
+        assert!(
+            waited < PERIOD.mul_f64(0.9),
+            "the repaint was published after {waited:?}"
+        );
+        println!(
+            "repaint at 0.6 of a period published after {:.0}ms",
+            waited.as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -1731,13 +1877,21 @@ mod vblank_tests {
     use super::*;
 
     fn capture_at(fps: f64) -> Arc<Controls> {
-        Arc::new(Controls::new(&RustCaptureSettings { target_fps: fps, ..Default::default() }))
+        Arc::new(Controls::new(&RustCaptureSettings {
+            target_fps: fps,
+            ..Default::default()
+        }))
     }
 
     fn published() -> Option<u32> {
         let (conn, screen) = x11rb::connect(None).expect("connect");
         let root = conn.setup().roots[screen].root;
-        let atom = conn.intern_atom(false, b"_FAKE_SCREEN_FPS").expect("intern").reply().expect("atom").atom;
+        let atom = conn
+            .intern_atom(false, b"_FAKE_SCREEN_FPS")
+            .expect("intern")
+            .reply()
+            .expect("atom")
+            .atom;
         let reply = conn
             .get_property(false, root, atom, AtomEnum::CARDINAL, 0, 1)
             .expect("get_property")

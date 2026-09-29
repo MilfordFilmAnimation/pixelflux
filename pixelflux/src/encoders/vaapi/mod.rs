@@ -38,22 +38,22 @@ mod vp8;
 mod vp9;
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 
-use smithay::backend::allocator::{dmabuf::Dmabuf, Buffer};
+use smithay::backend::allocator::{Buffer, dmabuf::Dmabuf};
 use va_sys::*;
 
 use super::codec::{
-    av1_is_key, frame_type_from_key, h264_frame_type, h265_frame_type, push_video_header, vp8_is_key, vp9_is_key,
-    Codec, VIDEO_HEADER_LEN,
+    Codec, VIDEO_HEADER_LEN, av1_is_key, frame_type_from_key, h264_frame_type, h265_frame_type,
+    push_video_header, vp8_is_key, vp9_is_key,
 };
-use super::reference::{Reference, ReferenceSlots, ReferenceWindow, SlotPlan, REFERENCE_FRAMES};
 use super::frame_rate::FrameRate;
-use super::session::{check_host_frame, RateSettings};
-use super::sps::{h264_frame_num_range, NoReorder};
+use super::reference::{REFERENCE_FRAMES, Reference, ReferenceSlots, ReferenceWindow, SlotPlan};
+use super::session::{RateSettings, check_host_frame};
+use super::sps::{NoReorder, h264_frame_num_range};
 use crate::RustCaptureSettings;
 
 /// The slices an H.264 or HEVC picture is cut into, a decoder threading a frame across them.
@@ -70,7 +70,11 @@ fn coded_buffer_size(width: u32, height: u32) -> u32 {
 /// The libva of this process, loaded once, or why it could not be.
 fn libva() -> Result<VaApi, String> {
     static LIBVA: OnceLock<Result<Libva, String>> = OnceLock::new();
-    LIBVA.get_or_init(|| unsafe { Libva::load() }).as_ref().map(|lib| lib.api).map_err(Clone::clone)
+    LIBVA
+        .get_or_init(|| unsafe { Libva::load() })
+        .as_ref()
+        .map(|lib| lib.api)
+        .map_err(Clone::clone)
 }
 
 /// How frames reach a session: a Wayland DRM-PRIME dmabuf, or packed host pixels in B,G,R,A
@@ -94,19 +98,31 @@ pub(crate) fn fourcc_name(fourcc: u32) -> String {
         VA_FOURCC_XYUV => "vuyx".into(),
         VA_FOURCC_BGRA => "bgra".into(),
         VA_FOURCC_RGBA => "rgba".into(),
-        other => String::from_utf8_lossy(&other.to_le_bytes()).trim().to_string(),
+        other => String::from_utf8_lossy(&other.to_le_bytes())
+            .trim()
+            .to_string(),
     }
 }
 
 unsafe extern "C" fn log_error(_user: *mut c_void, message: *const c_char) {
     if !message.is_null() {
-        eprintln!("[vaapi] {}", unsafe { CStr::from_ptr(message) }.to_string_lossy().trim_end());
+        eprintln!(
+            "[vaapi] {}",
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .trim_end()
+        );
     }
 }
 
 unsafe extern "C" fn log_info(_user: *mut c_void, message: *const c_char) {
     if !message.is_null() {
-        crate::log::debug!("[vaapi] {}", unsafe { CStr::from_ptr(message) }.to_string_lossy().trim_end());
+        crate::log::debug!(
+            "[vaapi] {}",
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .trim_end()
+        );
     }
 }
 
@@ -163,13 +179,26 @@ fn amd_vce(fd: c_int) -> bool {
         desc_len: 0,
         desc: ptr::null_mut(),
     };
-    if unsafe { libc::ioctl(fd, DRM_IOCTL_VERSION as _, &mut version as *mut Version) } != 0 || name[..version.name_len.min(name.len())] != *b"amdgpu" {
+    if unsafe { libc::ioctl(fd, DRM_IOCTL_VERSION as _, &mut version as *mut Version) } != 0
+        || name[..version.name_len.min(name.len())] != *b"amdgpu"
+    {
         return false;
     }
     let engines = |ip_type: u32| {
         let mut count: u32 = 0;
-        let mut info = Info { return_pointer: &mut count as *mut u32 as u64, return_size: 4, query: AMDGPU_INFO_HW_IP_COUNT, ip_type, ip_instance: 0, reserved: [0; 2] };
-        if unsafe { libc::ioctl(fd, DRM_IOCTL_AMDGPU_INFO as _, &mut info as *mut Info) } != 0 { 0 } else { count }
+        let mut info = Info {
+            return_pointer: &mut count as *mut u32 as u64,
+            return_size: 4,
+            query: AMDGPU_INFO_HW_IP_COUNT,
+            ip_type,
+            ip_instance: 0,
+            reserved: [0; 2],
+        };
+        if unsafe { libc::ioctl(fd, DRM_IOCTL_AMDGPU_INFO as _, &mut info as *mut Info) } != 0 {
+            0
+        } else {
+            count
+        }
     };
     engines(AMDGPU_HW_IP_VCE) > 0 && engines(AMDGPU_HW_IP_VCN_ENC) == 0
 }
@@ -192,7 +221,10 @@ impl Device {
         let path = CString::new(render_node.clone()).unwrap();
         let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
         if raw < 0 {
-            return Err(format!("{render_node}: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "{render_node}: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Self::on(api, unsafe { OwnedFd::from_raw_fd(raw) }, &render_node)
     }
@@ -211,14 +243,27 @@ impl Device {
         let (mut major, mut minor) = (0 as c_int, 0 as c_int);
         let status = unsafe { (api.vaInitialize)(display, &mut major, &mut minor) };
         if status != VA_STATUS_SUCCESS as VAStatus {
-            return Err(format!("{render_node}: no VA driver initialized ({})", error_text(&api, status)));
+            return Err(format!(
+                "{render_node}: no VA driver initialized ({})",
+                error_text(&api, status)
+            ));
         }
         let vendor = unsafe {
             let text = (api.vaQueryVendorString)(display);
-            if text.is_null() { String::new() } else { CStr::from_ptr(text).to_string_lossy().into_owned() }
+            if text.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(text).to_string_lossy().into_owned()
+            }
         };
         let vce = amd_vce(fd.as_raw_fd());
-        Ok(Self { api, display, _fd: fd, vendor, vce })
+        Ok(Self {
+            api,
+            display,
+            _fd: fd,
+            vendor,
+            vce,
+        })
     }
 
     fn check(&self, status: VAStatus, what: &str) -> Result<(), String> {
@@ -231,9 +276,17 @@ impl Device {
 
     /// The profiles the driver lists.
     fn profiles(&self) -> Result<Vec<VAProfile>, String> {
-        let mut profiles = vec![0 as VAProfile; unsafe { (self.api.vaMaxNumProfiles)(self.display) }.max(0) as usize];
+        let mut profiles = vec![
+            0 as VAProfile;
+            unsafe { (self.api.vaMaxNumProfiles)(self.display) }.max(0) as usize
+        ];
         let mut listed: c_int = 0;
-        self.check(unsafe { (self.api.vaQueryConfigProfiles)(self.display, profiles.as_mut_ptr(), &mut listed) }, "vaQueryConfigProfiles")?;
+        self.check(
+            unsafe {
+                (self.api.vaQueryConfigProfiles)(self.display, profiles.as_mut_ptr(), &mut listed)
+            },
+            "vaQueryConfigProfiles",
+        )?;
         profiles.truncate(listed.max(0) as usize);
         Ok(profiles)
     }
@@ -244,22 +297,47 @@ impl Device {
     /// where it runs constant quantizer only, takes the full one. Empty where the profile
     /// encodes on neither.
     fn encode_entrypoints(&self, profile: VAProfile) -> Vec<VAEntrypoint> {
-        let mut entrypoints = vec![0 as VAEntrypoint; unsafe { (self.api.vaMaxNumEntrypoints)(self.display) }.max(0) as usize];
+        let mut entrypoints = vec![
+            0 as VAEntrypoint;
+            unsafe { (self.api.vaMaxNumEntrypoints)(self.display) }.max(0)
+                as usize
+        ];
         let mut listed: c_int = 0;
-        let status = unsafe { (self.api.vaQueryConfigEntrypoints)(self.display, profile, entrypoints.as_mut_ptr(), &mut listed) };
+        let status = unsafe {
+            (self.api.vaQueryConfigEntrypoints)(
+                self.display,
+                profile,
+                entrypoints.as_mut_ptr(),
+                &mut listed,
+            )
+        };
         if status != VA_STATUS_SUCCESS as VAStatus {
             return Vec::new();
         }
         let listed = &entrypoints[..listed.max(0) as usize];
-        [VAEntrypointEncSliceLP, VAEntrypointEncSlice].into_iter().filter(|e| listed.contains(e)).collect()
+        [VAEntrypointEncSliceLP, VAEntrypointEncSlice]
+            .into_iter()
+            .filter(|e| listed.contains(e))
+            .collect()
     }
 
     /// One configuration attribute of a profile and entry point, None where the driver does
     /// not report it.
-    fn attribute(&self, profile: VAProfile, entrypoint: VAEntrypoint, kind: VAConfigAttribType) -> Option<u32> {
-        let mut attrib = VAConfigAttrib { type_: kind, value: 0 };
-        let status = unsafe { (self.api.vaGetConfigAttributes)(self.display, profile, entrypoint, &mut attrib, 1) };
-        (status == VA_STATUS_SUCCESS as VAStatus && attrib.value != VA_ATTRIB_NOT_SUPPORTED).then_some(attrib.value)
+    fn attribute(
+        &self,
+        profile: VAProfile,
+        entrypoint: VAEntrypoint,
+        kind: VAConfigAttribType,
+    ) -> Option<u32> {
+        let mut attrib = VAConfigAttrib {
+            type_: kind,
+            value: 0,
+        };
+        let status = unsafe {
+            (self.api.vaGetConfigAttributes)(self.display, profile, entrypoint, &mut attrib, 1)
+        };
+        (status == VA_STATUS_SUCCESS as VAStatus && attrib.value != VA_ATTRIB_NOT_SUPPORTED)
+            .then_some(attrib.value)
     }
 
     /// The surface attributes a configuration reports, asked for the way libva wants: once
@@ -268,8 +346,15 @@ impl Device {
         let mut count: c_uint = 0;
         let mut attribs: Vec<VASurfaceAttrib> = Vec::new();
         for pass in 0..2 {
-            let list = if pass == 0 { ptr::null_mut() } else { attribs.as_mut_ptr() };
-            if unsafe { (self.api.vaQuerySurfaceAttributes)(self.display, config, list, &mut count) } != VA_STATUS_SUCCESS as VAStatus {
+            let list = if pass == 0 {
+                ptr::null_mut()
+            } else {
+                attribs.as_mut_ptr()
+            };
+            if unsafe {
+                (self.api.vaQuerySurfaceAttributes)(self.display, config, list, &mut count)
+            } != VA_STATUS_SUCCESS as VAStatus
+            {
                 return Vec::new();
             }
             attribs.resize(count as usize, unsafe { std::mem::zeroed() });
@@ -300,7 +385,14 @@ impl Device {
     }
 
     /// Surfaces of `fourcc` at `width` x `height`, `count` of them, on the driver's own memory.
-    fn create_surfaces(&self, rt_format: u32, fourcc: u32, width: u32, height: u32, count: usize) -> Result<Vec<VASurfaceID>, String> {
+    fn create_surfaces(
+        &self,
+        rt_format: u32,
+        fourcc: u32,
+        width: u32,
+        height: u32,
+        count: usize,
+    ) -> Result<Vec<VASurfaceID>, String> {
         let mut attrib: VASurfaceAttrib = unsafe { std::mem::zeroed() };
         attrib.type_ = VASurfaceAttribPixelFormat;
         attrib.flags = VA_SURFACE_ATTRIB_SETTABLE;
@@ -309,33 +401,74 @@ impl Device {
         let mut surfaces = vec![VA_INVALID_SURFACE; count];
         self.check(
             unsafe {
-                (self.api.vaCreateSurfaces)(self.display, rt_format, width, height, surfaces.as_mut_ptr(), count as c_uint, &mut attrib, 1)
+                (self.api.vaCreateSurfaces)(
+                    self.display,
+                    rt_format,
+                    width,
+                    height,
+                    surfaces.as_mut_ptr(),
+                    count as c_uint,
+                    &mut attrib,
+                    1,
+                )
             },
-            &format!("this VA-API driver allocates no {} surfaces", fourcc_name(fourcc)),
+            &format!(
+                "this VA-API driver allocates no {} surfaces",
+                fourcc_name(fourcc)
+            ),
         )?;
         Ok(surfaces)
     }
 
     fn destroy_surfaces(&self, surfaces: &mut [VASurfaceID]) {
         if !surfaces.is_empty() {
-            unsafe { (self.api.vaDestroySurfaces)(self.display, surfaces.as_mut_ptr(), surfaces.len() as c_int) };
+            unsafe {
+                (self.api.vaDestroySurfaces)(
+                    self.display,
+                    surfaces.as_mut_ptr(),
+                    surfaces.len() as c_int,
+                )
+            };
         }
     }
 
-    fn create_buffer(&self, context: VAContextID, kind: VABufferType, data: &[u8]) -> Result<VABufferID, String> {
-        self.create_buffer_raw(context, kind, data.len() as c_uint, data.as_ptr() as *mut c_void)
+    fn create_buffer(
+        &self,
+        context: VAContextID,
+        kind: VABufferType,
+        data: &[u8],
+    ) -> Result<VABufferID, String> {
+        self.create_buffer_raw(
+            context,
+            kind,
+            data.len() as c_uint,
+            data.as_ptr() as *mut c_void,
+        )
     }
 
     /// A buffer the driver fills, created without initial data: iHD refuses a coded buffer
     /// handed any.
-    fn create_output_buffer(&self, context: VAContextID, kind: VABufferType, size: u32) -> Result<VABufferID, String> {
+    fn create_output_buffer(
+        &self,
+        context: VAContextID,
+        kind: VABufferType,
+        size: u32,
+    ) -> Result<VABufferID, String> {
         self.create_buffer_raw(context, kind, size as c_uint, ptr::null_mut())
     }
 
-    fn create_buffer_raw(&self, context: VAContextID, kind: VABufferType, size: c_uint, data: *mut c_void) -> Result<VABufferID, String> {
+    fn create_buffer_raw(
+        &self,
+        context: VAContextID,
+        kind: VABufferType,
+        size: c_uint,
+        data: *mut c_void,
+    ) -> Result<VABufferID, String> {
         let mut id = VA_INVALID_ID;
         self.check(
-            unsafe { (self.api.vaCreateBuffer)(self.display, context, kind, size, 1, data, &mut id) },
+            unsafe {
+                (self.api.vaCreateBuffer)(self.display, context, kind, size, 1, data, &mut id)
+            },
             &format!("vaCreateBuffer(type {kind})"),
         )?;
         Ok(id)
@@ -344,7 +477,13 @@ impl Device {
 
 fn error_text(api: &VaApi, status: VAStatus) -> String {
     let text = unsafe { (api.vaErrorStr)(status) };
-    if text.is_null() { format!("VA status {status}") } else { unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned() }
+    if text.is_null() {
+        format!("VA status {status}")
+    } else {
+        unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// The video codecs the VA-API driver of the render node behind `encode_node_index` encodes:
@@ -360,14 +499,26 @@ pub(crate) fn probe_codecs(encode_node_index: i32) -> Result<Vec<(Codec, bool)>,
 /// whether the profile its 4:4:4 session opens under encodes and renders 4:4:4 surfaces too.
 pub(crate) fn probe_codecs_on(device: &Device) -> Result<Vec<(Codec, bool)>, String> {
     let profiles = device.profiles()?;
-    let entrypoints = |profile: VAProfile| if profiles.contains(&profile) { device.encode_entrypoints(profile) } else { Vec::new() };
+    let entrypoints = |profile: VAProfile| {
+        if profiles.contains(&profile) {
+            device.encode_entrypoints(profile)
+        } else {
+            Vec::new()
+        }
+    };
     Ok(Codec::VIDEO
         .into_iter()
-        .filter(|&codec| profile_ladder(codec, false).into_iter().any(|p| !entrypoints(p).is_empty()))
+        .filter(|&codec| {
+            profile_ladder(codec, false)
+                .into_iter()
+                .any(|p| !entrypoints(p).is_empty())
+        })
         .map(|codec| {
             let fullcolor = profile_ladder(codec, true).into_iter().any(|p| {
                 entrypoints(p).into_iter().any(|e| {
-                    device.attribute(p, e, VAConfigAttribRTFormat).is_none_or(|f| f & VA_RT_FORMAT_YUV444 != 0)
+                    device
+                        .attribute(p, e, VAConfigAttribRTFormat)
+                        .is_none_or(|f| f & VA_RT_FORMAT_YUV444 != 0)
                 })
             });
             (codec, fullcolor)
@@ -380,7 +531,11 @@ pub(crate) fn probe_codecs_on(device: &Device) -> Result<Vec<(Codec, bool)>, Str
 /// where the codec has none the session serves.
 fn profile_ladder(codec: Codec, fullcolor: bool) -> Vec<VAProfile> {
     match (codec, fullcolor) {
-        (Codec::H264, false) => vec![VAProfileH264High, VAProfileH264Main, VAProfileH264ConstrainedBaseline],
+        (Codec::H264, false) => vec![
+            VAProfileH264High,
+            VAProfileH264Main,
+            VAProfileH264ConstrainedBaseline,
+        ],
         (Codec::H265, false) => vec![VAProfileHEVCMain],
         (Codec::H265, true) => vec![VAProfileHEVCMain444],
         (Codec::Vp8, false) => vec![VAProfileVP8Version0_3],
@@ -398,27 +553,39 @@ pub(super) struct Buffers {
 
 impl Buffers {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// One parameter structure as a buffer of its type.
     pub(super) fn push<T: Copy>(&mut self, kind: VABufferType, value: &T) {
-        let bytes = unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
+        };
         self.entries.push((kind, bytes.to_vec()));
     }
 
     /// One miscellaneous parameter, behind the header naming its type.
     pub(super) fn push_misc<T: Copy>(&mut self, kind: VAEncMiscParameterType, value: &T) {
         let mut bytes = kind.to_ne_bytes().to_vec();
-        bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) });
+        bytes.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
+        });
         self.entries.push((VAEncMiscParameterBufferType, bytes));
     }
 
     /// One packed header: its parameter buffer, then its bytes.
     pub(super) fn push_packed(&mut self, kind: u32, bytes: &[u8], bit_length: u32) {
-        let param = VAEncPackedHeaderParameterBuffer { type_: kind, bit_length, has_emulation_bytes: 1, va_reserved: [0; 4] };
+        let param = VAEncPackedHeaderParameterBuffer {
+            type_: kind,
+            bit_length,
+            has_emulation_bytes: 1,
+            va_reserved: [0; 4],
+        };
         self.push(VAEncPackedHeaderParameterBufferType, &param);
-        self.entries.push((VAEncPackedHeaderDataBufferType, bytes.to_vec()));
+        self.entries
+            .push((VAEncPackedHeaderDataBufferType, bytes.to_vec()));
     }
 
     #[cfg(test)]
@@ -497,7 +664,9 @@ impl Arm {
     /// The packed headers the codec writes itself.
     fn wanted_packed(&self) -> u32 {
         match self {
-            Arm::H264(_) | Arm::H265(_) => VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_SLICE,
+            Arm::H264(_) | Arm::H265(_) => {
+                VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_SLICE
+            }
             Arm::Av1(_) => VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE,
             Arm::Vp8(_) | Arm::Vp9(_) => 0,
         }
@@ -524,7 +693,12 @@ impl Arm {
         }
     }
 
-    fn picture(&mut self, negotiated: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    fn picture(
+        &mut self,
+        negotiated: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         match self {
             Arm::H264(a) => a.picture(negotiated, frame, out),
             Arm::H265(a) => a.picture(negotiated, frame, out),
@@ -645,15 +819,28 @@ impl VaapiEncoder {
         if !codec.is_video() {
             return Err("JPEG has no VA-API encoder".into());
         }
-        Self::on_device(Arc::new(Device::open(libva()?, settings.encode_node_index)?), settings, codec, input)
+        Self::on_device(
+            Arc::new(Device::open(libva()?, settings.encode_node_index)?),
+            settings,
+            codec,
+            input,
+        )
     }
 
     /// `new` on an open device.
-    pub(crate) fn on_device(device: Arc<Device>, settings: &RustCaptureSettings, codec: Codec, input: Input) -> Result<Self, String> {
+    pub(crate) fn on_device(
+        device: Arc<Device>,
+        settings: &RustCaptureSettings,
+        codec: Codec,
+        input: Input,
+    ) -> Result<Self, String> {
         let fullcolor = settings.video_fullcolor && codec.fullcolor();
         let ladder = profile_ladder(codec, fullcolor);
         if ladder.is_empty() {
-            return Err(format!("no VA-API profile carries {} 4:4:4", codec.display()));
+            return Err(format!(
+                "no VA-API profile carries {} 4:4:4",
+                codec.display()
+            ));
         }
         let listed = device.profiles()?;
         let (profile, entrypoints) = ladder
@@ -661,12 +848,24 @@ impl VaapiEncoder {
             .filter(|p| listed.contains(p))
             .map(|&p| (p, device.encode_entrypoints(p)))
             .find(|(_, entrypoints)| !entrypoints.is_empty())
-            .ok_or_else(|| format!("this VA-API driver encodes no {} {}", codec.display(), super::chroma_name(fullcolor)))?;
+            .ok_or_else(|| {
+                format!(
+                    "this VA-API driver encodes no {} {}",
+                    codec.display(),
+                    super::chroma_name(fullcolor)
+                )
+            })?;
         let mut last = None;
-        let formats: Vec<u32> = if fullcolor { FULLCOLOR_FOURCCS.to_vec() } else { vec![VA_FOURCC_NV12] };
+        let formats: Vec<u32> = if fullcolor {
+            FULLCOLOR_FOURCCS.to_vec()
+        } else {
+            vec![VA_FOURCC_NV12]
+        };
         for entrypoint in entrypoints {
             for &fourcc in &formats {
-                match Self::open(&device, settings, codec, input, profile, entrypoint, fourcc, fullcolor) {
+                match Self::open(
+                    &device, settings, codec, input, profile, entrypoint, fourcc, fullcolor,
+                ) {
                     Ok(session) => return Ok(session),
                     Err(e) => last = Some(e),
                 }
@@ -691,26 +890,58 @@ impl VaapiEncoder {
         let api = device.api;
         let rate = RateSettings::new(settings);
         let rc_mode = if rate.cbr { VA_RC_CBR } else { VA_RC_CQP };
-        let rt_format = if fullcolor { VA_RT_FORMAT_YUV444 } else { VA_RT_FORMAT_YUV420 };
+        let rt_format = if fullcolor {
+            VA_RT_FORMAT_YUV444
+        } else {
+            VA_RT_FORMAT_YUV420
+        };
         let width = settings.width.max(1) as u32;
         let height = settings.height.max(1) as u32;
         let fps = rate.fps;
-        let bits_per_second = if rate.cbr { rate.bps().min(u32::MAX as u64) as u32 } else { 0 };
+        let bits_per_second = if rate.cbr {
+            rate.bps().min(u32::MAX as u64) as u32
+        } else {
+            0
+        };
 
         let mut attribs = Vec::new();
         if let Some(formats) = device.attribute(profile, entrypoint, VAConfigAttribRTFormat) {
             if formats & rt_format == 0 {
-                return Err(format!("the {} entry point renders no {} surfaces", fourcc_name(fourcc), super::chroma_name(fullcolor)));
+                return Err(format!(
+                    "the {} entry point renders no {} surfaces",
+                    fourcc_name(fourcc),
+                    super::chroma_name(fullcolor)
+                ));
             }
-            attribs.push(VAConfigAttrib { type_: VAConfigAttribRTFormat, value: rt_format });
+            attribs.push(VAConfigAttrib {
+                type_: VAConfigAttribRTFormat,
+                value: rt_format,
+            });
         }
         match device.attribute(profile, entrypoint, VAConfigAttribRateControl) {
-            Some(modes) if modes & rc_mode != 0 => attribs.push(VAConfigAttrib { type_: VAConfigAttribRateControl, value: rc_mode }),
-            Some(_) => return Err(format!("this VA-API driver has no {} rate control for {}", if rate.cbr { "constant-rate" } else { "constant-quantizer" }, codec.display())),
-            None if rate.cbr => return Err("this VA-API driver reports no rate control modes".into()),
+            Some(modes) if modes & rc_mode != 0 => attribs.push(VAConfigAttrib {
+                type_: VAConfigAttribRateControl,
+                value: rc_mode,
+            }),
+            Some(_) => {
+                return Err(format!(
+                    "this VA-API driver has no {} rate control for {}",
+                    if rate.cbr {
+                        "constant-rate"
+                    } else {
+                        "constant-quantizer"
+                    },
+                    codec.display()
+                ));
+            }
+            None if rate.cbr => {
+                return Err("this VA-API driver reports no rate control modes".into());
+            }
             None => {}
         }
-        let ref_l0 = device.attribute(profile, entrypoint, VAConfigAttribEncMaxRefFrames).map_or(0, |v| v & 0xffff);
+        let ref_l0 = device
+            .attribute(profile, entrypoint, VAConfigAttribEncMaxRefFrames)
+            .map_or(0, |v| v & 0xffff);
         if ref_l0 < 1 {
             return Err("this VA-API driver takes no reference frames".into());
         }
@@ -737,15 +968,26 @@ impl VaapiEncoder {
             Codec::Av1 => Arm::Av1(av1::Arm::new(
                 device.attribute(profile, entrypoint, VAConfigAttribEncAV1),
                 device.attribute(profile, entrypoint, VAConfigAttribEncAV1Ext1),
-                device.attribute(profile, entrypoint, VAConfigAttribEncAV1Ext2).ok_or("this VA-API driver reports no AV1 encoder attributes")?,
+                device
+                    .attribute(profile, entrypoint, VAConfigAttribEncAV1Ext2)
+                    .ok_or("this VA-API driver reports no AV1 encoder attributes")?,
             )),
             Codec::Jpeg => unreachable!(),
         };
-        let packed = device.attribute(profile, entrypoint, VAConfigAttribEncPackedHeaders).map_or(0, |v| v & arm.wanted_packed());
+        let packed = device
+            .attribute(profile, entrypoint, VAConfigAttribEncPackedHeaders)
+            .map_or(0, |v| v & arm.wanted_packed());
         if packed != 0 {
-            attribs.push(VAConfigAttrib { type_: VAConfigAttribEncPackedHeaders, value: packed });
+            attribs.push(VAConfigAttrib {
+                type_: VAConfigAttribEncPackedHeaders,
+                value: packed,
+            });
         }
-        let dpb = if arm.tracks_references(packed) { dpb } else { 1 };
+        let dpb = if arm.tracks_references(packed) {
+            dpb
+        } else {
+            1
+        };
         let quality_range = device.attribute(profile, entrypoint, VAConfigAttribEncQualityRange);
         let slice_caps = (
             device.attribute(profile, entrypoint, VAConfigAttribEncMaxSlices),
@@ -754,8 +996,21 @@ impl VaapiEncoder {
 
         let mut config = VA_INVALID_ID;
         device.check(
-            unsafe { (api.vaCreateConfig)(device.display, profile, entrypoint, attribs.as_mut_ptr(), attribs.len() as c_int, &mut config) },
-            &format!("no VA-API encode configuration for {} on {} surfaces", codec.display(), fourcc_name(fourcc)),
+            unsafe {
+                (api.vaCreateConfig)(
+                    device.display,
+                    profile,
+                    entrypoint,
+                    attribs.as_mut_ptr(),
+                    attribs.len() as c_int,
+                    &mut config,
+                )
+            },
+            &format!(
+                "no VA-API encode configuration for {} on {} surfaces",
+                codec.display(),
+                fourcc_name(fourcc)
+            ),
         )?;
         let mut me = Self {
             codec,
@@ -815,17 +1070,42 @@ impl VaapiEncoder {
         me.surface_height = height.div_ceil(align_h) * align_h;
         let rendered = device.surface_fourccs(config);
         if !rendered.is_empty() && !rendered.contains(&fourcc) {
-            return Err(format!("the {} encoder takes no {} surfaces", codec.display(), fourcc_name(fourcc)));
+            return Err(format!(
+                "the {} encoder takes no {} surfaces",
+                codec.display(),
+                fourcc_name(fourcc)
+            ));
         }
-        let wanted_slices = if matches!(arm, Arm::H264(_)) && device.vce { 1 } else { SLICES };
+        let wanted_slices = if matches!(arm, Arm::H264(_)) && device.vce {
+            1
+        } else {
+            SLICES
+        };
         let slices = match (&arm, slice_caps) {
-            (Arm::H264(_) | Arm::H265(_), (Some(max), Some(structure))) => Some(slice_layout(structure, max, me.surface_height.div_ceil(arm_block(&arm)), wanted_slices)?),
-            (Arm::H264(_) | Arm::H265(_), _) => Some((1, me.surface_height.div_ceil(arm_block(&arm)))),
+            (Arm::H264(_) | Arm::H265(_), (Some(max), Some(structure))) => Some(slice_layout(
+                structure,
+                max,
+                me.surface_height.div_ceil(arm_block(&arm)),
+                wanted_slices,
+            )?),
+            (Arm::H264(_) | Arm::H265(_), _) => {
+                Some((1, me.surface_height.div_ceil(arm_block(&arm))))
+            }
             _ => None,
         };
         match &mut arm {
-            Arm::H264(a) => a.configure(&me.negotiated, me.surface_width, me.surface_height, slices.unwrap()),
-            Arm::H265(a) => a.configure(&me.negotiated, me.surface_width, me.surface_height, slices.unwrap()),
+            Arm::H264(a) => a.configure(
+                &me.negotiated,
+                me.surface_width,
+                me.surface_height,
+                slices.unwrap(),
+            ),
+            Arm::H265(a) => a.configure(
+                &me.negotiated,
+                me.surface_width,
+                me.surface_height,
+                slices.unwrap(),
+            ),
             Arm::Vp8(a) => a.configure(&me.negotiated),
             Arm::Vp9(a) => a.configure(&me.negotiated),
             Arm::Av1(a) => a.configure(&me.negotiated, me.surface_width, me.surface_height)?,
@@ -841,14 +1121,23 @@ impl VaapiEncoder {
             w.set_frame_num_range(a.frame_num_range());
         }
         me.quality_level = quality_range;
-        me.frame_cap = device.attribute(profile, entrypoint, VAConfigAttribMaxFrameSize).is_some_and(|v| v & 1 != 0);
+        me.frame_cap = device
+            .attribute(profile, entrypoint, VAConfigAttribMaxFrameSize)
+            .is_some_and(|v| v & 1 != 0);
 
         let recon_count = match me.arm {
             Arm::Vp8(_) => 4,
             _ => dpb as usize + 1,
         };
-        me.recon = device.create_surfaces(rt_format, fourcc, me.surface_width, me.surface_height, recon_count)?;
-        me.converted = device.create_surfaces(rt_format, fourcc, me.surface_width, me.surface_height, 1)?;
+        me.recon = device.create_surfaces(
+            rt_format,
+            fourcc,
+            me.surface_width,
+            me.surface_height,
+            recon_count,
+        )?;
+        me.converted =
+            device.create_surfaces(rt_format, fourcc, me.surface_width, me.surface_height, 1)?;
         let mut render_targets = me.recon.clone();
         render_targets.extend(&me.converted);
         device.check(
@@ -866,7 +1155,11 @@ impl VaapiEncoder {
             },
             "no VA-API encode context",
         )?;
-        me.coded = device.create_output_buffer(me.context, VAEncCodedBufferType, coded_buffer_size(me.surface_width, me.surface_height))?;
+        me.coded = device.create_output_buffer(
+            me.context,
+            VAEncCodedBufferType,
+            coded_buffer_size(me.surface_width, me.surface_height),
+        )?;
         me.open_vpp(device, input)?;
         Ok(me)
     }
@@ -884,10 +1177,18 @@ fn arm_block(arm: &Arm) -> u32 {
 /// takes, for `wanted` slices under the driver's slice structure and at most `max_slices`:
 /// arbitrary rows as asked, a power of two of rows where that is all the driver takes, one row
 /// each where it takes only equal rows.
-fn slice_layout(structure: u32, max_slices: u32, rows: u32, wanted: u32) -> Result<(u32, u32), String> {
+fn slice_layout(
+    structure: u32,
+    max_slices: u32,
+    rows: u32,
+    wanted: u32,
+) -> Result<(u32, u32), String> {
     let max_slices = max_slices.max(1);
     let wanted = wanted.min(rows).min(max_slices).max(1);
-    let (count, size) = if structure & (VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS | VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS) != 0 {
+    let (count, size) = if structure
+        & (VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS | VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS)
+        != 0
+    {
         (wanted, rows / wanted)
     } else if structure & VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS != 0 {
         let mut k = 1;
@@ -898,10 +1199,14 @@ fn slice_layout(structure: u32, max_slices: u32, rows: u32, wanted: u32) -> Resu
     } else if structure & VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS != 0 {
         (rows, 1)
     } else {
-        return Err(format!("this VA-API driver supports no usable slice structure ({structure:#x})"));
+        return Err(format!(
+            "this VA-API driver supports no usable slice structure ({structure:#x})"
+        ));
     };
     if count > max_slices {
-        return Err(format!("this VA-API driver encodes at most {max_slices} slices, not {count}"));
+        return Err(format!(
+            "this VA-API driver encodes at most {max_slices} slices, not {count}"
+        ));
     }
     Ok((count, size))
 }
@@ -914,12 +1219,24 @@ impl VaapiEncoder {
     fn open_vpp(&mut self, device: &Device, input: Input) -> Result<(), String> {
         let api = device.api;
         device.check(
-            unsafe { (api.vaCreateConfig)(device.display, VAProfileNone, VAEntrypointVideoProc, ptr::null_mut(), 0, &mut self.vpp_config) },
+            unsafe {
+                (api.vaCreateConfig)(
+                    device.display,
+                    VAProfileNone,
+                    VAEntrypointVideoProc,
+                    ptr::null_mut(),
+                    0,
+                    &mut self.vpp_config,
+                )
+            },
             "no VA-API video processing configuration",
         )?;
         let rendered = device.surface_fourccs(self.vpp_config);
         if !rendered.is_empty() && !rendered.contains(&self.fourcc) {
-            return Err(format!("this VA-API driver's video processor renders no {} surfaces", fourcc_name(self.fourcc)));
+            return Err(format!(
+                "this VA-API driver's video processor renders no {} surfaces",
+                fourcc_name(self.fourcc)
+            ));
         }
         device.check(
             unsafe {
@@ -938,33 +1255,73 @@ impl VaapiEncoder {
         )?;
         let mut caps: VAProcPipelineCaps = unsafe { std::mem::zeroed() };
         device.check(
-            unsafe { (api.vaQueryVideoProcPipelineCaps)(device.display, self.vpp_context, ptr::null_mut(), 0, &mut caps) },
+            unsafe {
+                (api.vaQueryVideoProcPipelineCaps)(
+                    device.display,
+                    self.vpp_context,
+                    ptr::null_mut(),
+                    0,
+                    &mut caps,
+                )
+            },
             "vaQueryVideoProcPipelineCaps",
         )?;
-        let standards = |list: *mut VAProcColorStandardType, count: u32| -> Vec<VAProcColorStandardType> {
-            if list.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(list, count as usize) }.to_vec() }
-        };
+        let standards =
+            |list: *mut VAProcColorStandardType, count: u32| -> Vec<VAProcColorStandardType> {
+                if list.is_null() {
+                    Vec::new()
+                } else {
+                    unsafe { std::slice::from_raw_parts(list, count as usize) }.to_vec()
+                }
+            };
         let input_standards = standards(caps.input_color_standards, caps.num_input_color_standards);
-        let output_standards = standards(caps.output_color_standards, caps.num_output_color_standards);
+        let output_standards =
+            standards(caps.output_color_standards, caps.num_output_color_standards);
         self.vpp_standards = (
             color_standard(&input_standards, ColorDescription::SRGB_SOURCE),
             color_standard(&output_standards, self.declared_color()),
         );
         if let Input::Host { rgba } = input {
             let fourcc = if rgba { VA_FOURCC_RGBA } else { VA_FOURCC_BGRA };
-            let surface = device.create_surfaces(VA_RT_FORMAT_RGB32, fourcc, self.negotiated.width, self.negotiated.height, 1)?[0];
+            let surface = device.create_surfaces(
+                VA_RT_FORMAT_RGB32,
+                fourcc,
+                self.negotiated.width,
+                self.negotiated.height,
+                1,
+            )?[0];
             let mut derived: VAImage = unsafe { std::mem::zeroed() };
-            let derive = unsafe { (api.vaDeriveImage)(device.display, surface, &mut derived) } == VA_STATUS_SUCCESS as VAStatus && {
-                let same = derived.format.fourcc == fourcc;
-                unsafe { (api.vaDestroyImage)(device.display, derived.image_id) };
-                same
-            };
-            let host = self.host.insert(HostUpload { surface, fourcc, derive, image: None });
+            let derive = unsafe { (api.vaDeriveImage)(device.display, surface, &mut derived) }
+                == VA_STATUS_SUCCESS as VAStatus
+                && {
+                    let same = derived.format.fourcc == fourcc;
+                    unsafe { (api.vaDestroyImage)(device.display, derived.image_id) };
+                    same
+                };
+            let host = self.host.insert(HostUpload {
+                surface,
+                fourcc,
+                derive,
+                image: None,
+            });
             if !derive {
-                let mut format = image_format(device, fourcc).ok_or_else(|| format!("this VA-API driver has no {} image format", fourcc_name(fourcc)))?;
+                let mut format = image_format(device, fourcc).ok_or_else(|| {
+                    format!(
+                        "this VA-API driver has no {} image format",
+                        fourcc_name(fourcc)
+                    )
+                })?;
                 let mut image: VAImage = unsafe { std::mem::zeroed() };
                 device.check(
-                    unsafe { (api.vaCreateImage)(device.display, &mut format, self.negotiated.width as c_int, self.negotiated.height as c_int, &mut image) },
+                    unsafe {
+                        (api.vaCreateImage)(
+                            device.display,
+                            &mut format,
+                            self.negotiated.width as c_int,
+                            self.negotiated.height as c_int,
+                            &mut image,
+                        )
+                    },
                     "vaCreateImage",
                 )?;
                 host.image = Some(image);
@@ -977,7 +1334,13 @@ impl VaapiEncoder {
     /// source already carries, at limited range; VP8 is held to BT.601, the only matrix its
     /// keyframe header's one color-space bit can name.
     fn declared_color(&self) -> ColorDescription {
-        ColorDescription { primaries: 1, transfer: 1, matrix: if self.codec == Codec::Vp8 { 6 } else { 1 }, full_range: false, rgb: false }
+        ColorDescription {
+            primaries: 1,
+            transfer: 1,
+            matrix: if self.codec == Codec::Vp8 { 6 } else { 1 },
+            full_range: false,
+            rgb: false,
+        }
     }
 
     pub fn codec(&self) -> Codec {
@@ -1033,18 +1396,36 @@ impl VaapiEncoder {
     /// Take a rate or frame-rate change: the next frame opens a sequence with the new rate
     /// control, as a key frame.
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
-        let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
+        let Some(rate) = self.rate.changed(settings) else {
+            return Ok(());
+        };
         self.rate = rate;
         self.negotiated.fps = rate.fps;
-        self.negotiated.bits_per_second = if rate.cbr { rate.bps().min(u32::MAX as u64) as u32 } else { 0 };
+        self.negotiated.bits_per_second = if rate.cbr {
+            rate.bps().min(u32::MAX as u64) as u32
+        } else {
+            0
+        };
         self.negotiated.min_qp = self.codec.quantizer_bound(rate.min_qp);
         self.negotiated.max_qp = self.codec.quantizer_bound(rate.max_qp);
         match &mut self.arm {
-            Arm::H264(a) => a.configure(&self.negotiated, self.surface_width, self.surface_height, a.slices()),
-            Arm::H265(a) => a.configure(&self.negotiated, self.surface_width, self.surface_height, a.slices()),
+            Arm::H264(a) => a.configure(
+                &self.negotiated,
+                self.surface_width,
+                self.surface_height,
+                a.slices(),
+            ),
+            Arm::H265(a) => a.configure(
+                &self.negotiated,
+                self.surface_width,
+                self.surface_height,
+                a.slices(),
+            ),
             Arm::Vp8(a) => a.configure(&self.negotiated),
             Arm::Vp9(a) => a.configure(&self.negotiated),
-            Arm::Av1(a) => a.configure(&self.negotiated, self.surface_width, self.surface_height)?,
+            Arm::Av1(a) => {
+                a.configure(&self.negotiated, self.surface_width, self.surface_height)?
+            }
         }
         self.sequence_start = true;
         Ok(())
@@ -1079,7 +1460,11 @@ impl VaapiEncoder {
             rc.target_percentage = 100;
             rc.window_size = (vbv as u64 * 1000 / bps.max(1) as u64) as u32;
             rc.initial_qp = 0;
-            rc.min_qp = if matches!(self.arm, Arm::H264(_)) { self.negotiated.min_qp.max(h264::MIN_QP) } else { self.negotiated.min_qp };
+            rc.min_qp = if matches!(self.arm, Arm::H264(_)) {
+                self.negotiated.min_qp.max(h264::MIN_QP)
+            } else {
+                self.negotiated.min_qp
+            };
             rc.max_qp = self.negotiated.max_qp;
             rc.basic_unit_size = 0;
             rc.ICQ_quality_factor = 1;
@@ -1089,10 +1474,18 @@ impl VaapiEncoder {
                 rc.rc_flags.bits.set_disable_bit_stuffing(1);
             }
             out.push_misc(VAEncMiscParameterTypeRateControl, &rc);
-            let hrd = VAEncMiscParameterHRD { initial_buffer_fullness: vbv, buffer_size: vbv, va_reserved: [0; 4] };
+            let hrd = VAEncMiscParameterHRD {
+                initial_buffer_fullness: vbv,
+                buffer_size: vbv,
+                va_reserved: [0; 4],
+            };
             out.push_misc(VAEncMiscParameterTypeHRD, &hrd);
             if self.frame_cap {
-                let cap = VAEncMiscParameterBufferMaxFrameSize { type_: VAEncMiscParameterTypeMaxFrameSize, max_frame_size: vbv, va_reserved: [0; 4] };
+                let cap = VAEncMiscParameterBufferMaxFrameSize {
+                    type_: VAEncMiscParameterTypeMaxFrameSize,
+                    max_frame_size: vbv,
+                    va_reserved: [0; 4],
+                };
                 out.push_misc(VAEncMiscParameterTypeMaxFrameSize, &cap);
             }
         }
@@ -1101,7 +1494,10 @@ impl VaapiEncoder {
         frame_rate.framerate = (fps.den << 16) | fps.num;
         out.push_misc(VAEncMiscParameterTypeFrameRate, &frame_rate);
         if let Some(level) = self.quality_level {
-            let quality = VAEncMiscParameterBufferQualityLevel { quality_level: level, va_reserved: [0; 4] };
+            let quality = VAEncMiscParameterBufferQualityLevel {
+                quality_level: level,
+                va_reserved: [0; 4],
+            };
             out.push_misc(VAEncMiscParameterTypeQualityLevel, &quality);
         }
     }
@@ -1109,12 +1505,25 @@ impl VaapiEncoder {
     /// Encode one packed host frame (`stride` bytes per row, in the byte order the session
     /// was built for) at the quality index `crf`: uploaded straight from the caller's rows
     /// onto the host surface and converted on the GPU.
-    pub fn encode_host(&mut self, pixels: &[u8], stride: usize, rgba: bool, frame_number: u64, crf: u32, force_idr: bool) -> Result<Vec<u8>, String> {
-        let Input::Host { rgba: built } = self.input else { return Err("this session takes dmabufs".into()) };
+    pub fn encode_host(
+        &mut self,
+        pixels: &[u8],
+        stride: usize,
+        rgba: bool,
+        frame_number: u64,
+        crf: u32,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
+        let Input::Host { rgba: built } = self.input else {
+            return Err("this session takes dmabufs".into());
+        };
         if built != rgba {
             return Err("this session was built for the other byte order".into());
         }
-        let (width, height) = (self.negotiated.width as usize, self.negotiated.height as usize);
+        let (width, height) = (
+            self.negotiated.width as usize,
+            self.negotiated.height as usize,
+        );
         check_host_frame(pixels, stride, width, height)?;
         let host = self.host.as_ref().ok_or("no host upload surface")?;
         let api = self.device.api;
@@ -1122,12 +1531,18 @@ impl VaapiEncoder {
         unsafe {
             let mut image: VAImage = std::mem::zeroed();
             if host.derive {
-                self.device.check((api.vaDeriveImage)(display, host.surface, &mut image), "vaDeriveImage")?;
+                self.device.check(
+                    (api.vaDeriveImage)(display, host.surface, &mut image),
+                    "vaDeriveImage",
+                )?;
             } else {
                 image = host.image.unwrap();
             }
             let mut address: *mut c_void = ptr::null_mut();
-            let mapped = self.device.check((api.vaMapBuffer)(display, image.buf, &mut address), "vaMapBuffer");
+            let mapped = self.device.check(
+                (api.vaMapBuffer)(display, image.buf, &mut address),
+                "vaMapBuffer",
+            );
             if let Err(e) = mapped {
                 if host.derive {
                     (api.vaDestroyImage)(display, image.image_id);
@@ -1137,14 +1552,30 @@ impl VaapiEncoder {
             let pitch = image.pitches[0] as usize;
             let dst = (address as *mut u8).add(image.offsets[0] as usize);
             for row in 0..height {
-                ptr::copy_nonoverlapping(pixels.as_ptr().add(row * stride), dst.add(row * pitch), width * 4);
+                ptr::copy_nonoverlapping(
+                    pixels.as_ptr().add(row * stride),
+                    dst.add(row * pitch),
+                    width * 4,
+                );
             }
             (api.vaUnmapBuffer)(display, image.buf);
             if host.derive {
                 (api.vaDestroyImage)(display, image.image_id);
             } else {
                 self.device.check(
-                    (api.vaPutImage)(display, host.surface, image.image_id, 0, 0, width as c_uint, height as c_uint, 0, 0, width as c_uint, height as c_uint),
+                    (api.vaPutImage)(
+                        display,
+                        host.surface,
+                        image.image_id,
+                        0,
+                        0,
+                        width as c_uint,
+                        height as c_uint,
+                        0,
+                        0,
+                        width as c_uint,
+                        height as c_uint,
+                    ),
                     "vaPutImage",
                 )?;
             }
@@ -1155,7 +1586,13 @@ impl VaapiEncoder {
 
     /// Encode one Wayland DRM-PRIME dmabuf: imported as a VA surface in place for the frame and
     /// converted on the GPU.
-    pub fn encode_dmabuf(&mut self, dmabuf: &Dmabuf, frame_number: u64, crf: u32, force_idr: bool) -> Result<Vec<u8>, String> {
+    pub fn encode_dmabuf(
+        &mut self,
+        dmabuf: &Dmabuf,
+        frame_number: u64,
+        crf: u32,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
         if self.input != Input::Dmabuf {
             return Err("this session takes host frames".into());
         }
@@ -1216,7 +1653,18 @@ impl VaapiEncoder {
             }
             attribs[0].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 as i32;
             attribs[1].value.value.p = &mut desc as *mut VADRMPRIMESurfaceDescriptor as *mut c_void;
-            let status = unsafe { (api.vaCreateSurfaces)(display, VA_RT_FORMAT_RGB32, width, height, &mut surface, 1, attribs.as_mut_ptr(), 2) };
+            let status = unsafe {
+                (api.vaCreateSurfaces)(
+                    display,
+                    VA_RT_FORMAT_RGB32,
+                    width,
+                    height,
+                    &mut surface,
+                    1,
+                    attribs.as_mut_ptr(),
+                    2,
+                )
+            };
             if status == VA_STATUS_SUCCESS as VAStatus {
                 return Ok(surface);
             }
@@ -1237,7 +1685,18 @@ impl VaapiEncoder {
         attribs[0].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME as i32;
         attribs[1].value.value.p = &mut desc as *mut VASurfaceAttribExternalBuffers as *mut c_void;
         self.device.check(
-            unsafe { (api.vaCreateSurfaces)(display, VA_RT_FORMAT_RGB32, width, height, &mut surface, 1, attribs.as_mut_ptr(), 2) },
+            unsafe {
+                (api.vaCreateSurfaces)(
+                    display,
+                    VA_RT_FORMAT_RGB32,
+                    width,
+                    height,
+                    &mut surface,
+                    1,
+                    attribs.as_mut_ptr(),
+                    2,
+                )
+            },
             "no VA surface over the dmabuf",
         )?;
         Ok(surface)
@@ -1250,7 +1709,12 @@ impl VaapiEncoder {
     fn convert(&mut self, source: VASurfaceID) -> Result<(), String> {
         let api = self.device.api;
         let display = self.device.display;
-        let region = VARectangle { x: 0, y: 0, width: self.negotiated.width as u16, height: self.negotiated.height as u16 };
+        let region = VARectangle {
+            x: 0,
+            y: 0,
+            width: self.negotiated.width as u16,
+            height: self.negotiated.height as u16,
+        };
         let declared = self.declared_color();
         let mut params: VAProcPipelineParameterBuffer = unsafe { std::mem::zeroed() };
         params.surface = source;
@@ -1265,14 +1729,32 @@ impl VaapiEncoder {
         params.output_color_standard = self.vpp_standards.1;
         params.input_color_properties = ColorDescription::SRGB_SOURCE.properties();
         params.output_color_properties = declared.properties();
-        let buffer = self.device.create_buffer(self.vpp_context, VAProcPipelineParameterBufferType, unsafe {
-            std::slice::from_raw_parts(&params as *const VAProcPipelineParameterBuffer as *const u8, std::mem::size_of::<VAProcPipelineParameterBuffer>())
-        })?;
+        let buffer = self.device.create_buffer(
+            self.vpp_context,
+            VAProcPipelineParameterBufferType,
+            unsafe {
+                std::slice::from_raw_parts(
+                    &params as *const VAProcPipelineParameterBuffer as *const u8,
+                    std::mem::size_of::<VAProcPipelineParameterBuffer>(),
+                )
+            },
+        )?;
         let mut buffers = [buffer];
         let result = (|| {
-            self.device.check(unsafe { (api.vaBeginPicture)(display, self.vpp_context, self.converted[0]) }, "vaBeginPicture (video processing)")?;
-            let rendered = self.device.check(unsafe { (api.vaRenderPicture)(display, self.vpp_context, buffers.as_mut_ptr(), 1) }, "vaRenderPicture (video processing)");
-            let ended = self.device.check(unsafe { (api.vaEndPicture)(display, self.vpp_context) }, "vaEndPicture (video processing)");
+            self.device.check(
+                unsafe { (api.vaBeginPicture)(display, self.vpp_context, self.converted[0]) },
+                "vaBeginPicture (video processing)",
+            )?;
+            let rendered = self.device.check(
+                unsafe {
+                    (api.vaRenderPicture)(display, self.vpp_context, buffers.as_mut_ptr(), 1)
+                },
+                "vaRenderPicture (video processing)",
+            );
+            let ended = self.device.check(
+                unsafe { (api.vaEndPicture)(display, self.vpp_context) },
+                "vaEndPicture (video processing)",
+            );
             rendered.and(ended)
         })();
         unsafe { (api.vaDestroyBuffer)(display, buffer) };
@@ -1281,7 +1763,13 @@ impl VaapiEncoder {
 
     /// Encode the picture on `source`: convert it, then issue the frame with its parameter
     /// buffers and packed headers, wait for it, and frame the coded bytes for the wire.
-    fn encode_surface(&mut self, source: VASurfaceID, frame_number: u64, crf: u32, force_idr: bool) -> Result<Vec<u8>, String> {
+    fn encode_surface(
+        &mut self,
+        source: VASurfaceID,
+        frame_number: u64,
+        crf: u32,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
         if !self.rate.cbr {
             self.qp = self.codec.quantizer(crf as i32);
         }
@@ -1300,42 +1788,84 @@ impl VaapiEncoder {
             None => self.frame_count,
         };
         let held: Vec<(u64, VASurfaceID, bool)> = match &self.references {
-            Some(References::Window(w)) => w.held().filter_map(|(_, p, lost)| self.surfaces_of.get(&p).map(|&s| (p, s, lost))).collect(),
+            Some(References::Window(w)) => w
+                .held()
+                .filter_map(|(_, p, lost)| self.surfaces_of.get(&p).map(|&s| (p, s, lost)))
+                .collect(),
             _ => Vec::new(),
         };
         let (reference, key_pts, slots, slot_surfaces) = match &self.references {
             Some(References::Window(w)) => (
-                if key { None } else { w.newest_valid().and_then(|(_, p)| self.surfaces_of.get(&p).map(|&s| (p, s))) },
+                if key {
+                    None
+                } else {
+                    w.newest_valid()
+                        .and_then(|(_, p)| self.surfaces_of.get(&p).map(|&s| (p, s)))
+                },
                 if key { pts } else { w.key_pts() },
                 SlotPlan::KEY,
                 [VA_INVALID_SURFACE; 3],
             ),
             Some(References::Slots(s)) => {
                 let plan = s.plan(key);
-                let surfaces = [1u8, 2, 4].map(|slot| s.slot(slot).and_then(|(_, p, _)| self.surfaces_of.get(&p).copied()).unwrap_or(VA_INVALID_SURFACE));
-                let reference = (plan.predict_from != 0).then(|| s.slot(plan.predict_from)).flatten().and_then(|(_, p, _)| self.surfaces_of.get(&p).map(|&surf| (p, surf)));
+                let surfaces = [1u8, 2, 4].map(|slot| {
+                    s.slot(slot)
+                        .and_then(|(_, p, _)| self.surfaces_of.get(&p).copied())
+                        .unwrap_or(VA_INVALID_SURFACE)
+                });
+                let reference = (plan.predict_from != 0)
+                    .then(|| s.slot(plan.predict_from))
+                    .flatten()
+                    .and_then(|(_, p, _)| self.surfaces_of.get(&p).map(|&surf| (p, surf)));
                 (reference, 0, plan, surfaces)
             }
             None => (
-                if key { None } else { self.surfaces_of.get(&(pts - 1)).map(|&s| (pts - 1, s)) },
+                if key {
+                    None
+                } else {
+                    self.surfaces_of.get(&(pts - 1)).map(|&s| (pts - 1, s))
+                },
                 if key { pts } else { self.key_count },
                 SlotPlan::KEY,
                 [VA_INVALID_SURFACE; 3],
             ),
         };
         let recon = match &self.references {
-            Some(References::Slots(_)) => *self.recon.iter().find(|s| !slot_surfaces.contains(s)).ok_or("no VP8 reconstruction surface is free")?,
+            Some(References::Slots(_)) => *self
+                .recon
+                .iter()
+                .find(|s| !slot_surfaces.contains(s))
+                .ok_or("no VP8 reconstruction surface is free")?,
             _ => self.recon[(pts % self.recon.len() as u64) as usize],
         };
-        let qp = if self.rate.cbr { self.qp } else { held_qp.unwrap_or(self.qp) };
-        let frame = Frame { key, pts, key_pts, recon, coded: self.coded, reference, held: &held, qp, slots, slot_surfaces };
+        let qp = if self.rate.cbr {
+            self.qp
+        } else {
+            held_qp.unwrap_or(self.qp)
+        };
+        let frame = Frame {
+            key,
+            pts,
+            key_pts,
+            recon,
+            coded: self.coded,
+            reference,
+            held: &held,
+            qp,
+            slots,
+            slot_surfaces,
+        };
         let mut out = Buffers::new();
         if key {
             self.arm.sequence(&self.negotiated, &mut out);
             self.rate_control(&mut out);
         }
         self.arm.picture(&self.negotiated, &frame, &mut out)?;
-        let header_len = if self.omit_headers { 0 } else { VIDEO_HEADER_LEN };
+        let header_len = if self.omit_headers {
+            0
+        } else {
+            VIDEO_HEADER_LEN
+        };
         let mut output = vec![0; header_len];
         self.issue(&out, &mut output)?;
         if key
@@ -1380,14 +1910,28 @@ impl VaapiEncoder {
         };
         match &self.references {
             Some(References::Slots(s)) => {
-                let held: Vec<u64> = [1u8, 2, 4].iter().filter_map(|&slot| s.slot(slot).map(|(_, p, _)| p)).collect();
+                let held: Vec<u64> = [1u8, 2, 4]
+                    .iter()
+                    .filter_map(|&slot| s.slot(slot).map(|(_, p, _)| p))
+                    .collect();
                 self.surfaces_of.retain(|p, _| held.contains(p));
             }
-            _ => self.surfaces_of.retain(|&p, _| p + self.recon.len() as u64 > pts),
+            _ => self
+                .surfaces_of
+                .retain(|&p, _| p + self.recon.len() as u64 > pts),
         }
         if !self.omit_headers {
             let mut header = Vec::with_capacity(VIDEO_HEADER_LEN);
-            push_video_header(&mut header, self.codec, frame_type, frame_id, 0, self.negotiated.width as u16, self.negotiated.height as u16, self.last_reference);
+            push_video_header(
+                &mut header,
+                self.codec,
+                frame_type,
+                frame_id,
+                0,
+                self.negotiated.width as u16,
+                self.negotiated.height as u16,
+                self.last_reference,
+            );
             output[..VIDEO_HEADER_LEN].copy_from_slice(&header);
         }
         Ok(output)
@@ -1410,9 +1954,25 @@ impl VaapiEncoder {
             }
         }
         let result = created.and_then(|()| {
-            self.device.check(unsafe { (api.vaBeginPicture)(display, self.context, self.converted[0]) }, "vaBeginPicture")?;
-            let rendered = self.device.check(unsafe { (api.vaRenderPicture)(display, self.context, ids.as_mut_ptr(), ids.len() as c_int) }, "vaRenderPicture");
-            let ended = self.device.check(unsafe { (api.vaEndPicture)(display, self.context) }, "vaEndPicture");
+            self.device.check(
+                unsafe { (api.vaBeginPicture)(display, self.context, self.converted[0]) },
+                "vaBeginPicture",
+            )?;
+            let rendered = self.device.check(
+                unsafe {
+                    (api.vaRenderPicture)(
+                        display,
+                        self.context,
+                        ids.as_mut_ptr(),
+                        ids.len() as c_int,
+                    )
+                },
+                "vaRenderPicture",
+            );
+            let ended = self.device.check(
+                unsafe { (api.vaEndPicture)(display, self.context) },
+                "vaEndPicture",
+            );
             rendered.and(ended)
         });
         for id in ids {
@@ -1422,23 +1982,38 @@ impl VaapiEncoder {
         let synced = match api.vaSyncBuffer {
             Some(sync) => {
                 let status = unsafe { sync(display, self.coded, u64::MAX) };
-                if status == VA_STATUS_ERROR_UNIMPLEMENTED as VAStatus { None } else { Some(self.device.check(status, "vaSyncBuffer")) }
+                if status == VA_STATUS_ERROR_UNIMPLEMENTED as VAStatus {
+                    None
+                } else {
+                    Some(self.device.check(status, "vaSyncBuffer"))
+                }
             }
             None => None,
         };
         match synced {
             Some(result) => result?,
-            None => self.device.check(unsafe { (api.vaSyncSurface)(display, self.converted[0]) }, "vaSyncSurface")?,
+            None => self.device.check(
+                unsafe { (api.vaSyncSurface)(display, self.converted[0]) },
+                "vaSyncSurface",
+            )?,
         }
         let mut list: *mut c_void = ptr::null_mut();
-        self.device.check(unsafe { (api.vaMapBuffer)(display, self.coded, &mut list) }, "vaMapBuffer (coded)")?;
+        self.device.check(
+            unsafe { (api.vaMapBuffer)(display, self.coded, &mut list) },
+            "vaMapBuffer (coded)",
+        )?;
         let segments = || {
-            std::iter::successors(unsafe { (list as *const VACodedBufferSegment).as_ref() }, |s| unsafe { (s.next as *const VACodedBufferSegment).as_ref() })
-                .filter(|s| !s.buf.is_null())
+            std::iter::successors(
+                unsafe { (list as *const VACodedBufferSegment).as_ref() },
+                |s| unsafe { (s.next as *const VACodedBufferSegment).as_ref() },
+            )
+            .filter(|s| !s.buf.is_null())
         };
         out.reserve(segments().map(|s| s.size as usize).sum());
         for s in segments() {
-            out.extend_from_slice(unsafe { std::slice::from_raw_parts(s.buf as *const u8, s.size as usize) });
+            out.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(s.buf as *const u8, s.size as usize)
+            });
         }
         unsafe { (api.vaUnmapBuffer)(display, self.coded) };
         Ok(())
@@ -1459,12 +2034,23 @@ struct ColorDescription {
 impl ColorDescription {
     /// The sRGB desktop picture every session starts from: BT.709 primaries and transfer,
     /// full range.
-    const SRGB_SOURCE: Self = Self { primaries: 1, transfer: 1, matrix: 0, full_range: true, rgb: true };
+    const SRGB_SOURCE: Self = Self {
+        primaries: 1,
+        transfer: 1,
+        matrix: 0,
+        full_range: true,
+        rgb: true,
+    };
 
     fn properties(self) -> VAProcColorProperties {
         VAProcColorProperties {
-            chroma_sample_location: (VA_CHROMA_SITING_VERTICAL_CENTER | VA_CHROMA_SITING_HORIZONTAL_CENTER) as u8,
-            color_range: if self.full_range { VA_SOURCE_RANGE_FULL } else { VA_SOURCE_RANGE_REDUCED } as u8,
+            chroma_sample_location: (VA_CHROMA_SITING_VERTICAL_CENTER
+                | VA_CHROMA_SITING_HORIZONTAL_CENTER) as u8,
+            color_range: if self.full_range {
+                VA_SOURCE_RANGE_FULL
+            } else {
+                VA_SOURCE_RANGE_REDUCED
+            } as u8,
             colour_primaries: self.primaries,
             transfer_characteristics: self.transfer,
             matrix_coefficients: self.matrix,
@@ -1477,7 +2063,10 @@ impl ColorDescription {
 /// driver takes it, since the properties then say everything; else the standard whose
 /// matrix, transfer, and primaries come closest, weighted four, two, and one, or none when
 /// nothing matches at all.
-fn color_standard(offered: &[VAProcColorStandardType], wanted: ColorDescription) -> VAProcColorStandardType {
+fn color_standard(
+    offered: &[VAProcColorStandardType],
+    wanted: ColorDescription,
+) -> VAProcColorStandardType {
     if offered.contains(&VAProcColorStandardExplicit) {
         return VAProcColorStandardExplicit;
     }
@@ -1500,7 +2089,9 @@ fn color_standard(offered: &[VAProcColorStandardType], wanted: ColorDescription)
     let mut best = (worst, VAProcColorStandardNone);
     for &standard in offered {
         for &(_, primaries, transfer, matrix) in TABLE.iter().filter(|t| t.0 == standard) {
-            let score = 4 * (matrix_counts && wanted.matrix != matrix) as u32 + 2 * (wanted.transfer != transfer) as u32 + (wanted.primaries != primaries) as u32;
+            let score = 4 * (matrix_counts && wanted.matrix != matrix) as u32
+                + 2 * (wanted.transfer != transfer) as u32
+                + (wanted.primaries != primaries) as u32;
             if score < best.0 {
                 best = (score, standard);
             }
@@ -1512,12 +2103,21 @@ fn color_standard(offered: &[VAProcColorStandardType], wanted: ColorDescription)
 /// The driver's image format of `fourcc`, with the masks it wants an image created with.
 fn image_format(device: &Device, fourcc: u32) -> Option<VAImageFormat> {
     let api = device.api;
-    let mut formats: Vec<VAImageFormat> = vec![unsafe { std::mem::zeroed() }; unsafe { (api.vaMaxNumImageFormats)(device.display) }.max(0) as usize];
+    let mut formats: Vec<VAImageFormat> = vec![
+        unsafe { std::mem::zeroed() };
+        unsafe { (api.vaMaxNumImageFormats)(device.display) }.max(0)
+            as usize
+    ];
     let mut count: c_int = 0;
-    if unsafe { (api.vaQueryImageFormats)(device.display, formats.as_mut_ptr(), &mut count) } != VA_STATUS_SUCCESS as VAStatus {
+    if unsafe { (api.vaQueryImageFormats)(device.display, formats.as_mut_ptr(), &mut count) }
+        != VA_STATUS_SUCCESS as VAStatus
+    {
         return None;
     }
-    formats[..count.max(0) as usize].iter().find(|f| f.fourcc == fourcc).copied()
+    formats[..count.max(0) as usize]
+        .iter()
+        .find(|f| f.fourcc == fourcc)
+        .copied()
 }
 
 #[cfg(test)]
@@ -1532,7 +2132,10 @@ mod tests {
         assert_eq!(FULLCOLOR_FOURCCS, [VA_FOURCC_444P, VA_FOURCC_XYUV]);
         assert_eq!(fourcc_name(VA_FOURCC_XYUV), "vuyx");
         assert_eq!(fourcc_name(VA_FOURCC_444P), "yuv444p");
-        assert!(profile_ladder(Codec::H264, true).is_empty(), "no 4:4:4 H.264 profile is served");
+        assert!(
+            profile_ladder(Codec::H264, true).is_empty(),
+            "no 4:4:4 H.264 profile is served"
+        );
         assert_eq!(profile_ladder(Codec::H265, true), [VAProfileHEVCMain444]);
         assert_eq!(profile_ladder(Codec::Vp9, true), [VAProfileVP9Profile1]);
         assert!(profile_ladder(Codec::Av1, true).is_empty());
@@ -1548,15 +2151,43 @@ mod tests {
     #[test]
     fn the_color_standard_is_the_nearest_the_driver_offers() {
         let explicit = [VAProcColorStandardBT601, VAProcColorStandardExplicit];
-        assert_eq!(color_standard(&explicit, ColorDescription::SRGB_SOURCE), VAProcColorStandardExplicit);
-        let classic = [VAProcColorStandardBT601, VAProcColorStandardBT709, VAProcColorStandardSMPTE170M, VAProcColorStandardSRGB];
-        assert_eq!(color_standard(&classic, ColorDescription::SRGB_SOURCE), VAProcColorStandardBT709);
-        let bt709 = ColorDescription { primaries: 1, transfer: 1, matrix: 1, full_range: false, rgb: false };
+        assert_eq!(
+            color_standard(&explicit, ColorDescription::SRGB_SOURCE),
+            VAProcColorStandardExplicit
+        );
+        let classic = [
+            VAProcColorStandardBT601,
+            VAProcColorStandardBT709,
+            VAProcColorStandardSMPTE170M,
+            VAProcColorStandardSRGB,
+        ];
+        assert_eq!(
+            color_standard(&classic, ColorDescription::SRGB_SOURCE),
+            VAProcColorStandardBT709
+        );
+        let bt709 = ColorDescription {
+            primaries: 1,
+            transfer: 1,
+            matrix: 1,
+            full_range: false,
+            rgb: false,
+        };
         assert_eq!(color_standard(&classic, bt709), VAProcColorStandardBT709);
         let bt601 = ColorDescription { matrix: 6, ..bt709 };
-        assert_eq!(color_standard(&classic, bt601), VAProcColorStandardBT601, "the driver's first of two equal matches");
-        assert_eq!(color_standard(&classic[2..], bt601), VAProcColorStandardSMPTE170M);
-        assert_eq!(color_standard(&[VAProcColorStandardBT2020], bt709), VAProcColorStandardNone, "a total mismatch names no standard");
+        assert_eq!(
+            color_standard(&classic, bt601),
+            VAProcColorStandardBT601,
+            "the driver's first of two equal matches"
+        );
+        assert_eq!(
+            color_standard(&classic[2..], bt601),
+            VAProcColorStandardSMPTE170M
+        );
+        assert_eq!(
+            color_standard(&[VAProcColorStandardBT2020], bt709),
+            VAProcColorStandardNone,
+            "a total mismatch names no standard"
+        );
     }
 
     /// Slices follow the driver's structure: as many rows as asked where rows are free, a
@@ -1564,16 +2195,45 @@ mod tests {
     /// equal rows are.
     #[test]
     fn slice_layout_follows_the_driver() {
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 32, 68, 4), Ok((4, 17)));
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 32, 68, 4), Ok((5, 16)));
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS, 128, 68, 4), Ok((68, 1)));
-        assert!(slice_layout(VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS, 32, 68, 4).is_err(), "more slices than the driver takes");
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 32, 68, 4),
+            Ok((4, 17))
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 32, 68, 4),
+            Ok((5, 16))
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS, 128, 68, 4),
+            Ok((68, 1))
+        );
+        assert!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS, 32, 68, 4).is_err(),
+            "more slices than the driver takes"
+        );
         assert!(slice_layout(0, 32, 68, 4).is_err());
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 32, 2, 4), Ok((2, 1)), "no more slices than rows");
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 2, 68, 4), Ok((2, 34)), "no more slices than the driver takes");
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 1, 68, 4), Ok((1, 68)));
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 4, 68, 4), Ok((3, 32)));
-        assert_eq!(slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 1, 68, 4), Ok((1, 128)));
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 32, 2, 4),
+            Ok((2, 1)),
+            "no more slices than rows"
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 2, 68, 4),
+            Ok((2, 34)),
+            "no more slices than the driver takes"
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS, 1, 68, 4),
+            Ok((1, 68))
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 4, 68, 4),
+            Ok((3, 32))
+        );
+        assert_eq!(
+            slice_layout(VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS, 1, 68, 4),
+            Ok((1, 128))
+        );
     }
 
     /// Construction either stands a session up or says why it could not; a half-built
@@ -1581,11 +2241,21 @@ mod tests {
     /// everywhere: a host without a VA-API device exercises the error path.
     #[test]
     fn construction_answers_or_refuses() {
-        let mut settings = RustCaptureSettings { width: 128, height: 128, codec: Codec::H264, video_fullcolor: true, ..Default::default() };
+        let mut settings = RustCaptureSettings {
+            width: 128,
+            height: 128,
+            codec: Codec::H264,
+            video_fullcolor: true,
+            ..Default::default()
+        };
         for codec in Codec::VIDEO {
             settings.codec = codec;
             match VaapiEncoder::new(&settings, codec, Input::Host { rgba: false }) {
-                Ok(enc) => assert_eq!(enc.is_fullcolor(), matches!(codec, Codec::H265 | Codec::Vp9), "{codec:?}"),
+                Ok(enc) => assert_eq!(
+                    enc.is_fullcolor(),
+                    matches!(codec, Codec::H265 | Codec::Vp9),
+                    "{codec:?}"
+                ),
                 Err(e) => assert!(!e.is_empty(), "refusal must carry a reason"),
             }
         }
@@ -1603,12 +2273,29 @@ mod tests {
     #[ignore]
     fn vaapi_vce_h264_is_one_slice() {
         let (w, h) = (1920usize, 1080usize);
-        let settings = RustCaptureSettings { width: w as i32, height: h as i32, codec: Codec::H264, omit_stripe_headers: true, ..Default::default() };
-        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false }).expect("a VA-API H.264 session");
-        let frame: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff]).collect();
-        let key = enc.encode_host(&frame, w * 4, false, 0, 25, true).expect("encode");
-        let slices = super::super::codec::annexb_nals(&key).filter(|n| matches!(n[0] & 0x1f, 1 | 5)).count();
-        println!("{}: VCE {}, {slices} slice(s) in the key frame", enc.vendor(), enc.device.vce);
+        let settings = RustCaptureSettings {
+            width: w as i32,
+            height: h as i32,
+            codec: Codec::H264,
+            omit_stripe_headers: true,
+            ..Default::default()
+        };
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false })
+            .expect("a VA-API H.264 session");
+        let frame: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff])
+            .collect();
+        let key = enc
+            .encode_host(&frame, w * 4, false, 0, 25, true)
+            .expect("encode");
+        let slices = super::super::codec::annexb_nals(&key)
+            .filter(|n| matches!(n[0] & 0x1f, 1 | 5))
+            .count();
+        println!(
+            "{}: VCE {}, {slices} slice(s) in the key frame",
+            enc.vendor(),
+            enc.device.vce
+        );
         assert_eq!(slices, if enc.device.vce { 1 } else { SLICES as usize });
     }
 
@@ -1636,11 +2323,19 @@ mod tests {
             omit_stripe_headers: true,
             ..Default::default()
         };
-        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false }).expect("a VA-API H.264 session");
-        let frame: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff]).collect();
-        let key = enc.encode_host(&frame, w * 4, false, 0, 25, true).expect("encode");
+        let mut enc = VaapiEncoder::new(&settings, Codec::H264, Input::Host { rgba: false })
+            .expect("a VA-API H.264 session");
+        let frame: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % w) as u8, (i / w) as u8, 0x80, 0xff])
+            .collect();
+        let key = enc
+            .encode_host(&frame, w * 4, false, 0, 25, true)
+            .expect("encode");
         assert_no_reorder(&key, enc.vendor());
         let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
-        assert!(dec.decode(&key).expect("the bounded key frame decodes"), "no picture");
+        assert!(
+            dec.decode(&key).expect("the bounded key frame decodes"),
+            "no picture"
+        );
     }
 }

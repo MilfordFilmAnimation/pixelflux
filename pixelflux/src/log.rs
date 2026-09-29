@@ -10,8 +10,8 @@
 //! it on for the process (selkies passes its own `--debug` there), and
 //! `PIXELFLUX_DEBUG=1` in the environment does the same for standalone use.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static DEBUG: AtomicBool = AtomicBool::new(false);
 static ENV_DEBUG: OnceLock<bool> = OnceLock::new();

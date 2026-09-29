@@ -47,20 +47,20 @@
 #![allow(non_snake_case)]
 #![allow(clippy::upper_case_acronyms)]
 
-use std::ffi::{c_char, c_void, CStr};
-use std::sync::atomic::Ordering;
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use libloading::Library;
 use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
 
 use super::Controls;
+use crate::RustCaptureSettings;
 use crate::encoders::nvenc::NvencEncoder;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
-use crate::pipeline::{decide_hw_fullframe, Damage, EncoderQuality};
+use crate::pipeline::{Damage, EncoderQuality, decide_hw_fullframe};
 use crate::recording_sink::RecordingSink;
-use crate::RustCaptureSettings;
 use nvcodec_sys::cuda::CUdeviceptr;
 
 /// NvFBC API version this module speaks: minor in the low byte, major above it.
@@ -164,7 +164,11 @@ struct NVFBC_RANDR_OUTPUT_INFO {
 
 impl Default for NVFBC_RANDR_OUTPUT_INFO {
     fn default() -> Self {
-        Self { dwId: 0, name: [0; NVFBC_OUTPUT_NAME_LEN], trackedBox: NVFBC_BOX::default() }
+        Self {
+            dwId: 0,
+            name: [0; NVFBC_OUTPUT_NAME_LEN],
+            trackedBox: NVFBC_BOX::default(),
+        }
     }
 }
 
@@ -243,30 +247,47 @@ struct NVFBC_TOCUDA_GRAB_FRAME_PARAMS {
 struct NVFBC_API_FUNCTION_LIST {
     dwVersion: u32,
     nvFBCGetLastErrorStr: Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE) -> *const c_char>,
-    nvFBCCreateHandle:
-        Option<unsafe extern "C" fn(*mut NVFBC_SESSION_HANDLE, *mut NVFBC_CREATE_HANDLE_PARAMS) -> NVFBCSTATUS>,
-    nvFBCDestroyHandle:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS>,
-    nvFBCGetStatus:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_GET_STATUS_PARAMS) -> NVFBCSTATUS>,
-    nvFBCCreateCaptureSession: Option<
-        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_CREATE_CAPTURE_SESSION_PARAMS) -> NVFBCSTATUS,
+    nvFBCCreateHandle: Option<
+        unsafe extern "C" fn(
+            *mut NVFBC_SESSION_HANDLE,
+            *mut NVFBC_CREATE_HANDLE_PARAMS,
+        ) -> NVFBCSTATUS,
     >,
-    nvFBCDestroyCaptureSession:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS>,
+    nvFBCDestroyHandle: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS,
+    >,
+    nvFBCGetStatus: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_GET_STATUS_PARAMS) -> NVFBCSTATUS,
+    >,
+    nvFBCCreateCaptureSession: Option<
+        unsafe extern "C" fn(
+            NVFBC_SESSION_HANDLE,
+            *mut NVFBC_CREATE_CAPTURE_SESSION_PARAMS,
+        ) -> NVFBCSTATUS,
+    >,
+    nvFBCDestroyCaptureSession: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS,
+    >,
     nvFBCToSysSetUp: *mut c_void,
     nvFBCToSysGrabFrame: *mut c_void,
-    nvFBCToCudaSetUp:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_TOCUDA_SETUP_PARAMS) -> NVFBCSTATUS>,
-    nvFBCToCudaGrabFrame:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_TOCUDA_GRAB_FRAME_PARAMS) -> NVFBCSTATUS>,
+    nvFBCToCudaSetUp: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_TOCUDA_SETUP_PARAMS) -> NVFBCSTATUS,
+    >,
+    nvFBCToCudaGrabFrame: Option<
+        unsafe extern "C" fn(
+            NVFBC_SESSION_HANDLE,
+            *mut NVFBC_TOCUDA_GRAB_FRAME_PARAMS,
+        ) -> NVFBCSTATUS,
+    >,
     pad1: *mut c_void,
     pad2: *mut c_void,
     pad3: *mut c_void,
-    nvFBCBindContext:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS>,
-    nvFBCReleaseContext:
-        Option<unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS>,
+    nvFBCBindContext: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS,
+    >,
+    nvFBCReleaseContext: Option<
+        unsafe extern "C" fn(NVFBC_SESSION_HANDLE, *mut NVFBC_VERSION_ONLY_PARAMS) -> NVFBCSTATUS,
+    >,
     pad4: *mut c_void,
     pad5: *mut c_void,
     pad6: *mut c_void,
@@ -355,7 +376,10 @@ impl NvfbcSession {
             let create: libloading::Symbol<NvFBCCreateInstanceFn> = lib
                 .get(b"NvFBCCreateInstance\0")
                 .map_err(|e| format!("missing symbol NvFBCCreateInstance: {e}"))?;
-            let mut funcs = NVFBC_API_FUNCTION_LIST { dwVersion: NVFBC_VERSION, ..Default::default() };
+            let mut funcs = NVFBC_API_FUNCTION_LIST {
+                dwVersion: NVFBC_VERSION,
+                ..Default::default()
+            };
             let st = create(&mut funcs);
             if st != NVFBC_SUCCESS {
                 return Err(format!("NvFBCCreateInstance failed ({st})"));
@@ -463,7 +487,10 @@ impl NvfbcSession {
     ) -> Result<(), NvfbcError> {
         self.stop();
         let mut params = NVFBC_CREATE_CAPTURE_SESSION_PARAMS {
-            dwVersion: struct_ver(std::mem::size_of::<NVFBC_CREATE_CAPTURE_SESSION_PARAMS>(), 6),
+            dwVersion: struct_ver(
+                std::mem::size_of::<NVFBC_CREATE_CAPTURE_SESSION_PARAMS>(),
+                6,
+            ),
             eCaptureType: NVFBC_CAPTURE_SHARED_CUDA,
             eTrackingType: NVFBC_TRACKING_SCREEN,
             dwOutputId: 0,
@@ -476,7 +503,8 @@ impl NvfbcSession {
             bPushModel: NVFBC_TRUE,
             bAllowDirectCapture: NVFBC_TRUE,
         };
-        let st = unsafe { (self.funcs.nvFBCCreateCaptureSession.unwrap())(self.handle, &mut params) };
+        let st =
+            unsafe { (self.funcs.nvFBCCreateCaptureSession.unwrap())(self.handle, &mut params) };
         if st != NVFBC_SUCCESS {
             return Err(self.fail("NvFBCCreateCaptureSession", st));
         }
@@ -589,10 +617,17 @@ fn recovery_for(err: &NvfbcError) -> Recovery {
 /// A zero-sized box means the whole tracked region, so a capture that covers the screen asks for
 /// it that way and keeps following a resize.
 fn resolve_region(screen: NVFBC_SIZE, s: &RustCaptureSettings) -> (NVFBC_BOX, NVFBC_SIZE) {
-    let (w, h) = super::resolve_dims(screen.w.min(u16::MAX as u32) as u16, screen.h.min(u16::MAX as u32) as u16, s);
+    let (w, h) = super::resolve_dims(
+        screen.w.min(u16::MAX as u32) as u16,
+        screen.h.min(u16::MAX as u32) as u16,
+        s,
+    );
     let x = super::clamp_offset(s.capture_x, screen.w.min(u16::MAX as u32) as u16).max(0) as u32;
     let y = super::clamp_offset(s.capture_y, screen.h.min(u16::MAX as u32) as u16).max(0) as u32;
-    let size = NVFBC_SIZE { w: w as u32, h: h as u32 };
+    let size = NVFBC_SIZE {
+        w: w as u32,
+        h: h as u32,
+    };
     // An empty box is the whole tracked region, which is what keeps a whole-screen capture
     // following a resize. It may only stand in for a frame that *is* the screen: a frame size
     // differing from the captured region makes the driver scale into it, which is both a
@@ -601,7 +636,12 @@ fn resolve_region(screen: NVFBC_SIZE, s: &RustCaptureSettings) -> (NVFBC_BOX, NV
     let region = if full {
         NVFBC_BOX::default()
     } else {
-        NVFBC_BOX { x, y, w: size.w, h: size.h }
+        NVFBC_BOX {
+            x,
+            y,
+            w: size.w,
+            h: size.h,
+        }
     };
     (region, size)
 }
@@ -641,10 +681,13 @@ fn answered_within<T: Send + 'static>(
         .map_err(|e| format!("{what} probe thread: {e}"))?;
     match rx.recv_timeout(timeout) {
         Ok(answer) => answer,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("{what} did not answer within {} s", timeout.as_secs()))
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "{what} did not answer within {} s",
+            timeout.as_secs()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(format!("{what} ended without an answer"))
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(format!("{what} ended without an answer")),
     }
 }
 
@@ -663,7 +706,9 @@ fn nvidia_driven_x_server() -> Result<bool, String> {
     let cookie = conn
         .query_extension(NVIDIA_GLX.as_bytes())
         .map_err(|e| format!("{NVIDIA_GLX} query failed: {e}"))?;
-    let reply = cookie.reply().map_err(|e| format!("{NVIDIA_GLX} query failed: {e}"))?;
+    let reply = cookie
+        .reply()
+        .map_err(|e| format!("{NVIDIA_GLX} query failed: {e}"))?;
     Ok(reply.present)
 }
 
@@ -686,7 +731,8 @@ fn foreign_libxcb() -> Option<String> {
         }
         let open = libc::dlsym(x11, c"XOpenDisplay".as_ptr());
         if !open.is_null() {
-            let open: unsafe extern "C" fn(*const c_char) -> *mut c_void = std::mem::transmute(open);
+            let open: unsafe extern "C" fn(*const c_char) -> *mut c_void =
+                std::mem::transmute(open);
             open(c"pixelflux".as_ptr());
         }
         libc::dlclose(x11);
@@ -699,8 +745,16 @@ fn foreign_libxcb() -> Option<String> {
         libc::dlclose(xcb);
         let object = |addr: *const c_void| {
             let mut info: libc::Dl_info = std::mem::zeroed();
-            (libc::dladdr(addr, &mut info) != 0 && !info.dli_sname.is_null() && !info.dli_fname.is_null())
-                .then(|| (info.dli_fbase, CStr::from_ptr(info.dli_sname), CStr::from_ptr(info.dli_fname)))
+            (libc::dladdr(addr, &mut info) != 0
+                && !info.dli_sname.is_null()
+                && !info.dli_fname.is_null())
+            .then(|| {
+                (
+                    info.dli_fbase,
+                    CStr::from_ptr(info.dli_sname),
+                    CStr::from_ptr(info.dli_fname),
+                )
+            })
         };
         let (bound_base, bound_name, bound_path) = object(bound as *const c_void)?;
         let (host_base, _, host_path) = object(host)?;
@@ -787,7 +841,12 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
 
     let mut encoder = match NvencEncoder::new(&settings, std::ptr::null()) {
         Ok(enc) => enc,
-        Err(e) => return declined(&format!("NVENC {} did not open: {e}", settings.codec.display())),
+        Err(e) => {
+            return declined(&format!(
+                "NVENC {} did not open: {e}",
+                settings.codec.display()
+            ));
+        }
     };
     // The capture session is created with the encoder's context current, so the device pointer it
     // hands back is one the encoder can register.
@@ -813,9 +872,28 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
         settings.width, settings.height
     );
     crate::report::capture("NvFBC", true);
-    crate::report::hardware_encoder(encoder.device_name(), crate::encoders::driver_name(&driver), node);
-    crate::log_stream_settings_of("X11", &settings, 1, Some(("NVENC", true)), None, true, encoder.is_fullcolor(), false);
-    Some(GpuCapture { nvfbc, encoder, settings, request, screen })
+    crate::report::hardware_encoder(
+        encoder.device_name(),
+        crate::encoders::driver_name(&driver),
+        node,
+    );
+    crate::log_stream_settings_of(
+        "X11",
+        &settings,
+        1,
+        Some(("NVENC", true)),
+        None,
+        true,
+        encoder.is_fullcolor(),
+        false,
+    );
+    Some(GpuCapture {
+        nvfbc,
+        encoder,
+        settings,
+        request,
+        screen,
+    })
 }
 
 impl Drop for GpuCapture {
@@ -865,7 +943,9 @@ where
     // Capture and encode are the same thread here, so the re-entrant-stop guard watches it as
     // both.
     let _ = encode_tid_tx.send(std::thread::current().id());
-    controls.codec.store(gpu.encoder.codec().id(), Ordering::Relaxed);
+    controls
+        .codec
+        .store(gpu.encoder.codec().id(), Ordering::Relaxed);
 
     let recording_sink = RecordingSink::try_bind(&settings.recording_socket, settings.target_fps);
     let mut state = StripeState::default();
@@ -902,7 +982,9 @@ where
             }
         }
         if controls.force_idr.swap(false, Ordering::Relaxed)
-            || recording_sink.as_ref().is_some_and(|s| s.should_force_idr())
+            || recording_sink
+                .as_ref()
+                .is_some_and(|s| s.should_force_idr())
         {
             pending_force_idr = true;
         }
@@ -940,7 +1022,9 @@ where
         }
         if recheck_geometry || want_cursor != gpu.nvfbc.with_cursor {
             let (region, size) = resolve_region(gpu.screen, &gpu.request);
-            if region != gpu.nvfbc.region || size != gpu.nvfbc.size || want_cursor != gpu.nvfbc.with_cursor
+            if region != gpu.nvfbc.region
+                || size != gpu.nvfbc.size
+                || want_cursor != gpu.nvfbc.with_cursor
             {
                 match restart_session(&mut gpu, region, size, want_cursor) {
                     Ok(()) => {
@@ -992,7 +1076,9 @@ where
             gpu.settings.width = frame.width as i32;
             gpu.settings.height = frame.height as i32;
             if let Err(e) = gpu.encoder.reconfigure_resolution(&gpu.settings) {
-                return Some(Err(format!("NVENC could not follow the captured size: {e}")));
+                return Some(Err(format!(
+                    "NVENC could not follow the captured size: {e}"
+                )));
             }
             state = StripeState::default();
             pending_force_idr = true;
@@ -1002,7 +1088,11 @@ where
             &mut state,
             &gpu.settings,
             frame_counter,
-            if frame.is_new { Damage::Unknown } else { Damage::None },
+            if frame.is_new {
+                Damage::Unknown
+            } else {
+                Damage::None
+            },
             false,
             pending_force_idr,
             EncoderQuality {
@@ -1058,7 +1148,9 @@ where
                         eprintln!("[X11] NVENC encode error on the zero-copy path: {e}");
                     }
                     if encode_errors >= crate::HW_ERROR_RECOVERY_THRESHOLD {
-                        return Some(Err("NVENC failed repeatedly on the zero-copy path".to_string()));
+                        return Some(Err(
+                            "NVENC failed repeatedly on the zero-copy path".to_string()
+                        ));
                     }
                 }
             }
@@ -1102,11 +1194,15 @@ fn restart_session(
     gpu.nvfbc.start(region, size, with_cursor)?;
     gpu.settings.width = size.w as i32;
     gpu.settings.height = size.h as i32;
-    if gpu.settings.width != gpu.encoder.width() as i32 || gpu.settings.height != gpu.encoder.height() as i32
+    if gpu.settings.width != gpu.encoder.width() as i32
+        || gpu.settings.height != gpu.encoder.height() as i32
     {
         gpu.encoder
             .reconfigure_resolution(&gpu.settings)
-            .map_err(|e| NvfbcError { status: NVFBC_SUCCESS, message: e })?;
+            .map_err(|e| NvfbcError {
+                status: NVFBC_SUCCESS,
+                message: e,
+            })?;
     }
     Ok(())
 }
@@ -1161,14 +1257,25 @@ mod abi_tests {
     /// hands its value straight through.
     #[test]
     fn probe_answers_are_bounded() {
-        let stuck = answered_within(Duration::from_millis(50), "Stuck", || -> Result<u32, String> {
-            std::thread::sleep(Duration::from_millis(400));
-            Ok(1)
-        });
+        let stuck = answered_within(
+            Duration::from_millis(50),
+            "Stuck",
+            || -> Result<u32, String> {
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(1)
+            },
+        );
         assert_eq!(stuck, Err("Stuck did not answer within 0 s".to_string()));
-        assert_eq!(answered_within(Duration::from_secs(1), "Quick", || Ok(7u32)), Ok(7));
         assert_eq!(
-            answered_within(Duration::from_secs(1), "Refused", || -> Result<u32, String> { Err("no".into()) }),
+            answered_within(Duration::from_secs(1), "Quick", || Ok(7u32)),
+            Ok(7)
+        );
+        assert_eq!(
+            answered_within(
+                Duration::from_secs(1),
+                "Refused",
+                || -> Result<u32, String> { Err("no".into()) }
+            ),
             Err("no".to_string())
         );
     }
@@ -1178,8 +1285,10 @@ mod abi_tests {
     /// would be worth no more than the call it stands in front of.
     #[test]
     fn the_nvidia_gate_is_answered_by_the_server() {
-        let answered = answered_within(Duration::from_secs(5), "Gate", || Ok(nvidia_driven_x_server()))
-            .expect("the NV-GLX gate must answer");
+        let answered = answered_within(Duration::from_secs(5), "Gate", || {
+            Ok(nvidia_driven_x_server())
+        })
+        .expect("the NV-GLX gate must answer");
         let Ok(present) = answered else { return };
         let (conn, _) = x11rb::connect(None).expect("a server that answered once answers again");
         let listed = conn
@@ -1204,9 +1313,15 @@ mod abi_tests {
         let bound = crate::nvgpufilter::bound_import("libX11.so", b"xcb_parse_display")
             .expect("libX11 imports xcb_parse_display");
         let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
-        assert_ne!(unsafe { libc::dladdr(bound as *const c_void, &mut info) }, 0);
+        assert_ne!(
+            unsafe { libc::dladdr(bound as *const c_void, &mut info) },
+            0
+        );
         assert!(!info.dli_sname.is_null(), "the slot names no symbol");
-        assert_eq!(unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(), b"xcb_parse_display");
+        assert_eq!(
+            unsafe { CStr::from_ptr(info.dli_sname) }.to_bytes(),
+            b"xcb_parse_display"
+        );
         unsafe { libc::dlclose(x11) };
     }
 
@@ -1219,7 +1334,10 @@ mod abi_tests {
         assert_eq!(std::mem::size_of::<NVFBC_VERSION_ONLY_PARAMS>(), 4);
         assert_eq!(std::mem::size_of::<NVFBC_RANDR_OUTPUT_INFO>(), 148);
         assert_eq!(std::mem::size_of::<NVFBC_GET_STATUS_PARAMS>(), 780);
-        assert_eq!(std::mem::size_of::<NVFBC_CREATE_CAPTURE_SESSION_PARAMS>(), 64);
+        assert_eq!(
+            std::mem::size_of::<NVFBC_CREATE_CAPTURE_SESSION_PARAMS>(),
+            64
+        );
         assert_eq!(std::mem::size_of::<NVFBC_TOCUDA_SETUP_PARAMS>(), 8);
         assert_eq!(std::mem::size_of::<NVFBC_TOCUDA_GRAB_FRAME_PARAMS>(), 32);
         assert_eq!(std::mem::size_of::<NVFBC_API_FUNCTION_LIST>(), 176);
@@ -1245,7 +1363,12 @@ mod region_tests {
     use crate::encoders::codec::Codec;
 
     fn settings(w: i32, h: i32) -> RustCaptureSettings {
-        RustCaptureSettings { width: w, height: h, codec: Codec::H264, ..Default::default() }
+        RustCaptureSettings {
+            width: w,
+            height: h,
+            codec: Codec::H264,
+            ..Default::default()
+        }
     }
 
     /// A capture covering the whole framebuffer asks for the whole tracked region, so the session
@@ -1267,7 +1390,15 @@ mod region_tests {
         region_only.capture_x = 100;
         region_only.capture_y = 50;
         let (region, size) = resolve_region(screen, &region_only);
-        assert_eq!(region, NVFBC_BOX { x: 100, y: 50, w: 1280, h: 720 });
+        assert_eq!(
+            region,
+            NVFBC_BOX {
+                x: 100,
+                y: 50,
+                w: 1280,
+                h: 720
+            }
+        );
         assert_eq!(size, NVFBC_SIZE { w: 1280, h: 720 });
     }
 
@@ -1282,7 +1413,15 @@ mod region_tests {
         let screen = NVFBC_SIZE { w: 1919, h: 1081 };
         let (region, size) = resolve_region(screen, &settings(0, 0));
         assert_eq!(size, NVFBC_SIZE { w: 1918, h: 1080 });
-        assert_eq!(region, NVFBC_BOX { x: 0, y: 0, w: 1918, h: 1080 });
+        assert_eq!(
+            region,
+            NVFBC_BOX {
+                x: 0,
+                y: 0,
+                w: 1918,
+                h: 1080
+            }
+        );
 
         let mut s = settings(1920, 1080);
         s.capture_x = 1000;
@@ -1301,11 +1440,23 @@ mod region_tests {
     /// text, where the driver's own message could carry the same digits.
     #[test]
     fn recovery_follows_the_status() {
-        let session = |status| NvfbcError { status, message: String::new() };
-        assert!(matches!(recovery_for(&session(NVFBC_ERR_MUST_RECREATE)), Recovery::Session));
-        assert!(matches!(recovery_for(&session(NVFBC_ERR_X)), Recovery::Handle));
+        let session = |status| NvfbcError {
+            status,
+            message: String::new(),
+        };
+        assert!(matches!(
+            recovery_for(&session(NVFBC_ERR_MUST_RECREATE)),
+            Recovery::Session
+        ));
+        assert!(matches!(
+            recovery_for(&session(NVFBC_ERR_X)),
+            Recovery::Handle
+        ));
         assert!(matches!(recovery_for(&session(1)), Recovery::None));
-        let misleading = NvfbcError { status: 1, message: "the display (16) went away (10)".into() };
+        let misleading = NvfbcError {
+            status: 1,
+            message: "the display (16) went away (10)".into(),
+        };
         assert!(matches!(recovery_for(&misleading), Recovery::None));
     }
 
@@ -1322,14 +1473,17 @@ mod region_tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::*;
     use super::super::gpu_test_support::{decoded_mean, paint_root, painted_ycbcr, settings};
-    use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN};
-    use crate::webcam::decode::{VideoDecoder, Codec as DecCodec};
+    use super::*;
+    use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+    use crate::webcam::decode::{Codec as DecCodec, VideoDecoder};
 
     /// Thread CPU time, for the per-frame CPU cost of the path independent of GPU waiting.
     fn thread_cpu() -> Duration {
-        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
         Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
     }
@@ -1355,7 +1509,10 @@ mod gpu_tests {
             gpu.settings.width,
             gpu.settings.height
         );
-        println!("a session following the screen opened at {}x{}", gpu.settings.width, gpu.settings.height);
+        println!(
+            "a session following the screen opened at {}x{}",
+            gpu.settings.width, gpu.settings.height
+        );
     }
 
     /// On a real NVIDIA X server: the driver reports whether it can capture this screen, and at
@@ -1379,7 +1536,10 @@ mod gpu_tests {
             status.dwNvFBCVersion,
             status.bInModeset
         );
-        assert_eq!(status.bIsCapturePossible, NVFBC_TRUE, "this GPU offers no NvFBC");
+        assert_eq!(
+            status.bIsCapturePossible, NVFBC_TRUE,
+            "this GPU offers no NvFBC"
+        );
         assert!(status.screenSize.w > 0 && status.screenSize.h > 0);
     }
 
@@ -1397,17 +1557,27 @@ mod gpu_tests {
         let second = open(&settings(crate::encoders::codec::Codec::H264));
         println!(
             "a second concurrent NvFBC capture of the same screen: {}",
-            if second.is_some() { "opens" } else { "is declined, and falls back to XShm" }
+            if second.is_some() {
+                "opens"
+            } else {
+                "is declined, and falls back to XShm"
+            }
         );
         // The first must keep working whatever the second did.
-        let f = first.nvfbc.grab(Duration::from_millis(200)).expect("first still captures");
+        let f = first
+            .nvfbc
+            .grab(Duration::from_millis(200))
+            .expect("first still captures");
         let pitch = frame_pitch(f.byte_size, f.width, f.height);
         first
             .encoder
             .encode_cuda_pitch(f.device_ptr, pitch, false, 0, 25, true)
             .expect("first still encodes");
         drop(second);
-        let f = first.nvfbc.grab(Duration::from_millis(200)).expect("first survives the second");
+        let f = first
+            .nvfbc
+            .grab(Duration::from_millis(200))
+            .expect("first survives the second");
         assert!(f.width > 0);
     }
 
@@ -1436,27 +1606,28 @@ mod gpu_tests {
         let mut dec = VideoDecoder::new(DecCodec::H264).expect("H.264 decoder");
         let mut pointers = Vec::new();
 
-        let encode = |gpu: &mut GpuCapture, i: u64, key: bool, pointers: &mut Vec<CUdeviceptr>| -> Vec<u8> {
-            // A repaint is one frame; ask until the driver has produced it.
-            let mut frame = gpu.nvfbc.grab(Duration::from_millis(200)).expect("grab");
-            for _ in 0..30 {
-                if frame.is_new {
-                    break;
+        let encode =
+            |gpu: &mut GpuCapture, i: u64, key: bool, pointers: &mut Vec<CUdeviceptr>| -> Vec<u8> {
+                // A repaint is one frame; ask until the driver has produced it.
+                let mut frame = gpu.nvfbc.grab(Duration::from_millis(200)).expect("grab");
+                for _ in 0..30 {
+                    if frame.is_new {
+                        break;
+                    }
+                    frame = gpu.nvfbc.grab(Duration::from_millis(200)).expect("grab");
                 }
-                frame = gpu.nvfbc.grab(Duration::from_millis(200)).expect("grab");
-            }
-            assert_eq!(frame.width, gpu.encoder.width());
-            assert_eq!(frame.height, gpu.encoder.height());
-            assert!(
-                !frame.post_processed,
-                "the native format needed a conversion pass, which is an extra frame copy"
-            );
-            pointers.push(frame.device_ptr);
-            let pitch = frame_pitch(frame.byte_size, frame.width, frame.height);
-            gpu.encoder
-                .encode_cuda_pitch(frame.device_ptr, pitch, false, i, 25, key)
-                .expect("encode in place")
-        };
+                assert_eq!(frame.width, gpu.encoder.width());
+                assert_eq!(frame.height, gpu.encoder.height());
+                assert!(
+                    !frame.post_processed,
+                    "the native format needed a conversion pass, which is an extra frame copy"
+                );
+                pointers.push(frame.device_ptr);
+                let pitch = frame_pitch(frame.byte_size, frame.width, frame.height);
+                gpu.encoder
+                    .encode_cuda_pitch(frame.device_ptr, pitch, false, i, 25, key)
+                    .expect("encode in place")
+            };
 
         let pkt = encode(&mut gpu, 0, true, &mut pointers);
         assert_eq!(
@@ -1483,7 +1654,10 @@ mod gpu_tests {
             let _ = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
         }
 
-        assert!(paint_root(SECOND), "the root was painted once, so a repaint must work");
+        assert!(
+            paint_root(SECOND),
+            "the root was painted once, so a repaint must work"
+        );
         let pkt = encode(&mut gpu, 4, false, &mut pointers);
         let mean = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
         let want = painted_ycbcr(SECOND);
@@ -1542,7 +1716,8 @@ mod gpu_tests {
                 gpu.encoder
                     .encode_cuda_pitch(f.device_ptr, pitch, false, 0, 25, true)
                     .expect("warm-up");
-                let (mut wall, mut cpu, mut bytes, mut news) = (Duration::ZERO, Duration::ZERO, 0usize, 0usize);
+                let (mut wall, mut cpu, mut bytes, mut news) =
+                    (Duration::ZERO, Duration::ZERO, 0usize, 0usize);
                 for i in 0..n {
                     if repaint {
                         let v = (i * 9) as u8;
@@ -1588,12 +1763,21 @@ mod gpu_tests {
     fn shm_upload_baseline(codec: crate::encoders::codec::Codec, w: u32, h: u32, n: usize) {
         use x11rb::connection::Connection;
         use x11rb::protocol::shm::ConnectionExt as ShmExt;
-        let Ok((conn, screen)) = x11rb::connect(None) else { return };
-        if conn.shm_query_version().ok().and_then(|c| c.reply().ok()).is_none() {
+        let Ok((conn, screen)) = x11rb::connect(None) else {
+            return;
+        };
+        if conn
+            .shm_query_version()
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_none()
+        {
             return;
         }
         let root = conn.setup().roots[screen].root;
-        let Ok(mut surface) = crate::x11::ShmSurface::create(&conn, w as u16, h as u16) else { return };
+        let Ok(mut surface) = crate::x11::ShmSurface::create(&conn, w as u16, h as u16) else {
+            return;
+        };
         let mut s = settings(codec);
         s.width = w as i32;
         s.height = h as i32;

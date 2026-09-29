@@ -23,7 +23,9 @@ pub(super) struct Arm {
 
 impl Arm {
     pub(super) fn new() -> Self {
-        Self { sequence: unsafe { std::mem::zeroed() } }
+        Self {
+            sequence: unsafe { std::mem::zeroed() },
+        }
     }
 
     pub(super) fn configure(&mut self, n: &Negotiated) {
@@ -43,7 +45,12 @@ impl Arm {
         out.push(VAEncSequenceParameterBufferType, &self.sequence);
     }
 
-    pub(super) fn picture(&mut self, n: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    pub(super) fn picture(
+        &mut self,
+        n: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         let plan = frame.slots;
         let mut pic: VAEncPictureParameterBufferVP8 = unsafe { std::mem::zeroed() };
         pic.reconstructed_frame = frame.recon;
@@ -80,7 +87,11 @@ impl Arm {
         pic.clamp_qindex_high = 127;
         out.push(VAEncPictureParameterBufferType, &pic);
 
-        let q = if n.rc_mode == VA_RC_CQP { frame.qp.min(127) as u16 } else { 0 };
+        let q = if n.rc_mode == VA_RC_CQP {
+            frame.qp.min(127) as u16
+        } else {
+            0
+        };
         let mut quant: VAQMatrixBufferVP8 = unsafe { std::mem::zeroed() };
         quant.quantization_index = [q; 4];
         out.push(VAQMatrixBufferType, &quant);

@@ -31,8 +31,8 @@
 
 use libc::{c_char, c_int, c_long, c_ulong, c_void};
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// The ioctl command number (`_IOC_NR`, bits 0-7) that identifies the RM control escape —
 /// the low byte the request gate keys on to recognize `NV_RM_CONTROL_REQUEST`. Kept as a named
@@ -247,9 +247,10 @@ fn gpuid_to_minor(gpu_id: u32) -> i32 {
         if let Ok(text) = std::fs::read_to_string(&info) {
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("Device Minor:")
-                    && let Ok(m) = rest.trim().parse::<i32>() {
-                        return m;
-                    }
+                    && let Ok(m) = rest.trim().parse::<i32>()
+                {
+                    return m;
+                }
             }
         }
         break;
@@ -405,20 +406,22 @@ fn page_prot(addr: usize) -> i32 {
         let lo = rr.next().and_then(|s| usize::from_str_radix(s, 16).ok());
         let hi = rr.next().and_then(|s| usize::from_str_radix(s, 16).ok());
         if let (Some(lo), Some(hi)) = (lo, hi)
-            && addr >= lo && addr < hi {
-                let b = perms.as_bytes();
-                let mut prot = 0;
-                if b.first() == Some(&b'r') {
-                    prot |= libc::PROT_READ;
-                }
-                if b.get(1) == Some(&b'w') {
-                    prot |= libc::PROT_WRITE;
-                }
-                if b.get(2) == Some(&b'x') {
-                    prot |= libc::PROT_EXEC;
-                }
-                return prot;
+            && addr >= lo
+            && addr < hi
+        {
+            let b = perms.as_bytes();
+            let mut prot = 0;
+            if b.first() == Some(&b'r') {
+                prot |= libc::PROT_READ;
             }
+            if b.get(1) == Some(&b'w') {
+                prot |= libc::PROT_WRITE;
+            }
+            if b.get(2) == Some(&b'x') {
+                prot |= libc::PROT_EXEC;
+            }
+            return prot;
+        }
     }
     -1
 }
@@ -430,11 +433,7 @@ fn page_prot(addr: usize) -> i32 {
 #[inline]
 fn dyn_addr(base: usize, v: u64) -> usize {
     let v = v as usize;
-    if v < base {
-        base + v
-    } else {
-        v
-    }
+    if v < base { base + v } else { v }
 }
 
 /// Hand every GOT slot through which one loaded library calls `symbol` to `visit`, by walking its
@@ -595,9 +594,12 @@ unsafe extern "C" fn patch_phdr_cb(
         for i in 0..info.dlpi_phnum as isize {
             let ph = &*info.dlpi_phdr.offset(i);
             if ph.p_type == libc::PT_DYNAMIC {
-                visit_import_slots(base, (base + ph.p_vaddr as usize) as *const Elf64Dyn, b"ioctl", &mut |slot| {
-                    patch_ioctl_slot(slot)
-                });
+                visit_import_slots(
+                    base,
+                    (base + ph.p_vaddr as usize) as *const Elf64Dyn,
+                    b"ioctl",
+                    &mut |slot| patch_ioctl_slot(slot),
+                );
             }
         }
     }));
@@ -614,11 +616,19 @@ pub(crate) fn bound_import(object: &str, symbol: &[u8]) -> Option<usize> {
         found: Option<usize>,
         done: bool,
     }
-    unsafe extern "C" fn cb(info: *mut libc::dl_phdr_info, _size: libc::size_t, data: *mut c_void) -> c_int {
+    unsafe extern "C" fn cb(
+        info: *mut libc::dl_phdr_info,
+        _size: libc::size_t,
+        data: *mut c_void,
+    ) -> c_int {
         let q = &mut *(data as *mut Query);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let info = &*info;
-            if info.dlpi_name.is_null() || !CStr::from_ptr(info.dlpi_name).to_string_lossy().contains(q.object) {
+            if info.dlpi_name.is_null()
+                || !CStr::from_ptr(info.dlpi_name)
+                    .to_string_lossy()
+                    .contains(q.object)
+            {
                 return;
             }
             q.done = true;
@@ -627,17 +637,30 @@ pub(crate) fn bound_import(object: &str, symbol: &[u8]) -> Option<usize> {
             for i in 0..info.dlpi_phnum as isize {
                 let ph = &*info.dlpi_phdr.offset(i);
                 if ph.p_type == libc::PT_DYNAMIC {
-                    visit_import_slots(base, (base + ph.p_vaddr as usize) as *const Elf64Dyn, symbol, &mut |slot| {
-                        if found.is_none() {
-                            *found = Some((*(slot as *const AtomicPtr<c_void>)).load(Ordering::Acquire) as usize);
-                        }
-                    });
+                    visit_import_slots(
+                        base,
+                        (base + ph.p_vaddr as usize) as *const Elf64Dyn,
+                        symbol,
+                        &mut |slot| {
+                            if found.is_none() {
+                                *found = Some(
+                                    (*(slot as *const AtomicPtr<c_void>)).load(Ordering::Acquire)
+                                        as usize,
+                                );
+                            }
+                        },
+                    );
                 }
             }
         }));
         q.done as c_int
     }
-    let mut q = Query { object, symbol, found: None, done: false };
+    let mut q = Query {
+        object,
+        symbol,
+        found: None,
+        done: false,
+    };
     unsafe {
         libc::dl_iterate_phdr(Some(cb), &mut q as *mut Query as *mut c_void);
     }
@@ -653,9 +676,15 @@ pub(crate) fn bound_import(object: &str, symbol: &[u8]) -> Option<usize> {
 /// clause ensures there is still a usable GPU (a container with no GPUs at all is not this case).
 fn has_hidden_gpus() -> bool {
     let host = std::fs::read_dir("/proc/driver/nvidia/gpus")
-        .map(|d| d.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).count())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
         .unwrap_or(0);
-    let visible = (0..MAX_ATTACHED_GPUS as u32).filter(|&m| node_present(m)).count();
+    let visible = (0..MAX_ATTACHED_GPUS as u32)
+        .filter(|&m| node_present(m))
+        .count();
     host > visible && visible > 0
 }
 

@@ -55,7 +55,11 @@ pub struct PageReader<R: Read> {
 
 impl<R: Read> PageReader<R> {
     pub fn new(inner: R) -> Self {
-        Self { inner, carry: Vec::new(), pending: VecDeque::new() }
+        Self {
+            inner,
+            carry: Vec::new(),
+            pending: VecDeque::new(),
+        }
     }
 
     pub fn inner_mut(&mut self) -> &mut R {
@@ -92,7 +96,10 @@ impl<R: Read> PageReader<R> {
             return Ok(false);
         }
         if &header[..4] != b"OggS" {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not an Ogg page"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an Ogg page",
+            ));
         }
         let granule = u64::from_le_bytes(header[6..14].try_into().unwrap());
         let mut lacing = vec![0u8; header[26] as usize];
@@ -114,7 +121,8 @@ impl<R: Read> PageReader<R> {
         }
         let last = completed.len().saturating_sub(1);
         for (i, packet) in completed.into_iter().enumerate() {
-            self.pending.push_back((packet, (i == last).then_some(granule)));
+            self.pending
+                .push_back((packet, (i == last).then_some(granule)));
         }
         Ok(true)
     }
@@ -157,10 +165,24 @@ mod tests {
         let mut reader = PageReader::new(&stream[..]);
         let (first, g0) = reader.next_packet().unwrap().unwrap();
         let parsed = parse_opus_head(&first).expect("head");
-        assert_eq!((parsed.channels, parsed.pre_skip, parsed.input_sample_rate, parsed.mapping_family), (2, 312, 48000, 0));
+        assert_eq!(
+            (
+                parsed.channels,
+                parsed.pre_skip,
+                parsed.input_sample_rate,
+                parsed.mapping_family
+            ),
+            (2, 312, 48000, 0)
+        );
         assert_eq!(g0, Some(0));
-        assert_eq!(reader.next_packet().unwrap().unwrap(), (b"aa".to_vec(), None));
-        assert_eq!(reader.next_packet().unwrap().unwrap(), (b"bbb".to_vec(), Some(1920)));
+        assert_eq!(
+            reader.next_packet().unwrap().unwrap(),
+            (b"aa".to_vec(), None)
+        );
+        assert_eq!(
+            reader.next_packet().unwrap().unwrap(),
+            (b"bbb".to_vec(), Some(1920))
+        );
         assert_eq!(reader.next_packet().unwrap().unwrap(), (long, Some(3840)));
         assert!(reader.next_packet().unwrap().is_none());
     }

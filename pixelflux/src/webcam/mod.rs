@@ -33,8 +33,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use convert::{orient_i420, DeviceFormat, Normalizer, Orientation};
-use decode::{new_decoder, sniff_keyframe, Codec, DecodeError, Decoder};
+use convert::{DeviceFormat, Normalizer, Orientation, orient_i420};
+use decode::{Codec, DecodeError, Decoder, new_decoder, sniff_keyframe};
 use pipewire::PipeWireSink;
 use ring::{Ring, RingFormat};
 use server::Server;
@@ -104,7 +104,10 @@ impl VirtualCameraSettings {
 /// directory, where no other account can take the name first, else `/tmp`. The v4l2
 /// interposer looks in the same place.
 pub fn socket_dir() -> String {
-    std::env::var("XDG_RUNTIME_DIR").ok().filter(|d| !d.is_empty()).unwrap_or_else(|| "/tmp".into())
+    std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "/tmp".into())
 }
 
 fn parse_pixel_format(name: &str) -> Option<u32> {
@@ -159,13 +162,24 @@ struct Queue {
 
 impl Queue {
     fn new(capacity: usize) -> Self {
-        Queue { state: Mutex::new(QueueState { jobs: VecDeque::new(), closed: false }), cv: Condvar::new(), capacity: capacity.max(1) }
+        Queue {
+            state: Mutex::new(QueueState {
+                jobs: VecDeque::new(),
+                closed: false,
+            }),
+            cv: Condvar::new(),
+            capacity: capacity.max(1),
+        }
     }
 
     /// Returns the job evicted to make room, if any.
     fn push(&self, job: Job) -> Option<Job> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let evicted = if st.jobs.len() >= self.capacity { st.jobs.pop_front() } else { None };
+        let evicted = if st.jobs.len() >= self.capacity {
+            st.jobs.pop_front()
+        } else {
+            None
+        };
         st.jobs.push_back(job);
         drop(st);
         self.cv.notify_one();
@@ -196,7 +210,12 @@ struct Pool(Mutex<Vec<Vec<u8>>>);
 
 impl Pool {
     fn take(&self, len: usize) -> Vec<u8> {
-        let mut v = self.0.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+        let mut v = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
         v.clear();
         v.reserve(len);
         v
@@ -229,7 +248,10 @@ pub struct VirtualCamera {
 }
 
 fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
@@ -259,38 +281,69 @@ struct MjpegEncoder {
 
 impl MjpegEncoder {
     fn new() -> Result<Self, String> {
-        let mut comp = turbojpeg::Compressor::new().map_err(|e| format!("turbojpeg compressor: {}", e))?;
-        comp.set_quality(MJPEG_REENCODE_QUALITY).map_err(|e| format!("turbojpeg quality: {}", e))?;
-        comp.set_subsamp(turbojpeg::Subsamp::Sub2x2).map_err(|e| format!("turbojpeg subsampling: {}", e))?;
-        Ok(MjpegEncoder { comp, i420: Vec::new() })
+        let mut comp =
+            turbojpeg::Compressor::new().map_err(|e| format!("turbojpeg compressor: {}", e))?;
+        comp.set_quality(MJPEG_REENCODE_QUALITY)
+            .map_err(|e| format!("turbojpeg quality: {}", e))?;
+        comp.set_subsamp(turbojpeg::Subsamp::Sub2x2)
+            .map_err(|e| format!("turbojpeg subsampling: {}", e))?;
+        Ok(MjpegEncoder {
+            comp,
+            i420: Vec::new(),
+        })
     }
 
-    fn write_frame(&mut self, normalizer: &mut Normalizer, src: &convert::I420View<'_>, dev: &DeviceFormat, out: &mut [u8]) -> usize {
+    fn write_frame(
+        &mut self,
+        normalizer: &mut Normalizer,
+        src: &convert::I420View<'_>,
+        dev: &DeviceFormat,
+        out: &mut [u8],
+    ) -> usize {
         let need = dev.frame_bytes();
         self.i420.resize(need, 0);
         if normalizer.write_frame(src, dev, &mut self.i420) == 0 {
             return 0;
         }
-        let img = turbojpeg::YuvImage { pixels: &self.i420[..], width: dev.width, align: 1, height: dev.height, subsamp: turbojpeg::Subsamp::Sub2x2 };
+        let img = turbojpeg::YuvImage {
+            pixels: &self.i420[..],
+            width: dev.width,
+            align: 1,
+            height: dev.height,
+            subsamp: turbojpeg::Subsamp::Sub2x2,
+        };
         self.comp.compress_yuv_to_slice(img, out).unwrap_or(0)
     }
 }
 
 /// After a publish: wake the socket clients and mirror the frame into the kernel device and the
 /// PipeWire node where those sinks are up, retiring a sink that failed.
-fn fan_out(ring: &Ring, server: &Server, v4l2out: &mut Option<V4l2Output>, device_path: &Mutex<String>, pipewire: &mut Option<PipeWireSink>, ts: u64, stats: &Stats) {
+fn fan_out(
+    ring: &Ring,
+    server: &Server,
+    v4l2out: &mut Option<V4l2Output>,
+    device_path: &Mutex<String>,
+    pipewire: &mut Option<PipeWireSink>,
+    ts: u64,
+    stats: &Stats,
+) {
     server.ring_doorbell();
     if let Some(frame) = ring.latest_frame() {
         if let Some(out) = v4l2out.as_mut() {
             out.write_frame(frame);
             if out.is_failed() {
-                device_path.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                device_path
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
                 *v4l2out = None;
             }
         }
         if let Some(pw) = pipewire.as_mut() {
             pw.publish(frame, ts);
-            stats.pipewire_streaming.store(pw.is_streaming(), Ordering::Relaxed);
+            stats
+                .pipewire_streaming
+                .store(pw.is_streaming(), Ordering::Relaxed);
             if pw.is_failed() {
                 eprintln!("[webcam] PipeWire node stopped; PipeWire sink disabled");
                 *pipewire = None;
@@ -304,9 +357,23 @@ fn fan_out(ring: &Ring, server: &Server, v4l2out: &mut Option<V4l2Output>, devic
 /// frame parks the stream until the next keyframe and asks the client for one, so a consumer never
 /// sees the smear of predictions built on a missing reference.
 fn worker(cfg: WorkerConfig) {
-    let WorkerConfig { queue, mut ring, server, stats, keyframe_wanted, pool, mut v4l2out, device_path, mut pipewire } = cfg;
+    let WorkerConfig {
+        queue,
+        mut ring,
+        server,
+        stats,
+        keyframe_wanted,
+        pool,
+        mut v4l2out,
+        device_path,
+        mut pipewire,
+    } = cfg;
     let fmt = *ring.format();
-    let dev = DeviceFormat { width: fmt.width as usize, height: fmt.height as usize, fourcc: fmt.fourcc };
+    let dev = DeviceFormat {
+        width: fmt.width as usize,
+        height: fmt.height as usize,
+        fourcc: fmt.fourcc,
+    };
     let mut normalizer = Normalizer::new();
     let mut oriented = convert::I420Buffer::new(2, 2);
     let mut decoder: Option<Box<dyn Decoder>> = None;
@@ -323,7 +390,10 @@ fn worker(cfg: WorkerConfig) {
         match MjpegEncoder::new() {
             Ok(enc) => Some(enc),
             Err(e) => {
-                eprintln!("[webcam] {}; only MJPEG frames of the device size can be served", e);
+                eprintln!(
+                    "[webcam] {}; only MJPEG frames of the device size can be served",
+                    e
+                );
                 None
             }
         }
@@ -337,9 +407,12 @@ fn worker(cfg: WorkerConfig) {
             // size is published as received, undecoded; any other goes through decode and fit.
             if let Ok(hdr) = turbojpeg::read_header(&job.data) {
                 stats.input_width.store(hdr.width as u32, Ordering::Relaxed);
-                stats.input_height.store(hdr.height as u32, Ordering::Relaxed);
+                stats
+                    .input_height
+                    .store(hdr.height as u32, Ordering::Relaxed);
                 let n = job.data.len();
-                if hdr.width == dev.width && hdr.height == dev.height && n <= fmt.sizeimage as usize {
+                if hdr.width == dev.width && hdr.height == dev.height && n <= fmt.sizeimage as usize
+                {
                     let ts = monotonic_ns();
                     if ring.publish(ts, |slot| {
                         slot[..n].copy_from_slice(&job.data);
@@ -347,7 +420,15 @@ fn worker(cfg: WorkerConfig) {
                     }) {
                         stats.passthrough.fetch_add(1, Ordering::Relaxed);
                         stats.published.fetch_add(1, Ordering::Relaxed);
-                        fan_out(&ring, &server, &mut v4l2out, &device_path, &mut pipewire, ts, &stats);
+                        fan_out(
+                            &ring,
+                            &server,
+                            &mut v4l2out,
+                            &device_path,
+                            &mut pipewire,
+                            ts,
+                            &stats,
+                        );
                     }
                     pool.put(job.data);
                     continue;
@@ -359,7 +440,10 @@ fn worker(cfg: WorkerConfig) {
                 Ok(d) => decoder = Some(d),
                 Err(e) => {
                     stats.errors.fetch_add(1, Ordering::Relaxed);
-                    log_error(format!("no decoder for {}: {}", job.codec.name(), e), &mut last_error_log);
+                    log_error(
+                        format!("no decoder for {}: {}", job.codec.name(), e),
+                        &mut last_error_log,
+                    );
                     pool.put(job.data);
                     continue;
                 }
@@ -379,8 +463,12 @@ fn worker(cfg: WorkerConfig) {
                 need_keyframe = false;
                 stats.decoded.fetch_add(1, Ordering::Relaxed);
                 if let Some(view) = dec.frame() {
-                    stats.input_width.store(view.width as u32, Ordering::Relaxed);
-                    stats.input_height.store(view.height as u32, Ordering::Relaxed);
+                    stats
+                        .input_width
+                        .store(view.width as u32, Ordering::Relaxed);
+                    stats
+                        .input_height
+                        .store(view.height as u32, Ordering::Relaxed);
                     let view = if job.orientation.is_upright() {
                         view
                     } else {
@@ -395,7 +483,15 @@ fn worker(cfg: WorkerConfig) {
                     });
                     if published {
                         stats.published.fetch_add(1, Ordering::Relaxed);
-                        fan_out(&ring, &server, &mut v4l2out, &device_path, &mut pipewire, ts, &stats);
+                        fan_out(
+                            &ring,
+                            &server,
+                            &mut v4l2out,
+                            &device_path,
+                            &mut pipewire,
+                            ts,
+                            &stats,
+                        );
                     }
                 }
             }
@@ -406,11 +502,17 @@ fn worker(cfg: WorkerConfig) {
                     need_keyframe = true;
                     keyframe_wanted.store(true, Ordering::Relaxed);
                 }
-                log_error(format!("{} decode error: {}", job.codec.name(), e), &mut last_error_log);
+                log_error(
+                    format!("{} decode error: {}", job.codec.name(), e),
+                    &mut last_error_log,
+                );
             }
             Err(DecodeError::Fatal(e)) => {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
-                log_error(format!("{} decoder reset: {}", job.codec.name(), e), &mut last_error_log);
+                log_error(
+                    format!("{} decoder reset: {}", job.codec.name(), e),
+                    &mut last_error_log,
+                );
                 decoder = None;
                 need_keyframe = true;
                 keyframe_wanted.store(true, Ordering::Relaxed);
@@ -440,22 +542,39 @@ impl VirtualCamera {
 
     #[new]
     fn new() -> Self {
-        VirtualCamera { running: Mutex::new(None), stats: Arc::new(Stats::default()) }
+        VirtualCamera {
+            running: Mutex::new(None),
+            stats: Arc::new(Stats::default()),
+        }
     }
 
     /// Bind the socket, allocate the ring, open the kernel device if configured, and start the
     /// decoder thread. Restarting a running camera stops it first.
     fn start(&self, py: Python<'_>, settings: &VirtualCameraSettings) -> PyResult<()> {
-        let fourcc = parse_pixel_format(&settings.pixel_format)
-            .ok_or_else(|| PyValueError::new_err(format!("unsupported pixel_format '{}'", settings.pixel_format)))?;
-        if settings.width < 2 || settings.height < 2 || settings.width > 8192 || settings.height > 8192 {
+        let fourcc = parse_pixel_format(&settings.pixel_format).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unsupported pixel_format '{}'",
+                settings.pixel_format
+            ))
+        })?;
+        if settings.width < 2
+            || settings.height < 2
+            || settings.width > 8192
+            || settings.height > 8192
+        {
             return Err(PyValueError::new_err("width/height out of range"));
         }
         if settings.fps_num == 0 || settings.fps_den == 0 {
             return Err(PyValueError::new_err("fps_num/fps_den must be positive"));
         }
-        let fmt = RingFormat::for_fourcc(fourcc, settings.width & !1, settings.height & !1, settings.fps_num, settings.fps_den)
-            .ok_or_else(|| PyValueError::new_err("unsupported pixel_format"))?;
+        let fmt = RingFormat::for_fourcc(
+            fourcc,
+            settings.width & !1,
+            settings.height & !1,
+            settings.fps_num,
+            settings.fps_den,
+        )
+        .ok_or_else(|| PyValueError::new_err("unsupported pixel_format"))?;
         let socket_path = settings.socket_path.clone();
         let slots = settings.slots;
         let queue_depth = settings.queue_depth.max(1) as usize;
@@ -467,18 +586,25 @@ impl VirtualCamera {
         self.stop(py);
 
         let started = py.detach(move || -> Result<Running, String> {
-            let ring = Ring::new(fmt, slots).map_err(|e| format!("ring allocation failed: {}", e))?;
-            let server = Arc::new(Server::bind(&socket_path, ring.config_bytes(), ring.fd())
-                .map_err(|e| format!("bind({}) failed: {}", socket_path, e))?);
+            let ring =
+                Ring::new(fmt, slots).map_err(|e| format!("ring allocation failed: {}", e))?;
+            let server = Arc::new(
+                Server::bind(&socket_path, ring.config_bytes(), ring.fd())
+                    .map_err(|e| format!("bind({}) failed: {}", socket_path, e))?,
+            );
             let v4l2out = match device_setting.as_str() {
                 "" | "false" | "no" | "off" | "none" => None,
-                "auto" | "true" | "yes" | "on" => V4l2Output::find_loopback_device().and_then(|p| match V4l2Output::open(&p, &fmt) {
-                    Ok(o) => Some(o),
-                    Err(e) => {
-                        eprintln!("[webcam] {}; kernel device sink disabled", e);
-                        None
-                    }
-                }),
+                "auto" | "true" | "yes" | "on" => {
+                    V4l2Output::find_loopback_device().and_then(|p| {
+                        match V4l2Output::open(&p, &fmt) {
+                            Ok(o) => Some(o),
+                            Err(e) => {
+                                eprintln!("[webcam] {}; kernel device sink disabled", e);
+                                None
+                            }
+                        }
+                    })
+                }
                 path => match V4l2Output::open(path, &fmt) {
                     Ok(o) => Some(o),
                     Err(e) => {
@@ -487,7 +613,12 @@ impl VirtualCamera {
                     }
                 },
             };
-            let device_path = Arc::new(Mutex::new(v4l2out.as_ref().map(|o| o.path().to_string()).unwrap_or_default()));
+            let device_path = Arc::new(Mutex::new(
+                v4l2out
+                    .as_ref()
+                    .map(|o| o.path().to_string())
+                    .unwrap_or_default(),
+            ));
             let pipewire = if want_pipewire {
                 match PipeWireSink::connect(&pipewire_node_name, "Selkies Virtual Camera", &fmt) {
                     Ok(sink) => Some(sink),
@@ -518,7 +649,16 @@ impl VirtualCamera {
                 .name("pixelflux-webcam".into())
                 .spawn(move || worker(cfg))
                 .map_err(|e| format!("decoder thread spawn failed: {}", e))?;
-            Ok(Running { queue, thread: Some(thread), server, keyframe_wanted, pool, device_path, format: fmt, pipewire: pipewire_on })
+            Ok(Running {
+                queue,
+                thread: Some(thread),
+                server,
+                keyframe_wanted,
+                pool,
+                device_path,
+                format: fmt,
+                pipewire: pipewire_on,
+            })
         });
         match started {
             Ok(r) => {
@@ -539,17 +679,32 @@ impl VirtualCamera {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (data, codec, keyframe = false, offset = 0, rotation = 0, flip = false))]
     #[allow(clippy::too_many_arguments)]
-    fn push(&self, py: Python<'_>, data: PyBuffer<u8>, codec: u32, keyframe: bool, offset: usize, rotation: u32, flip: bool) -> PyResult<u32> {
-        let codec = Codec::from_id(codec).ok_or_else(|| PyValueError::new_err(format!("unknown codec id {}", codec)))?;
+    fn push(
+        &self,
+        py: Python<'_>,
+        data: PyBuffer<u8>,
+        codec: u32,
+        keyframe: bool,
+        offset: usize,
+        rotation: u32,
+        flip: bool,
+    ) -> PyResult<u32> {
+        let codec = Codec::from_id(codec)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown codec id {}", codec)))?;
         if !rotation.is_multiple_of(90) || rotation >= 360 {
             return Err(PyValueError::new_err("rotation must be 0, 90, 180, or 270"));
         }
-        let orientation = Orientation { quarter_turns: (rotation / 90) as u8, hflip: flip };
+        let orientation = Orientation {
+            quarter_turns: (rotation / 90) as u8,
+            hflip: flip,
+        };
         if !data.is_c_contiguous() {
             return Err(PyValueError::new_err("frame buffer must be contiguous"));
         }
         let guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        let running = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("virtual camera is not running"))?;
+        let running = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("virtual camera is not running"))?;
         let total = data.len_bytes();
         if offset >= total {
             return Ok(running.keyframe_wanted.swap(false, Ordering::Relaxed) as u32);
@@ -559,9 +714,16 @@ impl VirtualCamera {
         buf.extend_from_slice(&bytes[offset..]);
         let _ = py;
         self.stats.pushed.fetch_add(1, Ordering::Relaxed);
-        self.stats.input_codec.store(codec as u32, Ordering::Relaxed);
+        self.stats
+            .input_codec
+            .store(codec as u32, Ordering::Relaxed);
         self.stats.input_rotation.store(rotation, Ordering::Relaxed);
-        if let Some(evicted) = running.queue.push(Job { codec, keyframe, orientation, data: buf }) {
+        if let Some(evicted) = running.queue.push(Job {
+            codec,
+            keyframe,
+            orientation,
+            data: buf,
+        }) {
             self.stats.dropped.fetch_add(1, Ordering::Relaxed);
             if evicted.codec.is_inter_coded() {
                 running.keyframe_wanted.store(true, Ordering::Relaxed);
@@ -573,7 +735,11 @@ impl VirtualCamera {
 
     /// Stop the decoder thread, close every interposer client, and remove the socket.
     fn stop(&self, py: Python<'_>) {
-        let running = self.running.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(mut r) = running {
             py.detach(move || {
                 r.queue.close();
@@ -587,18 +753,30 @@ impl VirtualCamera {
 
     #[getter]
     fn is_running(&self) -> bool {
-        self.running.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Interposer clients that completed the handshake.
     #[getter]
     fn clients(&self) -> usize {
-        self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.server.client_count()).unwrap_or(0)
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.server.client_count())
+            .unwrap_or(0)
     }
 
     #[getter]
     fn socket_path(&self) -> Option<String> {
-        self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.server.path().to_string())
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.server.path().to_string())
     }
 
     /// Kernel device currently mirrored, or "" when none is in use.
@@ -608,7 +786,12 @@ impl VirtualCamera {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|r| r.device_path.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .map(|r| {
+                r.device_path
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -627,7 +810,10 @@ impl VirtualCamera {
         d.set_item("input_height", s.input_height.load(Ordering::Relaxed))?;
         d.set_item("input_rotation", s.input_rotation.load(Ordering::Relaxed))?;
         let codec = s.input_codec.load(Ordering::Relaxed);
-        d.set_item("input_codec", Codec::from_id(codec).map(|c| c.name()).unwrap_or(""))?;
+        d.set_item(
+            "input_codec",
+            Codec::from_id(codec).map(|c| c.name()).unwrap_or(""),
+        )?;
         let guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = guard.as_ref() {
             d.set_item("clients", r.server.client_count())?;
@@ -637,9 +823,18 @@ impl VirtualCamera {
             d.set_item("fps_den", r.format.fps_den)?;
             d.set_item("pixel_format", v4l2out::fourcc_str(r.format.fourcc))?;
             d.set_item("socket_path", r.server.path())?;
-            d.set_item("device_path", r.device_path.lock().unwrap_or_else(|e| e.into_inner()).clone())?;
+            d.set_item(
+                "device_path",
+                r.device_path
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            )?;
             d.set_item("pipewire", r.pipewire)?;
-        d.set_item("pipewire_streaming", s.pipewire_streaming.load(Ordering::Relaxed))?;
+            d.set_item(
+                "pipewire_streaming",
+                s.pipewire_streaming.load(Ordering::Relaxed),
+            )?;
         } else {
             d.set_item("clients", 0)?;
         }
@@ -661,26 +856,63 @@ impl VirtualCamera {
         d.set_item(
             "config_fields",
             [
-                "magic", "version", "width", "height", "fourcc", "fps_num", "fps_den", "n_slots", "slot_size",
-                "data_offset", "ctrl_offset", "ctrl_stride", "bytesperline", "sizeimage",
+                "magic",
+                "version",
+                "width",
+                "height",
+                "fourcc",
+                "fps_num",
+                "fps_den",
+                "n_slots",
+                "slot_size",
+                "data_offset",
+                "ctrl_offset",
+                "ctrl_stride",
+                "bytesperline",
+                "sizeimage",
             ],
         )?;
         d.set_item(
             "header_fields",
             [
-                "magic", "version", "width", "height", "fourcc", "fps_num", "fps_den", "n_slots", "slot_size",
-                "data_offset", "bytesperline", "sizeimage", "latest_slot", "_pad",
+                "magic",
+                "version",
+                "width",
+                "height",
+                "fourcc",
+                "fps_num",
+                "fps_den",
+                "n_slots",
+                "slot_size",
+                "data_offset",
+                "bytesperline",
+                "sizeimage",
+                "latest_slot",
+                "_pad",
             ],
         )?;
         d.set_item("header_latest_frame_seq_offset", 56)?;
-        d.set_item("ctrl_fields", [("seq", 0, 4), ("bytesused", 4, 4), ("frame_seq", 8, 8), ("ts_ns", 16, 8)])?;
+        d.set_item(
+            "ctrl_fields",
+            [
+                ("seq", 0, 4),
+                ("bytesused", 4, 4),
+                ("frame_seq", 8, 8),
+                ("ts_ns", 16, 8),
+            ],
+        )?;
         Ok(d)
     }
 }
 
 impl Drop for VirtualCamera {
     fn drop(&mut self) {
-        if let Some(mut r) = self.running.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(mut r) = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             r.queue.close();
             if let Some(t) = r.thread.take() {
                 let _ = t.join();
@@ -696,9 +928,32 @@ mod tests {
     #[test]
     fn queue_drops_oldest() {
         let q = Queue::new(2);
-        assert!(q.push(Job { codec: Codec::H264, keyframe: true, orientation: Orientation::UPRIGHT, data: vec![1] }).is_none());
-        assert!(q.push(Job { codec: Codec::H264, keyframe: false, orientation: Orientation::UPRIGHT, data: vec![2] }).is_none());
-        let evicted = q.push(Job { codec: Codec::H264, keyframe: false, orientation: Orientation::UPRIGHT, data: vec![3] }).unwrap();
+        assert!(
+            q.push(Job {
+                codec: Codec::H264,
+                keyframe: true,
+                orientation: Orientation::UPRIGHT,
+                data: vec![1]
+            })
+            .is_none()
+        );
+        assert!(
+            q.push(Job {
+                codec: Codec::H264,
+                keyframe: false,
+                orientation: Orientation::UPRIGHT,
+                data: vec![2]
+            })
+            .is_none()
+        );
+        let evicted = q
+            .push(Job {
+                codec: Codec::H264,
+                keyframe: false,
+                orientation: Orientation::UPRIGHT,
+                data: vec![3],
+            })
+            .unwrap();
         assert_eq!(evicted.data, vec![1]);
         assert_eq!(q.pop().unwrap().data, vec![2]);
         assert_eq!(q.pop().unwrap().data, vec![3]);
@@ -720,7 +975,11 @@ mod tests {
 
     #[test]
     fn mjpeg_encoder_writes_a_jpeg_of_the_device_size() {
-        let dev = DeviceFormat { width: 64, height: 32, fourcc: ring::V4L2_PIX_FMT_MJPEG };
+        let dev = DeviceFormat {
+            width: 64,
+            height: 32,
+            fourcc: ring::V4L2_PIX_FMT_MJPEG,
+        };
         let mut src = convert::I420Buffer::new(32, 32);
         src.data.fill(200);
         let mut enc = MjpegEncoder::new().unwrap();

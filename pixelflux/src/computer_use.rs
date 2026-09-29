@@ -25,27 +25,33 @@
 //! operator gives callers, and nowhere else.
 
 use std::collections::HashMap;
+use std::io::Cursor;
+use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, ToSocketAddrs};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-use std::io::Cursor;
-use std::io::Read;
 
 use smithay::input::keyboard::xkb;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use image::{ImageBuffer, Rgba, ImageFormat};
+use image::{ImageBuffer, ImageFormat, Rgba};
 use serde::Deserialize;
 use tiny_http;
 
-use crate::wayland::keymap::keysym_for_char;
 use crate::ThreadCommand;
+use crate::wayland::keymap::keysym_for_char;
 
 fn clamp<T: PartialOrd>(v: T, lo: T, hi: T) -> T {
-    if v < lo { lo } else if v > hi { hi } else { v }
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
 }
 
 /// Turn a raw framebuffer into a PNG the Computer Use agent can actually look at.
@@ -84,12 +90,30 @@ fn scancode_for_keyname(name: &str) -> Option<u32> {
         "scrolllock" => 78,
         "printscreen" | "sysrq" | "print" => 107,
         "pause" | "break" => 127,
-        "f1" => 67, "f2" => 68, "f3" => 69, "f4" => 70,
-        "f5" => 71, "f6" => 72, "f7" => 73, "f8" => 74,
-        "f9" => 75, "f10" => 76, "f11" => 95, "f12" => 96,
-        "f13" => 191, "f14" => 192, "f15" => 193, "f16" => 194,
-        "f17" => 195, "f18" => 196, "f19" => 197, "f20" => 198,
-        "f21" => 199, "f22" => 200, "f23" => 201, "f24" => 202,
+        "f1" => 67,
+        "f2" => 68,
+        "f3" => 69,
+        "f4" => 70,
+        "f5" => 71,
+        "f6" => 72,
+        "f7" => 73,
+        "f8" => 74,
+        "f9" => 75,
+        "f10" => 76,
+        "f11" => 95,
+        "f12" => 96,
+        "f13" => 191,
+        "f14" => 192,
+        "f15" => 193,
+        "f16" => 194,
+        "f17" => 195,
+        "f18" => 196,
+        "f19" => 197,
+        "f20" => 198,
+        "f21" => 199,
+        "f22" => 200,
+        "f23" => 201,
+        "f24" => 202,
         "ctrl" | "lctrl" | "leftctrl" => 37,
         "rctrl" | "rightctrl" => 105,
         "shift" | "lshift" | "leftshift" => 50,
@@ -99,11 +123,16 @@ fn scancode_for_keyname(name: &str) -> Option<u32> {
         "super" | "meta" | "lsuper" | "leftmeta" | "leftsuper" | "windows" | "leftwindows" => 133,
         "rsuper" | "rightmeta" | "rightsuper" | "rightwindows" => 134,
         "menu" | "compose" => 135,
-        "kp_0" | "kp0" => 90, "kp_1" | "kp1" => 87,
-        "kp_2" | "kp2" => 88, "kp_3" | "kp3" => 89,
-        "kp_4" | "kp4" => 83, "kp_5" | "kp5" => 84,
-        "kp_6" | "kp6" => 85, "kp_7" | "kp7" => 79,
-        "kp_8" | "kp8" => 80, "kp_9" | "kp9" => 81,
+        "kp_0" | "kp0" => 90,
+        "kp_1" | "kp1" => 87,
+        "kp_2" | "kp2" => 88,
+        "kp_3" | "kp3" => 89,
+        "kp_4" | "kp4" => 83,
+        "kp_5" | "kp5" => 84,
+        "kp_6" | "kp6" => 85,
+        "kp_7" | "kp7" => 79,
+        "kp_8" | "kp8" => 80,
+        "kp_9" | "kp9" => 81,
         "kp_decimal" | "kp_dot" => 91,
         "kp_divide" | "kp_slash" => 106,
         "kp_multiply" | "kp_asterisk" => 63,
@@ -217,9 +246,14 @@ impl CuBackend for CuWaylandBackend {
 
     fn display_fb_size(&self, display: u32) -> Result<(i32, i32), String> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx.send(ThreadCommand::CuGetInfo { display_id: display, resp: resp_tx })
+        self.tx
+            .send(ThreadCommand::CuGetInfo {
+                display_id: display,
+                resp: resp_tx,
+            })
             .map_err(|_| "Failed to request compositor info".to_string())?;
-        let (w, h, _) = resp_rx.recv_timeout(REPLY_TIMEOUT)
+        let (w, h, _) = resp_rx
+            .recv_timeout(REPLY_TIMEOUT)
             .map_err(|_| "Compositor info request failed".to_string())?;
         // CuGetInfo reports zeros for output ids that don't exist (and for an output
         // with no mode, which live outputs always have).
@@ -258,23 +292,35 @@ impl CuBackend for CuWaylandBackend {
 
     fn screenshot_png(&self, display: u32) -> Result<Vec<u8>, String> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx.send(ThreadCommand::CuScreenshot { display_id: display, resp: resp_tx })
+        self.tx
+            .send(ThreadCommand::CuScreenshot {
+                display_id: display,
+                resp: resp_tx,
+            })
             .map_err(|_| "Failed to request screenshot".to_string())?;
-        resp_rx.recv_timeout(REPLY_TIMEOUT).map_err(|_| "Screenshot failed".to_string())?
+        resp_rx
+            .recv_timeout(REPLY_TIMEOUT)
+            .map_err(|_| "Screenshot failed".to_string())?
     }
 
     fn cursor_pos(&self) -> Result<(f64, f64), String> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        self.tx.send(ThreadCommand::CuCursorPosition { resp: resp_tx })
+        self.tx
+            .send(ThreadCommand::CuCursorPosition { resp: resp_tx })
             .map_err(|_| "Failed to request cursor position".to_string())?;
-        resp_rx.recv_timeout(REPLY_TIMEOUT).map_err(|_| "Cursor position failed".to_string())
+        resp_rx
+            .recv_timeout(REPLY_TIMEOUT)
+            .map_err(|_| "Cursor position failed".to_string())
     }
 
     fn resolve_keysyms(&self, keysyms: &[u32]) -> Vec<(u32, u32)> {
         let (resp_tx, resp_rx) = mpsc::channel();
         if self
             .tx
-            .send(ThreadCommand::BindKeysyms { keysyms: keysyms.to_vec(), reply: resp_tx })
+            .send(ThreadCommand::BindKeysyms {
+                keysyms: keysyms.to_vec(),
+                reply: resp_tx,
+            })
             .is_err()
         {
             return vec![(0, 0); keysyms.len()];
@@ -296,7 +342,10 @@ struct KeyResolver<'a> {
 
 impl<'a> KeyResolver<'a> {
     fn new(backend: &'a dyn CuBackend) -> Self {
-        Self { backend, cache: HashMap::new() }
+        Self {
+            backend,
+            cache: HashMap::new(),
+        }
     }
 
     /// Resolve a batch up front so a `type` action costs one backend round trip.
@@ -430,18 +479,20 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
                 sleep_ms(30);
             }
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    b.key(sc, true);
-                    sleep_ms(20);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                b.key(sc, true);
+                sleep_ms(20);
+            }
             b.button(btn, true);
             sleep_ms(20);
             b.button(btn, false);
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    sleep_ms(10);
-                    b.key(sc, false);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                sleep_ms(10);
+                b.key(sc, false);
+            }
             Ok(ok_json())
         }
 
@@ -453,10 +504,11 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
                 sleep_ms(30);
             }
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    b.key(sc, true);
-                    sleep_ms(20);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                b.key(sc, true);
+                sleep_ms(20);
+            }
             for _ in 0..n {
                 b.button(CuButton::Left, true);
                 sleep_ms(10);
@@ -464,10 +516,11 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
                 sleep_ms(10);
             }
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    sleep_ms(10);
-                    b.key(sc, false);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                sleep_ms(10);
+                b.key(sc, false);
+            }
             Ok(ok_json())
         }
 
@@ -503,27 +556,28 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
             // overlay keymap the inner compositor never sees. Falls through to the
             // local seat if the app socket is unreachable.
             if b.name() == "wayland"
-                && let Some(sock) = app_wayland_socket_path() {
-                    // Failures log once per socket value; every request still
-                    // retries, so a compositor that comes back is used again
-                    // immediately (and re-arms the logging).
-                    static FAILED_SOCK: Mutex<Option<String>> = Mutex::new(None);
-                    match crate::wayland::vkclient::type_text_to(&sock, text) {
-                        Ok(()) => {
-                            *FAILED_SOCK.lock().unwrap() = None;
-                            return Ok(ok_json());
-                        }
-                        Err(e) => {
-                            let mut last = FAILED_SOCK.lock().unwrap();
-                            if last.as_deref() != Some(sock.as_str()) {
-                                eprintln!(
-                                    "[ComputerUse] app-compositor type via {sock} failed ({e}); using local seat until it is reachable"
-                                );
-                                *last = Some(sock);
-                            }
+                && let Some(sock) = app_wayland_socket_path()
+            {
+                // Failures log once per socket value; every request still
+                // retries, so a compositor that comes back is used again
+                // immediately (and re-arms the logging).
+                static FAILED_SOCK: Mutex<Option<String>> = Mutex::new(None);
+                match crate::wayland::vkclient::type_text_to(&sock, text) {
+                    Ok(()) => {
+                        *FAILED_SOCK.lock().unwrap() = None;
+                        return Ok(ok_json());
+                    }
+                    Err(e) => {
+                        let mut last = FAILED_SOCK.lock().unwrap();
+                        if last.as_deref() != Some(sock.as_str()) {
+                            eprintln!(
+                                "[ComputerUse] app-compositor type via {sock} failed ({e}); using local seat until it is reachable"
+                            );
+                            *last = Some(sock);
                         }
                     }
                 }
+            }
             let mut resolver = KeyResolver::new(b);
             let syms: Vec<u32> = text.chars().map(keysym_for_char).collect();
             resolver.prefetch(&syms);
@@ -597,7 +651,9 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
             b.with_transient_keysyms(&unresolved, &mut |bound| {
                 let main_key = main_key.or_else(|| {
                     // Transient binds sit at the plain level: no modifiers needed.
-                    unresolved_sym.and_then(|s| bound.get(&s)).map(|&kc| (kc, 0))
+                    unresolved_sym
+                        .and_then(|s| bound.get(&s))
+                        .map(|&kc| (kc, 0))
                 });
                 for &sc in &mods {
                     b.key(sc, true);
@@ -666,7 +722,10 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
         }
 
         "scroll" => {
-            let dir = req.scroll_direction.as_deref().ok_or("Missing scroll_direction")?;
+            let dir = req
+                .scroll_direction
+                .as_deref()
+                .ok_or("Missing scroll_direction")?;
             let amount = req.scroll_amount.unwrap_or(1).max(0) as f64;
             if let Some(coord) = req.coordinate {
                 let (fx, fy) = handle_coord(coord);
@@ -674,10 +733,11 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
                 sleep_ms(30);
             }
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    b.key(sc, true);
-                    sleep_ms(20);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                b.key(sc, true);
+                sleep_ms(20);
+            }
             let (dx, dy) = match dir {
                 "up" => (0.0, -amount),
                 "down" => (0.0, amount),
@@ -688,16 +748,21 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
             b.scroll(dx, dy);
             sleep_ms(30);
             if let Some(ref mod_name) = req.text
-                && let Some(sc) = handle_modifier(mod_name) {
-                    sleep_ms(10);
-                    b.key(sc, false);
-                }
+                && let Some(sc) = handle_modifier(mod_name)
+            {
+                sleep_ms(10);
+                b.key(sc, false);
+            }
             Ok(ok_json())
         }
 
         "cursor_position" => {
             let (x, y) = b.cursor_pos()?;
-            Ok(format!("{{\"text\":\"X={},Y={}\"}}", x.round() as i32, y.round() as i32))
+            Ok(format!(
+                "{{\"text\":\"X={},Y={}\"}}",
+                x.round() as i32,
+                y.round() as i32
+            ))
         }
 
         "wait" => {
@@ -720,15 +785,18 @@ fn handle_action_inner(req: CuActionRequest, b: &dyn CuBackend) -> Result<String
             let crop_w = right - left;
             let crop_h = bottom - top;
             let png = b.screenshot_png(display)?;
-            if crop_w > 0 && crop_h > 0
-                && let Ok(img) = image::load_from_memory(&png) {
-                    let cropped = img.crop_imm(left, top, crop_w, crop_h);
-                    let mut out = Vec::new();
-                    cropped.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
-                        .map_err(|e| format!("Crop/encode error: {}", e))?;
-                    let b64 = BASE64.encode(&out);
-                    return Ok(format!("{{\"data\":\"{}\"}}", b64));
-                }
+            if crop_w > 0
+                && crop_h > 0
+                && let Ok(img) = image::load_from_memory(&png)
+            {
+                let cropped = img.crop_imm(left, top, crop_w, crop_h);
+                let mut out = Vec::new();
+                cropped
+                    .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+                    .map_err(|e| format!("Crop/encode error: {}", e))?;
+                let b64 = BASE64.encode(&out);
+                return Ok(format!("{{\"data\":\"{}\"}}", b64));
+            }
             let b64 = BASE64.encode(&png);
             Ok(format!("{{\"data\":\"{}\"}}", b64))
         }
@@ -763,9 +831,10 @@ fn named_record_path(dir: Option<&str>, name: &str) -> Result<String, String> {
     let dir = dir.ok_or("a recording named by the caller needs PIXELFLUX_RECORD_DIR")?;
     let mut parts = std::path::Path::new(name).components();
     match (parts.next(), parts.next()) {
-        (Some(std::path::Component::Normal(file)), None) => {
-            Ok(std::path::Path::new(dir).join(file).to_string_lossy().into_owned())
-        }
+        (Some(std::path::Component::Normal(file)), None) => Ok(std::path::Path::new(dir)
+            .join(file)
+            .to_string_lossy()
+            .into_owned()),
         _ => Err(format!("'{name}' is not a file name")),
     }
 }
@@ -784,19 +853,27 @@ fn handle_record_endpoint(url: &str, body: &str) -> Option<String> {
                     Err(e) => return Some(format!("{{\"error\":\"Invalid JSON: {}\"}}", e)),
                 }
             };
-            let record_dir = std::env::var("PIXELFLUX_RECORD_DIR").ok().filter(|d| !d.is_empty());
+            let record_dir = std::env::var("PIXELFLUX_RECORD_DIR")
+                .ok()
+                .filter(|d| !d.is_empty());
             let path = match req.path {
                 Some(name) => match named_record_path(record_dir.as_deref(), &name) {
                     Ok(path) => path,
                     Err(e) => return Some(serde_json::json!({ "error": e }).to_string()),
                 },
-                None => std::env::var("PIXELFLUX_RECORD").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    format!("{}/pixelflux-record-{ts}.mp4", record_dir.as_deref().unwrap_or("/tmp"))
-                }),
+                None => std::env::var("PIXELFLUX_RECORD")
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        format!(
+                            "{}/pixelflux-record-{ts}.mp4",
+                            record_dir.as_deref().unwrap_or("/tmp")
+                        )
+                    }),
             };
             let mut opts = crate::recorder::RecordOptions::from_env(path);
             if let Some(d) = req.display {
@@ -871,8 +948,8 @@ pub fn register_wayland_backend(tx: smithay::reexports::calloop::channel::Sender
 
 /// The registered compositor's command channel, if a Wayland compositor is running in this
 /// process. The recorder uses it to attach to (or start) a capture without any Python client.
-pub(crate) fn wayland_command_sender(
-) -> Option<smithay::reexports::calloop::channel::Sender<ThreadCommand>> {
+pub(crate) fn wayland_command_sender()
+-> Option<smithay::reexports::calloop::channel::Sender<ThreadCommand>> {
     WAYLAND_TX.lock().unwrap().clone()
 }
 
@@ -880,9 +957,10 @@ pub(crate) fn wayland_command_sender(
 /// a selkies-managed session passes the setting through [`start_cu_server`]).
 pub fn spawn_cu_from_env() {
     if let Ok(bind) = std::env::var("PIXELFLUX_CU")
-        && let Err(e) = start_cu_server(&bind, None) {
-            println!("[ComputerUse] Not started: {e}");
-        }
+        && let Err(e) = start_cu_server(&bind, None)
+    {
+        println!("[ComputerUse] Not started: {e}");
+    }
 }
 
 /// The token every request has to carry, fixed when the server starts.
@@ -919,13 +997,22 @@ pub fn start_cu_server(bind: &str, token: Option<&str>) -> Result<(), String> {
 
 /// Whether `request` carries the server's token, compared in constant time.
 fn authorized(request: &tiny_http::Request) -> bool {
-    let Some(token) = CU_TOKEN.get() else { return false };
+    let Some(token) = CU_TOKEN.get() else {
+        return false;
+    };
     request.headers().iter().any(|h| {
         h.field.equiv("Authorization")
-            && h.value.as_str().strip_prefix("Bearer ").is_some_and(|given| {
-                given.len() == token.len()
-                    && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-            })
+            && h.value
+                .as_str()
+                .strip_prefix("Bearer ")
+                .is_some_and(|given| {
+                    given.len() == token.len()
+                        && given
+                            .bytes()
+                            .zip(token.bytes())
+                            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                            == 0
+                })
     })
 }
 
@@ -936,7 +1023,11 @@ fn authorized(request: &tiny_http::Request) -> bool {
 /// is an error.
 fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
     let mut addrs: Vec<SocketAddr> = Vec::new();
-    for entry in bind.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+    for entry in bind
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
         let resolved: Vec<SocketAddr> = match entry.parse::<u16>() {
             Ok(port) => vec![
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -946,7 +1037,11 @@ fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
                 .to_socket_addrs()
                 .map_err(|e| format!("cannot resolve '{entry}': {e}"))?
                 .collect(),
-            Err(_) => return Err(format!("invalid bind '{entry}': expected a port or host:port")),
+            Err(_) => {
+                return Err(format!(
+                    "invalid bind '{entry}': expected a port or host:port"
+                ));
+            }
         };
         for addr in resolved {
             if !addrs.contains(&addr) {
@@ -955,21 +1050,31 @@ fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
         }
     }
     if addrs.is_empty() {
-        return Err(format!("invalid bind '{bind}': expected a port or host:port"));
+        return Err(format!(
+            "invalid bind '{bind}': expected a port or host:port"
+        ));
     }
     let mut listeners = Vec::new();
     let mut skipped = Vec::new();
     for addr in addrs {
         match bind_listener(addr) {
             Ok(listener) => listeners.push(listener),
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EADDRNOTAVAIL | libc::EAFNOSUPPORT)) => {
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EADDRNOTAVAIL | libc::EAFNOSUPPORT)
+                ) =>
+            {
                 skipped.push(format!("{addr} ({e})"));
             }
             Err(e) => return Err(format!("cannot bind {addr}: {e}")),
         }
     }
     if listeners.is_empty() {
-        return Err(format!("no address of '{bind}' is available: {}", skipped.join(", ")));
+        return Err(format!(
+            "no address of '{bind}' is available: {}",
+            skipped.join(", ")
+        ));
     }
     for note in skipped {
         println!("[ComputerUse] Not listening on {note}");
@@ -983,7 +1088,11 @@ fn cu_listeners(bind: &str) -> Result<Vec<TcpListener>, String> {
 fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
-    let family = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+    let family = if addr.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
     let fd = unsafe { libc::socket(family, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
@@ -1000,7 +1109,11 @@ fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
         };
-        if rc < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+        if rc < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     };
     enable(libc::SOL_SOCKET, libc::SO_REUSEADDR)?;
     if addr.is_ipv6() {
@@ -1011,7 +1124,9 @@ fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
             let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
             sin.sin_family = libc::AF_INET as libc::sa_family_t;
             sin.sin_port = v4.port().to_be();
-            sin.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.ip().octets()) };
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from_ne_bytes(v4.ip().octets()),
+            };
             unsafe {
                 libc::bind(
                     fd,
@@ -1025,7 +1140,9 @@ fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
             sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
             sin6.sin6_port = v6.port().to_be();
             sin6.sin6_flowinfo = v6.flowinfo();
-            sin6.sin6_addr = libc::in6_addr { s6_addr: v6.ip().octets() };
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: v6.ip().octets(),
+            };
             sin6.sin6_scope_id = v6.scope_id();
             unsafe {
                 libc::bind(
@@ -1052,8 +1169,7 @@ pub(crate) fn resolve_backend() -> Result<Box<dyn CuBackend>, String> {
     if let Some(tx) = WAYLAND_TX.lock().unwrap().clone() {
         return Ok(Box::new(CuWaylandBackend { tx }));
     }
-    crate::x11::computer_use::CuX11Backend::connect()
-        .map(|be| Box::new(be) as Box<dyn CuBackend>)
+    crate::x11::computer_use::CuX11Backend::connect().map(|be| Box::new(be) as Box<dyn CuBackend>)
 }
 
 /// Expose the captured desktop to an AI agent over HTTP, so a Computer Use client can drive
@@ -1066,7 +1182,10 @@ pub(crate) fn resolve_backend() -> Result<Box<dyn CuBackend>, String> {
 /// misplace every coordinate. On Wayland a screenshot forces a one-frame GPU readback when the
 /// pipeline is in zero-copy mode; on X11 it is a one-shot `GetImage` of the root window.
 pub fn run_cu_server(listener: TcpListener) {
-    let addr = listener.local_addr().map(|a| a.to_string()).unwrap_or_default();
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     let server = match tiny_http::Server::from_listener(listener, None) {
         Ok(s) => s,
         Err(e) => {
@@ -1082,8 +1201,16 @@ pub fn run_cu_server(listener: TcpListener) {
             let _ = request.respond(
                 tiny_http::Response::from_string("{\"error\":\"unauthorized\"}".to_string())
                     .with_status_code(401)
-                    .with_header("WWW-Authenticate: Bearer".parse::<tiny_http::Header>().unwrap())
-                    .with_header("Content-Type: application/json".parse::<tiny_http::Header>().unwrap()),
+                    .with_header(
+                        "WWW-Authenticate: Bearer"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    )
+                    .with_header(
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    ),
             );
             continue;
         }
@@ -1096,13 +1223,15 @@ pub fn run_cu_server(listener: TcpListener) {
             .take(MAX_CU_BODY + 1)
             .read_to_string(&mut body)
         {
-            let _ = request.respond(tiny_http::Response::from_string(format!(
-                "{{\"error\":\"{}\"}}", e
-            ))
-            .with_status_code(400)
-            .with_header(
-                "Content-Type: application/json".parse::<tiny_http::Header>().unwrap()
-            ));
+            let _ = request.respond(
+                tiny_http::Response::from_string(format!("{{\"error\":\"{}\"}}", e))
+                    .with_status_code(400)
+                    .with_header(
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    ),
+            );
             continue;
         }
 
@@ -1112,7 +1241,9 @@ pub fn run_cu_server(listener: TcpListener) {
             )
             .with_status_code(413)
             .with_header(
-                "Content-Type: application/json".parse::<tiny_http::Header>().unwrap()
+                "Content-Type: application/json"
+                    .parse::<tiny_http::Header>()
+                    .unwrap(),
             );
             let _ = request.respond(resp);
             continue;
@@ -1123,8 +1254,10 @@ pub fn run_cu_server(listener: TcpListener) {
                 tiny_http::Response::from_string(json)
                     .with_status_code(200)
                     .with_header(
-                        "Content-Type: application/json".parse::<tiny_http::Header>().unwrap()
-                    )
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    ),
             );
             continue;
         }
@@ -1132,13 +1265,18 @@ pub fn run_cu_server(listener: TcpListener) {
         let parsed: CuActionRequest = match serde_json::from_str(&body) {
             Ok(r) => r,
             Err(e) => {
-                let _ = request.respond(tiny_http::Response::from_string(format!(
-                    "{{\"error\":\"Invalid JSON: {}\"}}", e
-                ))
-                .with_status_code(400)
-                .with_header(
-                    "Content-Type: application/json".parse::<tiny_http::Header>().unwrap()
-                ));
+                let _ = request.respond(
+                    tiny_http::Response::from_string(format!(
+                        "{{\"error\":\"Invalid JSON: {}\"}}",
+                        e
+                    ))
+                    .with_status_code(400)
+                    .with_header(
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    ),
+                );
                 continue;
             }
         };
@@ -1157,8 +1295,10 @@ pub fn run_cu_server(listener: TcpListener) {
             tiny_http::Response::from_string(json_response)
                 .with_status_code(200)
                 .with_header(
-                    "Content-Type: application/json".parse::<tiny_http::Header>().unwrap()
-                )
+                    "Content-Type: application/json"
+                        .parse::<tiny_http::Header>()
+                        .unwrap(),
+                ),
         );
     }
 }
@@ -1169,11 +1309,17 @@ mod record_path_tests {
 
     #[test]
     fn a_named_recording_stays_in_the_operators_directory() {
-        assert_eq!(named_record_path(Some("/rec"), "take.mp4").unwrap(), "/rec/take.mp4");
+        assert_eq!(
+            named_record_path(Some("/rec"), "take.mp4").unwrap(),
+            "/rec/take.mp4"
+        );
         for name in ["/etc/passwd", "../x.mp4", "a/b.mp4", "..", ".", ""] {
             assert!(named_record_path(Some("/rec"), name).is_err(), "{name:?}");
         }
-        assert!(named_record_path(None, "take.mp4").is_err(), "no directory, no named file");
+        assert!(
+            named_record_path(None, "take.mp4").is_err(),
+            "no directory, no named file"
+        );
     }
 }
 
@@ -1191,16 +1337,21 @@ mod tests {
             assert!(addr.ip().is_loopback(), "{addr}");
             assert_ne!(addr.port(), 0);
         }
-        assert!(listeners
-            .iter()
-            .any(|l| l.local_addr().unwrap().ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(
+            listeners
+                .iter()
+                .any(|l| l.local_addr().unwrap().ip() == IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
     }
 
     #[test]
     fn host_port_names_the_address() {
         let scoped = cu_listeners("127.0.0.1:0").unwrap();
         assert_eq!(scoped.len(), 1);
-        assert_eq!(scoped[0].local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(
+            scoped[0].local_addr().unwrap().ip(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
         let open = cu_listeners("0.0.0.0:0").unwrap();
         assert_eq!(open.len(), 1);
         assert!(open[0].local_addr().unwrap().ip().is_unspecified());
@@ -1224,7 +1375,11 @@ mod tests {
     }
 
     fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     fn v6only(listener: &TcpListener) -> libc::c_int {
@@ -1248,8 +1403,16 @@ mod tests {
     fn both_wildcards_share_a_port() {
         let port = free_port();
         let listeners = cu_listeners(&format!("0.0.0.0:{port}, [::]:{port}")).unwrap();
-        assert!(listeners.iter().all(|l| l.local_addr().unwrap().port() == port));
-        assert!(listeners.iter().all(|l| l.local_addr().unwrap().ip().is_unspecified()));
+        assert!(
+            listeners
+                .iter()
+                .all(|l| l.local_addr().unwrap().port() == port)
+        );
+        assert!(
+            listeners
+                .iter()
+                .all(|l| l.local_addr().unwrap().ip().is_unspecified())
+        );
         if let Some(v6) = listeners.iter().find(|l| l.local_addr().unwrap().is_ipv6()) {
             assert_eq!(listeners.len(), 2);
             assert_eq!(v6only(v6), 1);
@@ -1261,6 +1424,10 @@ mod tests {
         let port = free_port();
         let listeners = cu_listeners(&format!("{port},127.0.0.1:{port},{port}")).unwrap();
         assert!(listeners.len() <= 2);
-        assert!(listeners.iter().all(|l| l.local_addr().unwrap().ip().is_loopback()));
+        assert!(
+            listeners
+                .iter()
+                .all(|l| l.local_addr().unwrap().ip().is_loopback())
+        );
     }
 }

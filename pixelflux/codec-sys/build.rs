@@ -30,19 +30,59 @@ const LIBS: &[Lib] = &[
         pkg: "vpx",
         min: "1.11",
         header: "vpx.h",
-        allow: &["vpx_.*", "VPX_.*", "VP8.*", "VP9.*", "vp8e_.*", "vp9e_.*", "vp8_.*", "vpx_svc_.*"],
+        allow: &[
+            "vpx_.*",
+            "VPX_.*",
+            "VP8.*",
+            "VP9.*",
+            "vp8e_.*",
+            "vp9e_.*",
+            "vp8_.*",
+            "vpx_svc_.*",
+        ],
     },
-    Lib { feature: "x265", pkg: "x265", min: "3.5", header: "x265w.h", allow: &["x265_.*", "X265_.*"] },
-    Lib { feature: "kvazaar", pkg: "kvazaar", min: "2.3.2", header: "kvazaar.h", allow: &["kvz_.*", "KVZ_.*"] },
+    Lib {
+        feature: "x265",
+        pkg: "x265",
+        min: "3.5",
+        header: "x265w.h",
+        allow: &["x265_.*", "X265_.*"],
+    },
+    Lib {
+        feature: "kvazaar",
+        pkg: "kvazaar",
+        min: "2.3.2",
+        header: "kvazaar.h",
+        allow: &["kvz_.*", "KVZ_.*"],
+    },
     Lib {
         feature: "svtav1",
         pkg: "SvtAv1Enc",
         min: "1.0",
         header: "svtav1.h",
-        allow: &["svt_av1_.*", "Eb.*", "EB_.*", "SVT_AV1_.*", "Svt.*", "SvtAv1.*"],
+        allow: &[
+            "svt_av1_.*",
+            "Eb.*",
+            "EB_.*",
+            "SVT_AV1_.*",
+            "Svt.*",
+            "SvtAv1.*",
+        ],
     },
-    Lib { feature: "dav1d", pkg: "dav1d", min: "1.0", header: "dav1dw.h", allow: &["dav1d_.*", "Dav1d.*", "DAV1D_.*"] },
-    Lib { feature: "de265", pkg: "libde265", min: "1.0.8", header: "de265w.h", allow: &["de265_.*", "DE265_.*", "LIBDE265_.*"] },
+    Lib {
+        feature: "dav1d",
+        pkg: "dav1d",
+        min: "1.0",
+        header: "dav1dw.h",
+        allow: &["dav1d_.*", "Dav1d.*", "DAV1D_.*"],
+    },
+    Lib {
+        feature: "de265",
+        pkg: "libde265",
+        min: "1.0.8",
+        header: "de265w.h",
+        allow: &["de265_.*", "DE265_.*", "LIBDE265_.*"],
+    },
 ];
 
 fn main() {
@@ -56,9 +96,15 @@ fn main() {
         if env::var(format!("CARGO_FEATURE_{}", lib.feature.to_uppercase())).is_err() {
             continue;
         }
-        let probed = pkg_config::Config::new().atleast_version(lib.min).probe(lib.pkg).unwrap_or_else(|e| {
-            panic!("{}: the `{}` feature needs {} {} or newer (pkg-config): {e}", lib.pkg, lib.feature, lib.pkg, lib.min)
-        });
+        let probed = pkg_config::Config::new()
+            .atleast_version(lib.min)
+            .probe(lib.pkg)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{}: the `{}` feature needs {} {} or newer (pkg-config): {e}",
+                    lib.pkg, lib.feature, lib.pkg, lib.min
+                )
+            });
         let header = format!("headers/{}", lib.header);
         println!("cargo:rerun-if-changed={header}");
         let mut builder = bindgen::builder()
@@ -66,7 +112,10 @@ fn main() {
             .clang_args(probed.include_paths.iter().flat_map(|p| {
                 // SVT-AV1's pkg-config file names the include directory with or without
                 // its `svt-av1/` tail depending on who packaged it, so both are searched.
-                [format!("-I{}", p.display()), format!("-I{}/svt-av1", p.display())]
+                [
+                    format!("-I{}", p.display()),
+                    format!("-I{}/svt-av1", p.display()),
+                ]
             }))
             .size_t_is_usize(true)
             .layout_tests(false)
@@ -75,9 +124,14 @@ fn main() {
             .derive_default(true)
             .generate_comments(false);
         for pattern in lib.allow {
-            builder = builder.allowlist_type(pattern).allowlist_function(pattern).allowlist_var(pattern);
+            builder = builder
+                .allowlist_type(pattern)
+                .allowlist_function(pattern)
+                .allowlist_var(pattern);
         }
-        let bindings = builder.generate().unwrap_or_else(|e| panic!("{}: bindgen failed: {e}", lib.pkg));
+        let bindings = builder
+            .generate()
+            .unwrap_or_else(|e| panic!("{}: bindgen failed: {e}", lib.pkg));
         bindings
             .write_to_file(out.join(format!("{}.rs", lib.feature)))
             .unwrap_or_else(|e| panic!("{}: writing the bindings failed: {e}", lib.pkg));
@@ -92,9 +146,14 @@ fn main() {
             }
             let entry = generated
                 .split_whitespace()
-                .find_map(|word| word.strip_prefix("x265_api_get_").map(|rest| {
-                    format!("x265_api_get_{}", rest.trim_end_matches(|c: char| !c.is_ascii_digit()))
-                }))
+                .find_map(|word| {
+                    word.strip_prefix("x265_api_get_").map(|rest| {
+                        format!(
+                            "x265_api_get_{}",
+                            rest.trim_end_matches(|c: char| !c.is_ascii_digit())
+                        )
+                    })
+                })
                 .expect("x265.h declares no x265_api_get_<build>");
             std::fs::OpenOptions::new()
                 .append(true)
@@ -111,15 +170,25 @@ fn main() {
                 .unwrap();
         }
         if lib.feature == "svtav1" {
-            let version = probed.version.split('.').map(|v| v.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
-            let (major, minor) = (version.first().copied().unwrap_or(0), version.get(1).copied().unwrap_or(0));
+            let version = probed
+                .version
+                .split('.')
+                .map(|v| v.parse::<u32>().unwrap_or(0))
+                .collect::<Vec<_>>();
+            let (major, minor) = (
+                version.first().copied().unwrap_or(0),
+                version.get(1).copied().unwrap_or(0),
+            );
             if major < 3 {
                 println!("cargo:rustc-cfg=svtav1_handle_priv");
             }
             if (major, minor) >= (3, 1) {
                 println!("cargo:rustc-cfg=svtav1_rtc");
             }
-            if std::fs::read_to_string(out.join("svtav1.rs")).unwrap().contains("REF_USE_EVENT") {
+            if std::fs::read_to_string(out.join("svtav1.rs"))
+                .unwrap()
+                .contains("REF_USE_EVENT")
+            {
                 println!("cargo:rustc-cfg=svtav1_events");
             }
         }

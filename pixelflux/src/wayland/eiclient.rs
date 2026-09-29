@@ -32,12 +32,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reis::PendingRequestResult;
 use reis::ei;
 use reis::event::{DeviceCapability, EiEvent, EiEventConverter};
 use reis::handshake::ei_handshake_blocking;
-use reis::PendingRequestResult;
 
-use crate::wayland::keymap::{compile_keymap, KeymapPolicy};
+use crate::wayland::keymap::{KeymapPolicy, compile_keymap};
 use crate::wayland::wlclient::wake_pipe;
 
 /// evdev keycodes carry an 8-count offset from xkb keycodes.
@@ -49,14 +49,34 @@ type Ready = Arc<(Mutex<Option<Result<(), String>>>, std::sync::Condvar)>;
 
 /// One injection request, produced on selkies' input threads and drained on the EIS thread.
 enum Cmd {
-    MotionAbsolute { x: f32, y: f32 },
-    MotionRelative { dx: f32, dy: f32 },
-    Button { button: u32, pressed: bool },
-    Scroll { dx: f32, dy: f32, finish: bool },
-    ScrollDiscrete { x: i32, y: i32 },
+    MotionAbsolute {
+        x: f32,
+        y: f32,
+    },
+    MotionRelative {
+        dx: f32,
+        dy: f32,
+    },
+    Button {
+        button: u32,
+        pressed: bool,
+    },
+    Scroll {
+        dx: f32,
+        dy: f32,
+        finish: bool,
+    },
+    ScrollDiscrete {
+        x: i32,
+        y: i32,
+    },
     /// A key by xkb keycode, with the base keysym selkies resolved for it (used to place the
     /// key in the compositor's own keymap), or `None` for a key without one.
-    Key { xkb_keycode: u32, keysym: Option<u32>, pressed: bool },
+    Key {
+        xkb_keycode: u32,
+        keysym: Option<u32>,
+        pressed: bool,
+    },
 }
 
 /// A handle to a live EIS session: input methods push commands and wake the worker.
@@ -76,7 +96,10 @@ impl EiInjector {
         let (wake_rd, wake_wr) = wake_pipe()?;
         let queue = Arc::new(Mutex::new(Vec::new()));
         let alive = Arc::new(AtomicBool::new(true));
-        let ready = Arc::new((Mutex::new(None::<Result<(), String>>), std::sync::Condvar::new()));
+        let ready = Arc::new((
+            Mutex::new(None::<Result<(), String>>),
+            std::sync::Condvar::new(),
+        ));
 
         let (q, a, r) = (queue.clone(), alive.clone(), ready.clone());
         std::thread::Builder::new()
@@ -90,7 +113,11 @@ impl EiInjector {
             slot = cvar.wait(slot).unwrap();
         }
         slot.take().unwrap()?;
-        Ok(Self { queue, wake: wake_wr, alive })
+        Ok(Self {
+            queue,
+            wake: wake_wr,
+            alive,
+        })
     }
 
     pub(crate) fn alive(&self) -> bool {
@@ -106,19 +133,32 @@ impl EiInjector {
     }
 
     pub(crate) fn pointer_motion_abs(&self, x: f64, y: f64) {
-        self.push(Cmd::MotionAbsolute { x: x as f32, y: y as f32 });
+        self.push(Cmd::MotionAbsolute {
+            x: x as f32,
+            y: y as f32,
+        });
     }
 
     pub(crate) fn pointer_motion(&self, dx: f64, dy: f64) {
-        self.push(Cmd::MotionRelative { dx: dx as f32, dy: dy as f32 });
+        self.push(Cmd::MotionRelative {
+            dx: dx as f32,
+            dy: dy as f32,
+        });
     }
 
     pub(crate) fn pointer_button(&self, button: i32, pressed: bool) {
-        self.push(Cmd::Button { button: button as u32, pressed });
+        self.push(Cmd::Button {
+            button: button as u32,
+            pressed,
+        });
     }
 
     pub(crate) fn pointer_axis(&self, dx: f64, dy: f64, finish: bool) {
-        self.push(Cmd::Scroll { dx: dx as f32, dy: dy as f32, finish });
+        self.push(Cmd::Scroll {
+            dx: dx as f32,
+            dy: dy as f32,
+            finish,
+        });
     }
 
     pub(crate) fn pointer_axis_discrete(&self, axis: u32, steps: i32) {
@@ -129,7 +169,11 @@ impl EiInjector {
     }
 
     pub(crate) fn key(&self, xkb_keycode: u32, keysym: Option<u32>, pressed: bool) {
-        self.push(Cmd::Key { xkb_keycode, keysym, pressed });
+        self.push(Cmd::Key {
+            xkb_keycode,
+            keysym,
+            pressed,
+        });
     }
 }
 
@@ -181,7 +225,11 @@ impl Worker {
         alive: Arc<AtomicBool>,
         ready: Ready,
     ) {
-        let resp = match ei_handshake_blocking(&context, "pixelflux", ei::handshake::ContextType::Sender) {
+        let resp = match ei_handshake_blocking(
+            &context,
+            "pixelflux",
+            ei::handshake::ContextType::Sender,
+        ) {
             Ok(resp) => resp,
             Err(e) => {
                 Self::signal(&ready, Err(format!("EIS handshake: {e}")));
@@ -205,12 +253,14 @@ impl Worker {
         let mut reported = false;
         loop {
             if !reported && (worker.has(|d| d.resumed) || std::time::Instant::now() >= deadline) {
-                let bound = worker
-                    .devices
-                    .iter()
-                    .any(|d| d.keyboard.is_some() || d.pointer.is_some() || d.pointer_abs.is_some());
+                let bound = worker.devices.iter().any(|d| {
+                    d.keyboard.is_some() || d.pointer.is_some() || d.pointer_abs.is_some()
+                });
                 if !bound {
-                    Self::signal(&ready, Err("EIS session bound no keyboard or pointer".into()));
+                    Self::signal(
+                        &ready,
+                        Err("EIS session bound no keyboard or pointer".into()),
+                    );
                     alive.store(false, Ordering::Relaxed);
                     return;
                 }
@@ -248,8 +298,16 @@ impl Worker {
     /// limit); `false` on a poll error that should end the session.
     fn poll(&self, wake_fd: i32, timeout: i32) -> bool {
         let mut fds = [
-            libc::pollfd { fd: self.context.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: self.context.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
         if n < 0 {
@@ -263,7 +321,9 @@ impl Worker {
         }
         if fds[1].revents & libc::POLLIN != 0 {
             let mut buf = [0u8; 64];
-            while unsafe { libc::read(wake_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) } == buf.len() as isize {}
+            while unsafe { libc::read(wake_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) }
+                == buf.len() as isize
+            {}
         }
         true
     }
@@ -351,7 +411,9 @@ impl Worker {
     }
 
     fn find_mut(&mut self, device: &reis::event::Device) -> Option<&mut Device> {
-        self.devices.iter_mut().find(|d| d.device == *device.device())
+        self.devices
+            .iter_mut()
+            .find(|d| d.device == *device.device())
     }
 
     fn drain(&mut self, queue: &Arc<Mutex<Vec<Cmd>>>) {
@@ -367,21 +429,33 @@ impl Worker {
             Cmd::MotionAbsolute { x, y } => {
                 if let Some(i) = self.ready_index(|d| d.pointer_abs.is_some()) {
                     self.start(i);
-                    self.devices[i].pointer_abs.as_ref().unwrap().motion_absolute(x, y);
+                    self.devices[i]
+                        .pointer_abs
+                        .as_ref()
+                        .unwrap()
+                        .motion_absolute(x, y);
                     self.frame(i);
                 }
             }
             Cmd::MotionRelative { dx, dy } => {
                 if let Some(i) = self.ready_index(|d| d.pointer.is_some()) {
                     self.start(i);
-                    self.devices[i].pointer.as_ref().unwrap().motion_relative(dx, dy);
+                    self.devices[i]
+                        .pointer
+                        .as_ref()
+                        .unwrap()
+                        .motion_relative(dx, dy);
                     self.frame(i);
                 }
             }
             Cmd::Button { button, pressed } => {
                 if let Some(i) = self.ready_index(|d| d.button.is_some()) {
                     self.start(i);
-                    self.devices[i].button.as_ref().unwrap().button(button, button_state(pressed));
+                    self.devices[i]
+                        .button
+                        .as_ref()
+                        .unwrap()
+                        .button(button, button_state(pressed));
                     self.frame(i);
                 }
             }
@@ -401,16 +475,26 @@ impl Worker {
             Cmd::ScrollDiscrete { x, y } => {
                 if let Some(i) = self.ready_index(|d| d.scroll.is_some()) {
                     self.start(i);
-                    self.devices[i].scroll.as_ref().unwrap().scroll_discrete(x, y);
+                    self.devices[i]
+                        .scroll
+                        .as_ref()
+                        .unwrap()
+                        .scroll_discrete(x, y);
                     self.frame(i);
                 }
             }
-            Cmd::Key { xkb_keycode, keysym, pressed } => self.emit_key(xkb_keycode, keysym, pressed),
+            Cmd::Key {
+                xkb_keycode,
+                keysym,
+                pressed,
+            } => self.emit_key(xkb_keycode, keysym, pressed),
         }
     }
 
     fn emit_key(&mut self, xkb_keycode: u32, keysym: Option<u32>, pressed: bool) {
-        let Some(i) = self.ready_index(|d| d.keyboard.is_some()) else { return };
+        let Some(i) = self.ready_index(|d| d.keyboard.is_some()) else {
+            return;
+        };
         self.start(i);
         if pressed {
             let (evdev, mods) = self.resolve_key(i, xkb_keycode, keysym);
@@ -427,7 +511,12 @@ impl Worker {
             let kbd = self.devices[i].keyboard.as_ref().unwrap();
             kbd.key(evdev, key_state(false));
             for m in mods.into_iter().rev() {
-                let count = self.mod_refs.get(&m).copied().unwrap_or(0).saturating_sub(1);
+                let count = self
+                    .mod_refs
+                    .get(&m)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(1);
                 if count == 0 {
                     self.mod_refs.remove(&m);
                     kbd.key(m, key_state(false));
@@ -455,7 +544,10 @@ impl Worker {
                 if level & 2 != 0 {
                     mods.push(policy_altgr(policy));
                 }
-                (kc.saturating_sub(EVDEV_OFFSET), mods.into_iter().flatten().collect())
+                (
+                    kc.saturating_sub(EVDEV_OFFSET),
+                    mods.into_iter().flatten().collect(),
+                )
             }
             None => (raw, Vec::new()),
         }
@@ -476,27 +568,39 @@ impl Worker {
     }
 
     fn frame(&mut self, index: usize) {
-        self.devices[index].device.frame(self.last_serial, now_micros());
+        self.devices[index]
+            .device
+            .frame(self.last_serial, now_micros());
     }
 }
 
 /// The Shift keycode of a keymap, as an evdev code, if it carries one.
 fn policy_shift(policy: &KeymapPolicy) -> Option<u32> {
-    policy.resolve(0xffe1).map(|(kc, _)| kc.saturating_sub(EVDEV_OFFSET))
+    policy
+        .resolve(0xffe1)
+        .map(|(kc, _)| kc.saturating_sub(EVDEV_OFFSET))
 }
 
 /// The ISO_Level3_Shift (AltGr) keycode of a keymap, as an evdev code, if it carries one.
 fn policy_altgr(policy: &KeymapPolicy) -> Option<u32> {
-    policy.resolve(0xfe03).map(|(kc, _)| kc.saturating_sub(EVDEV_OFFSET))
+    policy
+        .resolve(0xfe03)
+        .map(|(kc, _)| kc.saturating_sub(EVDEV_OFFSET))
 }
 
 /// Compile the compositor's keymap into a resolver over its base layout. The mmap is read once;
 /// a keymap that does not compile leaves keys to the raw-keycode path.
 fn keymap_policy(keymap: &reis::event::Keymap) -> Option<KeymapPolicy> {
     let map = unsafe {
-        memmap2::MmapOptions::new().len(keymap.size as usize).map(keymap.fd.as_raw_fd()).ok()?
+        memmap2::MmapOptions::new()
+            .len(keymap.size as usize)
+            .map(keymap.fd.as_raw_fd())
+            .ok()?
     };
-    let text = std::ffi::CStr::from_bytes_until_nul(&map).ok()?.to_str().ok()?;
+    let text = std::ffi::CStr::from_bytes_until_nul(&map)
+        .ok()?
+        .to_str()
+        .ok()?;
     policy_from_text(text)
 }
 
@@ -508,7 +612,10 @@ fn policy_from_text(text: &str) -> Option<KeymapPolicy> {
 }
 
 fn now_micros() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 fn button_state(pressed: bool) -> ei::button::ButtonState {
@@ -550,7 +657,11 @@ mod tests {
         let shift = policy_shift(&policy).expect("shift keycode");
         assert!(shift >= 1, "a real evdev keycode");
         // A keysym US cannot type has no base hit.
-        assert_eq!(policy.resolve(0x0439), None, "Cyrillic short-i absent from us");
+        assert_eq!(
+            policy.resolve(0x0439),
+            None,
+            "Cyrillic short-i absent from us"
+        );
     }
 
     /// The injector, run against a minimal in-process EIS server, emits the protocol a
@@ -622,7 +733,10 @@ mod tests {
                         }
                         EisRequest::DeviceStartEmulating(_) => log.push("start".into()),
                         EisRequest::PointerMotionAbsolute(m) => {
-                            log.push(format!("abs {} {}", m.dx_absolute as i32, m.dy_absolute as i32));
+                            log.push(format!(
+                                "abs {} {}",
+                                m.dx_absolute as i32, m.dy_absolute as i32
+                            ));
                         }
                         EisRequest::Button(b) => log.push(format!(
                             "button {} {}",
@@ -643,7 +757,8 @@ mod tests {
             }
         });
 
-        let injector = EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
+        let injector =
+            EiInjector::spawn(OwnedFd::from(client_sock)).expect("injector binds a device");
         injector.pointer_motion_abs(400.0, 300.0);
         injector.pointer_button(0x110, true);
         injector.pointer_button(0x110, false);
@@ -655,12 +770,33 @@ mod tests {
         server.join().unwrap();
 
         let got = seen.lock().unwrap().clone();
-        assert!(got.contains(&"start".to_string()), "start_emulating: {got:?}");
-        assert!(got.contains(&"abs 400 300".to_string()), "absolute motion: {got:?}");
-        assert!(got.contains(&"button 272 true".to_string()), "left press: {got:?}");
-        assert!(got.contains(&"button 272 false".to_string()), "left release: {got:?}");
-        assert!(got.contains(&"key 30 true".to_string()), "key press: {got:?}");
-        assert!(got.contains(&"key 30 false".to_string()), "key release: {got:?}");
-        assert!(got.contains(&"scroll 0 120".to_string()), "discrete scroll: {got:?}");
+        assert!(
+            got.contains(&"start".to_string()),
+            "start_emulating: {got:?}"
+        );
+        assert!(
+            got.contains(&"abs 400 300".to_string()),
+            "absolute motion: {got:?}"
+        );
+        assert!(
+            got.contains(&"button 272 true".to_string()),
+            "left press: {got:?}"
+        );
+        assert!(
+            got.contains(&"button 272 false".to_string()),
+            "left release: {got:?}"
+        );
+        assert!(
+            got.contains(&"key 30 true".to_string()),
+            "key press: {got:?}"
+        );
+        assert!(
+            got.contains(&"key 30 false".to_string()),
+            "key release: {got:?}"
+        );
+        assert!(
+            got.contains(&"scroll 0 120".to_string()),
+            "discrete scroll: {got:?}"
+        );
     }
 }

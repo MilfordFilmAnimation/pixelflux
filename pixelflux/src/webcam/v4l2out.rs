@@ -67,7 +67,8 @@ struct V4l2Format {
 }
 
 const VIDIOC_QUERYCAP: libc::c_ulong = ioc(IOC_READ, b'V', 0, mem::size_of::<V4l2Capability>());
-const VIDIOC_S_FMT: libc::c_ulong = ioc(IOC_READ | IOC_WRITE, b'V', 5, mem::size_of::<V4l2Format>());
+const VIDIOC_S_FMT: libc::c_ulong =
+    ioc(IOC_READ | IOC_WRITE, b'V', 5, mem::size_of::<V4l2Format>());
 
 fn query_cap(fd: libc::c_int) -> io::Result<V4l2Capability> {
     let mut cap: V4l2Capability = unsafe { mem::zeroed() };
@@ -83,7 +84,11 @@ fn cstr_field(b: &[u8]) -> String {
 }
 
 fn is_loopback_output(cap: &V4l2Capability) -> bool {
-    let caps = if cap.capabilities & V4L2_CAP_DEVICE_CAPS != 0 { cap.device_caps } else { cap.capabilities };
+    let caps = if cap.capabilities & V4L2_CAP_DEVICE_CAPS != 0 {
+        cap.device_caps
+    } else {
+        cap.capabilities
+    };
     caps & V4L2_CAP_VIDEO_OUTPUT != 0 && caps & V4L2_CAP_READWRITE != 0
 }
 
@@ -97,15 +102,21 @@ pub struct V4l2Output {
 impl V4l2Output {
     /// Open `path` for output and set the ring's format on it.
     pub fn open(path: &str, fmt: &RingFormat) -> Result<Self, String> {
-        let c_path = std::ffi::CString::new(path).map_err(|_| "device path contains NUL".to_string())?;
+        let c_path =
+            std::ffi::CString::new(path).map_err(|_| "device path contains NUL".to_string())?;
         let raw = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
         if raw < 0 {
             return Err(format!("open({}): {}", path, io::Error::last_os_error()));
         }
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let cap = query_cap(fd.as_raw_fd()).map_err(|e| format!("VIDIOC_QUERYCAP({}): {}", path, e))?;
+        let cap =
+            query_cap(fd.as_raw_fd()).map_err(|e| format!("VIDIOC_QUERYCAP({}): {}", path, e))?;
         if !is_loopback_output(&cap) {
-            return Err(format!("{} ({}) is not a writable video output device", path, cstr_field(&cap.driver)));
+            return Err(format!(
+                "{} ({}) is not a writable video output device",
+                path,
+                cstr_field(&cap.driver)
+            ));
         }
         let mut f: V4l2Format = unsafe { mem::zeroed() };
         f.type_ = V4L2_BUF_TYPE_VIDEO_OUTPUT;
@@ -116,21 +127,46 @@ impl V4l2Output {
             field: V4L2_FIELD_NONE,
             bytesperline: fmt.bytesperline,
             sizeimage: fmt.sizeimage,
-            colorspace: if fmt.fourcc == V4L2_PIX_FMT_MJPEG { V4L2_COLORSPACE_SRGB } else { V4L2_COLORSPACE_SMPTE170M },
+            colorspace: if fmt.fourcc == V4L2_PIX_FMT_MJPEG {
+                V4L2_COLORSPACE_SRGB
+            } else {
+                V4L2_COLORSPACE_SMPTE170M
+            },
             private: 0,
             flags: 0,
             ycbcr_enc: 0,
             quantization: 0,
             xfer_func: 0,
         };
-        if unsafe { libc::ioctl(fd.as_raw_fd(), VIDIOC_S_FMT as _, &mut f as *mut V4l2Format) } != 0 {
-            return Err(format!("VIDIOC_S_FMT({}): {}", path, io::Error::last_os_error()));
+        if unsafe { libc::ioctl(fd.as_raw_fd(), VIDIOC_S_FMT as _, &mut f as *mut V4l2Format) } != 0
+        {
+            return Err(format!(
+                "VIDIOC_S_FMT({}): {}",
+                path,
+                io::Error::last_os_error()
+            ));
         }
-        if f.pix.pixelformat != fmt.fourcc || f.pix.width != fmt.width || f.pix.height != fmt.height {
-            return Err(format!("{} refused {}x{} {}", path, fmt.width, fmt.height, fourcc_str(fmt.fourcc)));
+        if f.pix.pixelformat != fmt.fourcc || f.pix.width != fmt.width || f.pix.height != fmt.height
+        {
+            return Err(format!(
+                "{} refused {}x{} {}",
+                path,
+                fmt.width,
+                fmt.height,
+                fourcc_str(fmt.fourcc)
+            ));
         }
-        let frame_bytes = if f.pix.sizeimage != 0 { f.pix.sizeimage as usize } else { fmt.sizeimage as usize };
-        Ok(V4l2Output { fd, path: path.to_string(), frame_bytes, failed: false })
+        let frame_bytes = if f.pix.sizeimage != 0 {
+            f.pix.sizeimage as usize
+        } else {
+            fmt.sizeimage as usize
+        };
+        Ok(V4l2Output {
+            fd,
+            path: path.to_string(),
+            frame_bytes,
+            failed: false,
+        })
     }
 
     /// First v4l2loopback output device among `/dev/video0..63`, if any.
@@ -138,16 +174,22 @@ impl V4l2Output {
         for n in 0..64 {
             let path = format!("/dev/video{}", n);
             let c_path = std::ffi::CString::new(path.clone()).ok()?;
-            let raw = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK) };
+            let raw = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
             if raw < 0 {
                 continue;
             }
             let fd = unsafe { OwnedFd::from_raw_fd(raw) };
             if let Ok(cap) = query_cap(fd.as_raw_fd())
                 && cstr_field(&cap.driver).starts_with("v4l2 loopback")
-                && is_loopback_output(&cap) {
-                    return Some(path);
-                }
+                && is_loopback_output(&cap)
+            {
+                return Some(path);
+            }
         }
         None
     }
@@ -172,10 +214,16 @@ impl V4l2Output {
             if matches!(err.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
                 return;
             }
-            eprintln!("[webcam] {}: write failed ({}); kernel device sink disabled", self.path, err);
+            eprintln!(
+                "[webcam] {}: write failed ({}); kernel device sink disabled",
+                self.path, err
+            );
             self.failed = true;
         } else if (n as usize) < len {
-            eprintln!("[webcam] {}: short write ({} of {}); kernel device sink disabled", self.path, n, len);
+            eprintln!(
+                "[webcam] {}: short write ({} of {}); kernel device sink disabled",
+                self.path, n, len
+            );
             self.failed = true;
         }
     }

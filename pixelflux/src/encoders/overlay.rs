@@ -14,14 +14,14 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            element::{
-                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-                Kind,
-            },
             ImportMem, Renderer, Texture,
+            element::{
+                Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+            },
         },
     },
-    utils::{Point, Rectangle, Transform, Physical},
+    utils::{Physical, Point, Rectangle, Transform},
 };
 use std::path::Path;
 
@@ -225,7 +225,8 @@ impl OverlayState {
     /// The loaded image and its size, for a backend that hands it to the GPU once instead of
     /// blending it into every frame's host pixels. Straight alpha, R,G,B,A per pixel.
     pub fn sprite(&self) -> Option<(&[u8], u32, u32)> {
-        self.wm_loaded.then_some((self.wm_pixels.as_slice(), self.wm_width, self.wm_height))
+        self.wm_loaded
+            .then_some((self.wm_pixels.as_slice(), self.wm_width, self.wm_height))
     }
 
     /// Where [`Self::update_position`] last put the image's top-left corner in the frame.
@@ -313,7 +314,8 @@ impl OverlayState {
         R::TextureId: Texture + Clone + Send + 'static,
     {
         if let Some(buffer) = &self.render_buffer {
-            let location = Point::<f64, Physical>::from((self.wm_pos_x as f64, self.wm_pos_y as f64));
+            let location =
+                Point::<f64, Physical>::from((self.wm_pos_x as f64, self.wm_pos_y as f64));
             MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location,
@@ -354,7 +356,9 @@ impl OverlayState {
 
         let hot: Point<i32, smithay::utils::Physical> =
             (image.xhot as i32, image.yhot as i32).into();
-        let phys_pos = pos.to_physical(smithay::utils::Scale::from(scale)).to_i32_round();
+        let phys_pos = pos
+            .to_physical(smithay::utils::Scale::from(scale))
+            .to_i32_round();
 
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,

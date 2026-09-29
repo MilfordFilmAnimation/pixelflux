@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::encoders::software::EncodedStripe;
 use crate::RustCaptureSettings;
+use crate::encoders::software::EncodedStripe;
 
 /// The description half of a report. `capture_reason` says why the capture is not zero-copy
 /// and `encoder_reason` why the encoder is not hardware; both are empty where there is
@@ -200,7 +200,9 @@ pub fn stream(
     record(|info| {
         let (name, hardware) = match backend {
             Some((name, hardware)) => (name, hardware),
-            None if settings.codec.is_video() => (crate::encoders::software_library(settings.codec), false),
+            None if settings.codec.is_video() => {
+                (crate::encoders::software_library(settings.codec), false)
+            }
             None => ("turbojpeg", false),
         };
         info.encoder = name.to_string();
@@ -234,7 +236,11 @@ pub fn set_renderer(renderer: Renderer) {
 }
 
 pub fn renderer() -> Renderer {
-    RENDERER.get_or_init(Default::default).lock().unwrap().clone()
+    RENDERER
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .clone()
 }
 
 static WAYLAND: OnceLock<Mutex<HashMap<u32, Arc<StreamReport>>>> = OnceLock::new();
@@ -265,7 +271,10 @@ mod tests {
         let info = report.info();
         assert_eq!(info.backend, "x11");
         assert_eq!(info.capture, "XShm");
-        assert_eq!(info.capture_reason, "NvFBC: the codec is JPEG; DRI3: no DRI3");
+        assert_eq!(
+            info.capture_reason,
+            "NvFBC: the codec is JPEG; DRI3: no DRI3"
+        );
         assert!(!info.zero_copy_available);
         {
             let _scope = enter(&report);

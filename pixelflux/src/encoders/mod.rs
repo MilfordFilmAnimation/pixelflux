@@ -16,12 +16,6 @@ pub mod codec;
 pub mod frame_rate;
 /// Software HEVC: x265 with the `gpl` feature, kvazaar without it.
 pub mod hevc;
-/// Tegra hardware video encoding through the vendor V4L2 encoder, loaded at runtime: the only path to a
-/// Jetson's encoder, which carries no `libnvidia-encode` and no render node driver. Built for
-/// `aarch64` alone — the vendor libraries and the encoder behind them exist on no other
-/// architecture, so an x86_64 build carries none of this.
-#[cfg(target_arch = "aarch64")]
-pub mod tegra;
 /// NVIDIA NVENC hardware H.264 / HEVC / AV1 encoder loaded via runtime `libcuda` /
 /// `libnvidia-encode`.
 pub mod nvenc;
@@ -42,14 +36,20 @@ pub mod software;
 pub mod sps;
 /// Software AV1 through SVT-AV1.
 pub mod svtav1;
-/// VA-API hardware sessions on a DRM render node, driven through libva directly.
-pub mod vaapi;
-/// Software VP8 and VP9 through libvpx.
-pub mod vpx;
+/// Tegra hardware video encoding through the vendor V4L2 encoder, loaded at runtime: the only path to a
+/// Jetson's encoder, which carries no `libnvidia-encode` and no render node driver. Built for
+/// `aarch64` alone — the vendor libraries and the encoder behind them exist on no other
+/// architecture, so an x86_64 build carries none of this.
+#[cfg(target_arch = "aarch64")]
+pub mod tegra;
 /// Hardware H.264 through a generic stateful V4L2 M2M encoder: boards whose encoder sits
 /// behind the kernel's own interface rather than a vendor library or a render node, such as
 /// a Raspberry Pi 4, RK356x, or i.MX8M. Built everywhere, since the interface is the kernel's.
 pub mod v4l2m2m;
+/// VA-API hardware sessions on a DRM render node, driven through libva directly.
+pub mod vaapi;
+/// Software VP8 and VP9 through libvpx.
+pub mod vpx;
 
 pub use codec::*;
 
@@ -102,15 +102,24 @@ type ProbeAnswer = Result<HardwareEncoders, (&'static str, String)>;
 fn probe_node(encode_node_index: i32) -> ProbeAnswer {
     static PROBED: OnceLock<Mutex<HashMap<i32, ProbeAnswer>>> = OnceLock::new();
     let node = encode_node_index.max(0);
-    let mut probed = PROBED.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut probed = PROBED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     if let Some(answer) = probed.get(&node) {
         return answer.clone();
     }
     #[cfg(target_arch = "aarch64")]
     if tegra::available() {
-        let served: HardwareEncoders = tegra::served().into_iter().map(|c| (c, "tegra", false)).collect();
+        let served: HardwareEncoders = tegra::served()
+            .into_iter()
+            .map(|c| (c, "tegra", false))
+            .collect();
         let names: Vec<&str> = served.iter().map(|(c, ..)| c.display()).collect();
-        println!("[pixelflux] Render node {node} encodes {} on tegra.", names.join(", "));
+        println!(
+            "[pixelflux] Render node {node} encodes {} on tegra.",
+            names.join(", ")
+        );
         probed.insert(node, Ok(served.clone()));
         return Ok(served);
     }
@@ -121,7 +130,10 @@ fn probe_node(encode_node_index: i32) -> ProbeAnswer {
         ("vaapi", vaapi::probe_codecs(node))
     };
     let answer = match codecs {
-        Ok(codecs) => Ok(codecs.into_iter().map(|(codec, fullcolor)| (codec, backend, fullcolor)).collect()),
+        Ok(codecs) => Ok(codecs
+            .into_iter()
+            .map(|(codec, fullcolor)| (codec, backend, fullcolor))
+            .collect()),
         Err(e) => {
             eprintln!("[pixelflux] No hardware encoder on render node {node} ({backend}): {e}");
             Err((backend, e))
@@ -134,7 +146,10 @@ fn probe_node(encode_node_index: i32) -> ProbeAnswer {
         let codecs = v4l2m2m::served();
         let served: HardwareEncoders = codecs.iter().map(|&c| (c, "v4l2m2m", false)).collect();
         let names: Vec<&str> = codecs.iter().map(|c| c.display()).collect();
-        println!("[pixelflux] A stateful V4L2 M2M encoder serves {}.", names.join(", "));
+        println!(
+            "[pixelflux] A stateful V4L2 M2M encoder serves {}.",
+            names.join(", ")
+        );
         probed.insert(node, Ok(served.clone()));
         return Ok(served);
     }
@@ -142,7 +157,10 @@ fn probe_node(encode_node_index: i32) -> ProbeAnswer {
         && !served.is_empty()
     {
         let names: Vec<&str> = served.iter().map(|(codec, ..)| codec.display()).collect();
-        println!("[pixelflux] Render node {node} encodes {} on {backend}.", names.join(", "));
+        println!(
+            "[pixelflux] Render node {node} encodes {} on {backend}.",
+            names.join(", ")
+        );
     }
     if !matches!(&answer, Err((_, e)) if e == nvenc::SESSIONS_TAKEN) {
         probed.insert(node, answer.clone());
@@ -155,7 +173,10 @@ fn probe_node(encode_node_index: i32) -> ProbeAnswer {
 /// SVT-AV1 encode such a request 4:2:0.
 pub fn software_fullcolor(codec: Codec) -> bool {
     match software_encoder(codec) {
-        Some(enc) => matches!(enc.library, "x264" | "x265") || (codec == Codec::Vp9 && enc.library == "libvpx" && vpx::encodes_444()),
+        Some(enc) => {
+            matches!(enc.library, "x264" | "x265")
+                || (codec == Codec::Vp9 && enc.library == "libvpx" && vpx::encodes_444())
+        }
         None => false,
     }
 }
@@ -179,13 +200,27 @@ pub fn software_encoder(codec: Codec) -> Option<SoftwareEncoder> {
     static ENCODES: OnceLock<[bool; 5]> = OnceLock::new();
     let library = match codec {
         Codec::Jpeg => return None,
-        Codec::H264 => if cfg!(feature = "gpl") { "x264" } else { "openh264" },
-        Codec::H265 => if cfg!(feature = "gpl") { "x265" } else { "kvazaar" },
+        Codec::H264 => {
+            if cfg!(feature = "gpl") {
+                "x264"
+            } else {
+                "openh264"
+            }
+        }
+        Codec::H265 => {
+            if cfg!(feature = "gpl") {
+                "x265"
+            } else {
+                "kvazaar"
+            }
+        }
         Codec::Vp8 | Codec::Vp9 => "libvpx",
         Codec::Av1 => "svt-av1",
     };
-    let encodes = ENCODES.get_or_init(|| Codec::VIDEO.map(|c| c == Codec::H264 || encodes_in_child(c)));
-    encodes[Codec::VIDEO.iter().position(|&c| c == codec).unwrap()].then_some(SoftwareEncoder { library })
+    let encodes =
+        ENCODES.get_or_init(|| Codec::VIDEO.map(|c| c == Codec::H264 || encodes_in_child(c)));
+    encodes[Codec::VIDEO.iter().position(|&c| c == codec).unwrap()]
+        .then_some(SoftwareEncoder { library })
 }
 
 /// Whether opening `codec`'s software session on a small frame and encoding one leaves a
@@ -195,13 +230,28 @@ pub fn software_encoder(codec: Codec) -> Option<SoftwareEncoder> {
 fn encodes_in_child(codec: Codec) -> bool {
     survives_in_child(|| {
         // The child converts on a pool of its own: the parent's rayon workers do not exist in it.
-        let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(1).build() else { return };
+        let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(1).build() else {
+            return;
+        };
         pool.install(|| {
-            let settings = RustCaptureSettings { width: 256, height: 128, ..Default::default() };
-            let Ok(mut session) = software_session(&settings, codec, false) else { return };
+            let settings = RustCaptureSettings {
+                width: 256,
+                height: 128,
+                ..Default::default()
+            };
+            let Ok(mut session) = software_session(&settings, codec, false) else {
+                return;
+            };
             let frame = vec![0u8; 256 * 128 * 4];
             for n in 0..64 {
-                let packet = session.encode_host(&frame, 256 * 4, false, n, settings.video_crf as u32, n == 0);
+                let packet = session.encode_host(
+                    &frame,
+                    256 * 4,
+                    false,
+                    n,
+                    settings.video_crf as u32,
+                    n == 0,
+                );
                 if !matches!(packet, Ok(p) if p.is_empty()) {
                     break;
                 }
@@ -220,7 +270,9 @@ fn encodes_in_child(codec: Codec) -> bool {
 fn survives_in_child(f: impl FnOnce()) -> bool {
     let mut live = svtav1::LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
     while *live > 0 {
-        live = svtav1::RELEASED.wait(live).unwrap_or_else(|e| e.into_inner());
+        live = svtav1::RELEASED
+            .wait(live)
+            .unwrap_or_else(|e| e.into_inner());
     }
     let pid = unsafe { libc::fork() };
     drop(live);
@@ -266,7 +318,8 @@ pub(crate) const HELD_KEY_BUDGET_S: f64 = 1.0;
 /// came out larger than a budget of `cap` bytes; `None` where it fits. A quality index is a
 /// quantizer on the H.26x scale, where six steps halve the bits.
 pub(crate) fn held_key_retry(crf: u32, len: usize, cap: usize) -> Option<u32> {
-    (len > cap && cap > 0).then(|| (crf + (6.0 * (len as f64 / cap as f64).log2()).ceil() as u32).min(51))
+    (len > cap && cap > 0)
+        .then(|| (crf + (6.0 * (len as f64 / cap as f64).log2()).ceil() as u32).min(51))
 }
 
 /// The quality index a held key frame of a constant-rate session is first coded at, from `crf`,
@@ -367,7 +420,11 @@ pub fn rate_desc(settings: &RustCaptureSettings, fixed: Option<&str>) -> String 
 /// control codes coarser than the paint-over quantizer: held at it where the session holds a frame
 /// at a quantizer (`holds`, `FrameEncoder::holds_quantizer`), and as a refresh and its burst at the
 /// rate control's own quality elsewhere.
-pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>, holds: bool) -> Option<String> {
+pub fn paint_over_desc(
+    settings: &RustCaptureSettings,
+    fixed: Option<&str>,
+    holds: bool,
+) -> Option<String> {
     if !settings.use_paint_over_quality {
         return None;
     }
@@ -388,7 +445,10 @@ pub fn paint_over_desc(settings: &RustCaptureSettings, fixed: Option<&str>, hold
         return None;
     };
     Some(if at_paint_over {
-        format!("PaintOver CRF: {} (Burst: {burst}f)", settings.video_paintover_crf)
+        format!(
+            "PaintOver CRF: {} (Burst: {burst}f)",
+            settings.video_paintover_crf
+        )
     } else {
         format!("PaintOver Burst: {burst}f")
     })
@@ -402,8 +462,16 @@ mod tests {
     /// bitrate target in either mode, and every other session runs its mode, CRF naming no bitrate.
     #[test]
     fn the_rate_field_names_what_the_backend_applies() {
-        let crf = RustCaptureSettings { codec: Codec::H264, video_crf: 25, video_bitrate_kbps: 8000, ..Default::default() };
-        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
+        let crf = RustCaptureSettings {
+            codec: Codec::H264,
+            video_crf: 25,
+            video_bitrate_kbps: 8000,
+            ..Default::default()
+        };
+        let cbr = RustCaptureSettings {
+            video_cbr_mode: true,
+            ..crf.clone()
+        };
         assert_eq!(rate_desc(&crf, None), "CRF: 25");
         assert_eq!(rate_desc(&cbr, None), "CBR 8000");
         for settings in [&crf, &cbr] {
@@ -428,23 +496,85 @@ mod tests {
             video_streaming_mode: false,
             ..Default::default()
         };
-        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf.clone() };
-        let turbo = |s: &RustCaptureSettings| RustCaptureSettings { video_streaming_mode: true, ..s.clone() };
+        let cbr = RustCaptureSettings {
+            video_cbr_mode: true,
+            ..crf.clone()
+        };
+        let turbo = |s: &RustCaptureSettings| RustCaptureSettings {
+            video_streaming_mode: true,
+            ..s.clone()
+        };
         for settings in [&crf, &turbo(&crf)] {
-            assert_eq!(paint_over_desc(settings, None, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
-            assert_eq!(paint_over_desc(settings, None, false).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
-            assert_eq!(paint_over_desc(settings, Some("VBR"), false).as_deref(), Some("PaintOver Burst: 5f"));
+            assert_eq!(
+                paint_over_desc(settings, None, true).as_deref(),
+                Some("PaintOver CRF: 18 (Burst: 5f)")
+            );
+            assert_eq!(
+                paint_over_desc(settings, None, false).as_deref(),
+                Some("PaintOver CRF: 18 (Burst: 5f)")
+            );
+            assert_eq!(
+                paint_over_desc(settings, Some("VBR"), false).as_deref(),
+                Some("PaintOver Burst: 5f")
+            );
         }
         for settings in [&cbr, &turbo(&cbr)] {
-            assert_eq!(paint_over_desc(settings, None, true).as_deref(), Some("PaintOver CRF: 18 (Burst: 5f)"));
-            assert_eq!(paint_over_desc(settings, None, false).as_deref(), Some("PaintOver Burst: 5f"));
-            assert_eq!(paint_over_desc(settings, Some("CBR"), false).as_deref(), Some("PaintOver Burst: 5f"));
+            assert_eq!(
+                paint_over_desc(settings, None, true).as_deref(),
+                Some("PaintOver CRF: 18 (Burst: 5f)")
+            );
+            assert_eq!(
+                paint_over_desc(settings, None, false).as_deref(),
+                Some("PaintOver Burst: 5f")
+            );
+            assert_eq!(
+                paint_over_desc(settings, Some("CBR"), false).as_deref(),
+                Some("PaintOver Burst: 5f")
+            );
         }
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..crf.clone() }, None, true), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..cbr.clone() }, None, false), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..crf.clone() }, None, true), None);
         assert_eq!(
-            paint_over_desc(&RustCaptureSettings { video_paintover_crf: 25, ..cbr.clone() }, None, true).as_deref(),
+            paint_over_desc(
+                &RustCaptureSettings {
+                    use_paint_over_quality: false,
+                    ..crf.clone()
+                },
+                None,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            paint_over_desc(
+                &RustCaptureSettings {
+                    use_paint_over_quality: false,
+                    ..cbr.clone()
+                },
+                None,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            paint_over_desc(
+                &RustCaptureSettings {
+                    video_paintover_crf: 25,
+                    ..crf.clone()
+                },
+                None,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            paint_over_desc(
+                &RustCaptureSettings {
+                    video_paintover_crf: 25,
+                    ..cbr.clone()
+                },
+                None,
+                true
+            )
+            .as_deref(),
             Some("PaintOver CRF: 25 (Burst: 5f)")
         );
         let jpeg = RustCaptureSettings {
@@ -454,10 +584,36 @@ mod tests {
             paint_over_trigger_frames: 15,
             ..crf.clone()
         };
-        assert_eq!(paint_over_desc(&jpeg, None, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&turbo(&jpeg), None, false).as_deref(), Some("PaintOver Q: 90 (Trigger: 15f)"));
-        assert_eq!(paint_over_desc(&RustCaptureSettings { paint_over_jpeg_quality: 40, ..jpeg.clone() }, None, false), None);
-        assert_eq!(paint_over_desc(&RustCaptureSettings { use_paint_over_quality: false, ..jpeg }, None, false), None);
+        assert_eq!(
+            paint_over_desc(&jpeg, None, false).as_deref(),
+            Some("PaintOver Q: 90 (Trigger: 15f)")
+        );
+        assert_eq!(
+            paint_over_desc(&turbo(&jpeg), None, false).as_deref(),
+            Some("PaintOver Q: 90 (Trigger: 15f)")
+        );
+        assert_eq!(
+            paint_over_desc(
+                &RustCaptureSettings {
+                    paint_over_jpeg_quality: 40,
+                    ..jpeg.clone()
+                },
+                None,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            paint_over_desc(
+                &RustCaptureSettings {
+                    use_paint_over_quality: false,
+                    ..jpeg
+                },
+                None,
+                false
+            ),
+            None
+        );
     }
 
     /// A held key frame past its budget is coded again six quantizer steps coarser for each
@@ -479,8 +635,16 @@ mod tests {
         assert_eq!(held_key_start(18, None, 1000), 18);
         assert_eq!(held_key_start(18, Some((800, 18)), 1000), 18);
         assert_eq!(held_key_start(18, Some((2000, 18)), 1000), 24);
-        assert_eq!(held_key_start(18, Some((1000, 24)), 1000), 24, "a retried key's own index");
-        assert_eq!(held_key_start(18, Some((100, 40)), 1000), 18, "too far to say");
+        assert_eq!(
+            held_key_start(18, Some((1000, 24)), 1000),
+            24,
+            "a retried key's own index"
+        );
+        assert_eq!(
+            held_key_start(18, Some((100, 40)), 1000),
+            18,
+            "too far to say"
+        );
     }
 
     /// A session lands on the codec it asked for, or on the next video codec this host serves;
@@ -494,9 +658,18 @@ mod tests {
             use_cpu: true,
             ..Default::default()
         };
-        let encoder = select_frame_encoder(&mut settings, FrameSource::Host { rgba: false }, None, "test");
+        let encoder = select_frame_encoder(
+            &mut settings,
+            FrameSource::Host { rgba: false },
+            None,
+            "test",
+        );
         println!("asked for av1, landed on {}", settings.codec.display());
-        assert_ne!(settings.codec, Codec::Jpeg, "this build encodes video in software");
+        assert_ne!(
+            settings.codec,
+            Codec::Jpeg,
+            "this build encodes video in software"
+        );
         assert!(software_encoder(settings.codec).is_some());
         // H.264 comes back as the caller's own striped path rather than a full-frame session.
         assert!(encoder.is_some() || settings.codec == Codec::H264);
@@ -517,12 +690,23 @@ mod tests {
         assert_eq!(fallback_codecs(Codec::Av1, &[], false), software);
         let mut h264_first = vec![Codec::H264];
         h264_first.extend(software.iter().copied());
-        assert_eq!(fallback_codecs(Codec::Av1, &[], true), h264_first, "one x264 session leads the software rungs");
-        assert_eq!(fallback_codecs(Codec::Av1, &[Codec::H264], false), h264_first, "an engine's H.264 leads either way");
+        assert_eq!(
+            fallback_codecs(Codec::Av1, &[], true),
+            h264_first,
+            "one x264 session leads the software rungs"
+        );
+        assert_eq!(
+            fallback_codecs(Codec::Av1, &[Codec::H264], false),
+            h264_first,
+            "an engine's H.264 leads either way"
+        );
         assert!(!fallback_codecs(Codec::Av1, &[Codec::Av1], true).contains(&Codec::Av1));
         // An engine's codecs go most efficient first, whatever the build encodes in software.
         let engine = [Codec::H264, Codec::H265, Codec::Av1];
-        assert_eq!(&fallback_codecs(Codec::Vp8, &engine, true)[..3], &[Codec::Av1, Codec::H265, Codec::H264]);
+        assert_eq!(
+            &fallback_codecs(Codec::Vp8, &engine, true)[..3],
+            &[Codec::Av1, Codec::H265, Codec::H264]
+        );
     }
 
     /// The probe of every software encoder prints nothing where the host sees it, though a
@@ -537,12 +721,21 @@ mod tests {
             return;
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "encoders::tests::the_software_probe_prints_nothing", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "encoders::tests::the_software_probe_prints_nothing",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env("PIXELFLUX_PROBE_CHILD", "1")
             .output()
             .unwrap();
         assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"));
-        assert_eq!(String::from_utf8_lossy(&out.stderr), "", "the probes wrote to the host's stderr");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "",
+            "the probes wrote to the host's stderr"
+        );
     }
 
     /// A capture start takes what its node's probe settled rather than opening the backend
@@ -557,7 +750,9 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     None
                 }
-                Err((backend, e)) => Some(format!("{} VP8 did not open: {e}", backend.to_uppercase())),
+                Err((backend, e)) => {
+                    Some(format!("{} VP8 did not open: {e}", backend.to_uppercase()))
+                }
                 Ok(_) => Some("render node 99 has no VP8 engine".to_string()),
             })
             .expect("the device had no NVENC session to spare for 30 s");
@@ -570,8 +765,16 @@ mod tests {
             encode_node_index: 99,
             ..Default::default()
         };
-        let encoder = select_frame_encoder(&mut settings, FrameSource::Host { rgba: false }, None, "test");
-        assert!(encoder.is_some_and(|enc| !enc.is_hardware()), "VP8 comes up in software");
+        let encoder = select_frame_encoder(
+            &mut settings,
+            FrameSource::Host { rgba: false },
+            None,
+            "test",
+        );
+        assert!(
+            encoder.is_some_and(|enc| !enc.is_hardware()),
+            "VP8 comes up in software"
+        );
         assert_eq!(report.info().encoder_reason, settled);
     }
 
@@ -579,9 +782,18 @@ mod tests {
     /// AV1 and VP8 encode 4:2:0 whatever is asked.
     #[test]
     fn software_fullcolor_follows_the_library() {
-        assert_eq!(software_fullcolor(Codec::H264), software_library(Codec::H264) == "x264");
-        assert_eq!(software_fullcolor(Codec::H265), software_library(Codec::H265) == "x265");
-        assert_eq!(software_fullcolor(Codec::Vp9), software_library(Codec::Vp9) == "libvpx" && vpx::encodes_444());
+        assert_eq!(
+            software_fullcolor(Codec::H264),
+            software_library(Codec::H264) == "x264"
+        );
+        assert_eq!(
+            software_fullcolor(Codec::H265),
+            software_library(Codec::H265) == "x265"
+        );
+        assert_eq!(
+            software_fullcolor(Codec::Vp9),
+            software_library(Codec::Vp9) == "libvpx" && vpx::encodes_444()
+        );
         assert!(!software_fullcolor(Codec::Av1) && !software_fullcolor(Codec::Vp8));
     }
 
@@ -600,7 +812,13 @@ mod tests {
     #[test]
     fn the_av1_probe_survives_sessions_opening_beside_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let settings = RustCaptureSettings { width: 64, height: 64, target_fps: 30.0, codec: Codec::Av1, ..Default::default() };
+        let settings = RustCaptureSettings {
+            width: 64,
+            height: 64,
+            target_fps: 30.0,
+            codec: Codec::Av1,
+            ..Default::default()
+        };
         let stop = AtomicBool::new(false);
         std::thread::scope(|s| {
             for _ in 0..4 {
@@ -623,11 +841,25 @@ mod tests {
         use rayon::prelude::*;
         let _: u32 = (0..8u32).into_par_iter().sum();
         let h264 = software_encoder(Codec::H264).expect("H.264 is always served");
-        assert_eq!(h264.library, if cfg!(feature = "gpl") { "x264" } else { "openh264" });
+        assert_eq!(
+            h264.library,
+            if cfg!(feature = "gpl") {
+                "x264"
+            } else {
+                "openh264"
+            }
+        );
         assert_eq!(software_library(Codec::H264), h264.library);
         assert_eq!(software_library(Codec::Jpeg), "none");
         assert_eq!(software_encoder(Codec::Jpeg), None);
-        assert_eq!(software_library(Codec::H265), if cfg!(feature = "gpl") { "x265" } else { "kvazaar" });
+        assert_eq!(
+            software_library(Codec::H265),
+            if cfg!(feature = "gpl") {
+                "x265"
+            } else {
+                "kvazaar"
+            }
+        );
         assert_eq!(software_library(Codec::Vp8), "libvpx");
         assert_eq!(software_library(Codec::Vp9), "libvpx");
         assert_eq!(software_library(Codec::Av1), "svt-av1");
@@ -649,15 +881,29 @@ mod tests {
         assert_eq!(colorspace_desc(false, true), "I420 (Full Range)");
         assert_eq!(colorspace_desc(false, false), "I420 (Limited Range)");
 
-        let mut settings = RustCaptureSettings { codec: Codec::H264, video_fullcolor: false, ..Default::default() };
-        assert!(!session_full_range(None, &settings), "striped 4:2:0 converts at limited range");
-        assert_eq!(colorspace_desc(session_fullcolor(None, &settings),
-                                   session_full_range(None, &settings)),
-                   "I420 (Limited Range)");
+        let mut settings = RustCaptureSettings {
+            codec: Codec::H264,
+            video_fullcolor: false,
+            ..Default::default()
+        };
+        assert!(
+            !session_full_range(None, &settings),
+            "striped 4:2:0 converts at limited range"
+        );
+        assert_eq!(
+            colorspace_desc(
+                session_fullcolor(None, &settings),
+                session_full_range(None, &settings)
+            ),
+            "I420 (Limited Range)"
+        );
 
         settings.video_fullcolor = true;
-        assert_eq!(session_full_range(None, &settings), software_fullcolor(Codec::H264),
-                   "striped 4:4:4 converts at full range where the build carries it");
+        assert_eq!(
+            session_full_range(None, &settings),
+            software_fullcolor(Codec::H264),
+            "striped 4:4:4 converts at full range where the build carries it"
+        );
     }
 }
 
@@ -706,7 +952,10 @@ impl FrameEncoder {
 
     /// Whether the session encodes on a GPU or a hardware engine.
     pub fn is_hardware(&self) -> bool {
-        !matches!(self, FrameEncoder::Vpx(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_))
+        !matches!(
+            self,
+            FrameEncoder::Vpx(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_)
+        )
     }
 
     /// The rate control the session runs whatever mode it was given, for a backend that has one
@@ -776,14 +1025,28 @@ impl FrameEncoder {
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
         match self {
-            FrameEncoder::Nvenc(enc) => enc.encode_cpu_packed(pixels, stride, rgba, frame_number, qp, force_idr),
-            FrameEncoder::Vaapi(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
-            FrameEncoder::Vpx(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
-            FrameEncoder::Hevc(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
-            FrameEncoder::Av1(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
+            FrameEncoder::Nvenc(enc) => {
+                enc.encode_cpu_packed(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            FrameEncoder::Vaapi(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            FrameEncoder::Vpx(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            FrameEncoder::Hevc(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            FrameEncoder::Av1(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
             #[cfg(target_arch = "aarch64")]
-            FrameEncoder::Tegra(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
-            FrameEncoder::V4l2m2m(enc) => enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr),
+            FrameEncoder::Tegra(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
+            FrameEncoder::V4l2m2m(enc) => {
+                enc.encode_host(pixels, stride, rgba, frame_number, qp, force_idr)
+            }
         }
     }
 
@@ -871,7 +1134,11 @@ impl FrameEncoder {
     /// reference: whole and labeled `encoded` from a session that hands back the frame it
     /// encoded, one unit per earlier frame from one that hands them back late (Tegra), so what a
     /// consumer reports lost is the unit it dropped and nothing else.
-    pub fn delivered_units(&self, data: Vec<u8>, encoded: u16) -> Vec<(Vec<u8>, u16, reference::Reference)> {
+    pub fn delivered_units(
+        &self,
+        data: Vec<u8>,
+        encoded: u16,
+    ) -> Vec<(Vec<u8>, u16, reference::Reference)> {
         #[cfg(target_arch = "aarch64")]
         if let FrameEncoder::Tegra(enc) = self {
             match enc.delivered_units() {
@@ -935,18 +1202,27 @@ impl FrameEncoder {
         match self {
             FrameEncoder::Nvenc(enc) => enc.encode(dmabuf, frame_number, qp, force_idr),
             FrameEncoder::Vaapi(enc) => enc.encode_dmabuf(dmabuf, frame_number, qp, force_idr),
-            _ => Err(format!("the {} session takes host frames", self.backend_name())),
+            _ => Err(format!(
+                "the {} session takes host frames",
+                self.backend_name()
+            )),
         }
     }
 }
 
 /// The full-frame software session of `codec` on host frames in the byte order `rgba` names.
-pub fn software_session(settings: &RustCaptureSettings, codec: Codec, rgba: bool) -> Result<FrameEncoder, String> {
+pub fn software_session(
+    settings: &RustCaptureSettings,
+    codec: Codec,
+    rgba: bool,
+) -> Result<FrameEncoder, String> {
     Ok(match codec {
         Codec::Vp8 | Codec::Vp9 => FrameEncoder::Vpx(vpx::VpxEncoder::new(settings, codec, rgba)?),
         Codec::H265 => FrameEncoder::Hevc(hevc::HevcEncoder::new(settings, rgba)?),
         Codec::Av1 => FrameEncoder::Av1(svtav1::SvtAv1Encoder::new(settings, rgba)?),
-        Codec::H264 | Codec::Jpeg => return Err(format!("{} takes the striped path", codec.display())),
+        Codec::H264 | Codec::Jpeg => {
+            return Err(format!("{} takes the striped path", codec.display()));
+        }
     })
 }
 
@@ -1012,16 +1288,25 @@ pub fn select_frame_encoder(
     let hardware: Vec<Codec> = if settings.use_cpu || settings.encode_node_index == -1 {
         Vec::new()
     } else {
-        hardware_encoders(settings.encode_node_index).into_iter().map(|(codec, ..)| codec).collect()
+        hardware_encoders(settings.encode_node_index)
+            .into_iter()
+            .map(|(codec, ..)| codec)
+            .collect()
     };
-    eprintln!("[{tag}] No {} path on this host; trying the video codecs it serves.", requested.display());
+    eprintln!(
+        "[{tag}] No {} path on this host; trying the video codecs it serves.",
+        requested.display()
+    );
     for codec in fallback_codecs(requested, &hardware, settings.video_fullframe) {
         settings.codec = codec;
         if let Some(enc) = select_for_codec(settings, source, None, tag) {
             return Some(enc);
         }
         // Software H.264 is the caller's own path, one x264 session for a full-frame capture.
-        if codec == Codec::H264 && settings.video_fullframe && software_encoder(Codec::H264).is_some() {
+        if codec == Codec::H264
+            && settings.video_fullframe
+            && software_encoder(Codec::H264).is_some()
+        {
             return None;
         }
     }
@@ -1096,11 +1381,17 @@ fn select_for_codec(
                     }
                     Err(e) => {
                         eprintln!("[{tag}] Failed to init the Tegra encoder: {e}");
-                        crate::report::encoder_reason(&format!("Tegra {} did not open: {e}", codec.display()));
+                        crate::report::encoder_reason(&format!(
+                            "Tegra {} did not open: {e}",
+                            codec.display()
+                        ));
                     }
                 }
             } else {
-                crate::report::encoder_reason(&format!("the Tegra encoder has no {} engine", codec.display()));
+                crate::report::encoder_reason(&format!(
+                    "the Tegra encoder has no {} engine",
+                    codec.display()
+                ));
             }
             return software_fallback(settings, rgba, tag);
         }
@@ -1112,13 +1403,20 @@ fn select_for_codec(
         // What the node's probe settled holds for every capture start: a backend it could not
         // bring up, or a device with no engine for the codec, is not opened again.
         let settled = match probe_node(node) {
-            Err((backend, e)) if e != nvenc::SESSIONS_TAKEN => {
-                Some(format!("{} {} did not open: {e}", backend.to_uppercase(), codec.display()))
-            }
+            Err((backend, e)) if e != nvenc::SESSIONS_TAKEN => Some(format!(
+                "{} {} did not open: {e}",
+                backend.to_uppercase(),
+                codec.display()
+            )),
             Ok(served)
-                if !served.iter().any(|&(c, backend, _)| c == codec && matches!(backend, "nvenc" | "vaapi")) =>
+                if !served
+                    .iter()
+                    .any(|&(c, backend, _)| c == codec && matches!(backend, "nvenc" | "vaapi")) =>
             {
-                Some(format!("render node {node} has no {} engine", codec.display()))
+                Some(format!(
+                    "render node {node} has no {} engine",
+                    codec.display()
+                ))
             }
             _ => None,
         };
@@ -1132,10 +1430,16 @@ fn select_for_codec(
                         if resized {
                             crate::log::debug!("[{tag}] NVENC session reconfigured in place.");
                         }
-                        crate::report::hardware_encoder(enc.device_name(), driver_name(&driver), node);
+                        crate::report::hardware_encoder(
+                            enc.device_name(),
+                            driver_name(&driver),
+                            node,
+                        );
                         return Some(FrameEncoder::Nvenc(enc));
                     }
-                    Err(e) => eprintln!("[{tag}] NVENC in-place reconfigure unavailable ({e}); rebuilding."),
+                    Err(e) => eprintln!(
+                        "[{tag}] NVENC in-place reconfigure unavailable ({e}); rebuilding."
+                    ),
                 }
             }
             let egl_display = match source {
@@ -1156,7 +1460,10 @@ fn select_for_codec(
                 }
                 Err(e) => {
                     eprintln!("[{tag}] Failed to init NVENC {}: {e}", codec.display());
-                    crate::report::encoder_reason(&format!("NVENC {} did not open: {e}", codec.display()));
+                    crate::report::encoder_reason(&format!(
+                        "NVENC {} did not open: {e}",
+                        codec.display()
+                    ));
                 }
             }
         } else {
@@ -1182,7 +1489,10 @@ fn select_for_codec(
                 }
                 Err(e) => {
                     eprintln!("[{tag}] Failed to init VAAPI {}: {e}", codec.display());
-                    crate::report::encoder_reason(&format!("VAAPI {} did not open: {e}", codec.display()));
+                    crate::report::encoder_reason(&format!(
+                        "VAAPI {} did not open: {e}",
+                        codec.display()
+                    ));
                 }
             }
         }
@@ -1217,18 +1527,35 @@ fn select_for_codec(
 
 /// The codec's software encoder; `None` for H.264, whose software path is the striped one, and
 /// where the build carries none for the codec, which the ladder then falls through on.
-fn software_fallback(settings: &mut RustCaptureSettings, rgba: bool, tag: &str) -> Option<FrameEncoder> {
+fn software_fallback(
+    settings: &mut RustCaptureSettings,
+    rgba: bool,
+    tag: &str,
+) -> Option<FrameEncoder> {
     let codec = settings.codec;
     if codec == Codec::H264 {
-        println!("[{tag}] Encoder: software {} ({}).", codec.display(), software_library(Codec::H264));
+        println!(
+            "[{tag}] Encoder: software {} ({}).",
+            codec.display(),
+            software_library(Codec::H264)
+        );
         return None;
     }
     let session = software_encoder(codec)
-        .ok_or_else(|| format!("the {} encoder does not run on this machine", codec.display()))
+        .ok_or_else(|| {
+            format!(
+                "the {} encoder does not run on this machine",
+                codec.display()
+            )
+        })
         .and_then(|_| software_session(settings, codec, rgba));
     match session {
         Ok(enc) => {
-            println!("[{tag}] Encoder: software {} ({}).", codec.display(), enc.backend_name());
+            println!(
+                "[{tag}] Encoder: software {} ({}).",
+                codec.display(),
+                enc.backend_name()
+            );
             Some(enc)
         }
         Err(e) => {
@@ -1238,7 +1565,6 @@ fn software_fallback(settings: &mut RustCaptureSettings, rgba: bool, tag: &str) 
     }
 }
 
-
 #[cfg(test)]
 mod software_tests {
     //! The full-frame software sessions, driven end to end through the one ladder step that
@@ -1246,7 +1572,7 @@ mod software_tests {
     //! picture that went in, key frames come on request and are self-contained, the quantizer
     //! and the CBR target reach the encoder, a live rate or quality change keeps the stream
     //! decodable, and each stream declares the matrix it was converted with.
-    use super::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY, WIRE_VIDEO};
+    use super::codec::{FRAME_DELTA, FRAME_KEY, WIRE_VIDEO, parse_video_type};
     use super::*;
     use crate::webcam::convert::I420View;
     use crate::webcam::decode::{ColorTags, Decoder, VideoDecoder};
@@ -1292,7 +1618,10 @@ mod software_tests {
                 depth.set(held + 1);
                 held == 0
             });
-        Turn { _guard: first.then(|| ONE_AV1.lock().unwrap_or_else(|e| e.into_inner())), counted }
+        Turn {
+            _guard: first.then(|| ONE_AV1.lock().unwrap_or_else(|e| e.into_inner())),
+            counted,
+        }
     }
 
     /// A software session holding the AV1 turn for as long as it lives.
@@ -1328,7 +1657,8 @@ mod software_tests {
 
     pub(super) fn session(codec: Codec, s: &RustCaptureSettings, rgba: bool) -> Session {
         let _turn = turn(codec);
-        let encoder = software_session(s, codec, rgba).unwrap_or_else(|e| panic!("{codec:?} software session: {e}"));
+        let encoder = software_session(s, codec, rgba)
+            .unwrap_or_else(|e| panic!("{codec:?} software session: {e}"));
         Session { encoder, _turn }
     }
 
@@ -1340,7 +1670,9 @@ mod software_tests {
         let s = settings(codec);
         let mut enc = session(codec, &s, false);
         for t in 0..8usize {
-            let out = enc.encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0).unwrap_or_default();
+            let out = enc
+                .encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0)
+                .unwrap_or_default();
             if !out.is_empty() {
                 return t;
             }
@@ -1421,11 +1753,16 @@ mod software_tests {
             }
         }
         mse /= (W * H) as f64;
-        if mse <= 0.0 { 99.0 } else { 10.0 * (255.0 * 255.0 / mse).log10() }
+        if mse <= 0.0 {
+            99.0
+        } else {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        }
     }
 
     fn decode_one(dec: &mut VideoDecoder, packet: &[u8]) -> bool {
-        dec.decode(&packet[VIDEO_HEADER_LEN..]).unwrap_or_else(|e| panic!("decode: {e:?}"))
+        dec.decode(&packet[VIDEO_HEADER_LEN..])
+            .unwrap_or_else(|e| panic!("decode: {e:?}"))
     }
 
     /// Whether the session takes a new bitrate without a key frame: libvpx, and SVT-AV1 where the
@@ -1454,20 +1791,41 @@ mod software_tests {
                 assert!(out.len() > VIDEO_HEADER_LEN, "{codec:?} frame {t} is empty");
                 assert_eq!(out[0], WIRE_VIDEO);
                 let kind = if t == 0 { FRAME_KEY } else { FRAME_DELTA };
-                assert_eq!(parse_video_type(out[1]), Some((codec, kind)), "{codec:?} frame {t}");
+                assert_eq!(
+                    parse_video_type(out[1]),
+                    Some((codec, kind)),
+                    "{codec:?} frame {t}"
+                );
                 assert_eq!(u16::from_be_bytes([out[2], out[3]]) as usize, t);
-                assert_eq!(&out[4..10], &[0, 0, (W >> 8) as u8, W as u8, (H >> 8) as u8, H as u8]);
-                assert!(decode_one(&mut dec, &out), "{codec:?} frame {t} decoded nothing");
+                assert_eq!(
+                    &out[4..10],
+                    &[0, 0, (W >> 8) as u8, W as u8, (H >> 8) as u8, H as u8]
+                );
+                assert!(
+                    decode_one(&mut dec, &out),
+                    "{codec:?} frame {t} decoded nothing"
+                );
                 let psnr = luma_psnr(&dec.frame().unwrap(), &src);
                 assert!(psnr > 28.0, "{codec:?} frame {t}: luma PSNR {psnr:.1} dB");
             }
             let src = frame(6);
-            let key = enc.encode_host(&src, W * 4, false, 6, 25, true).expect("forced key");
-            assert_eq!(parse_video_type(key[1]), Some((codec, FRAME_KEY)), "{codec:?} forced key");
+            let key = enc
+                .encode_host(&src, W * 4, false, 6, 25, true)
+                .expect("forced key");
+            assert_eq!(
+                parse_video_type(key[1]),
+                Some((codec, FRAME_KEY)),
+                "{codec:?} forced key"
+            );
             let mut fresh = VideoDecoder::new(codec).expect("decoder");
-            assert!(decode_one(&mut fresh, &key), "{codec:?}: a forced key frame must decode alone");
+            assert!(
+                decode_one(&mut fresh, &key),
+                "{codec:?}: a forced key frame must decode alone"
+            );
             assert!(luma_psnr(&fresh.frame().unwrap(), &src) > 28.0);
-            let next = enc.encode_host(&frame(7), W * 4, false, 7, 25, false).expect("delta after key");
+            let next = enc
+                .encode_host(&frame(7), W * 4, false, 7, 25, false)
+                .expect("delta after key");
             assert_eq!(parse_video_type(next[1]), Some((codec, FRAME_DELTA)));
             assert!(decode_one(&mut fresh, &next));
         }
@@ -1486,17 +1844,34 @@ mod software_tests {
                 enc.encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0)
                     .unwrap_or_else(|e| panic!("{codec:?} encode {t}: {e}"));
             }
-            let mut out = enc.encode_host(&frame(6), W * 4, false, 6, 25, true).expect("forced key");
+            let mut out = enc
+                .encode_host(&frame(6), W * 4, false, 6, 25, true)
+                .expect("forced key");
             let mut t = 7usize;
             while out.get(1).and_then(|&kind| parse_video_type(kind)) != Some((codec, FRAME_KEY)) {
-                assert!(t < 22, "{codec:?}: no key frame came back within fifteen frames of the request");
-                out = enc.encode_host(&frame(t), W * 4, false, t as u64, 25, false).expect("delta");
+                assert!(
+                    t < 22,
+                    "{codec:?}: no key frame came back within fifteen frames of the request"
+                );
+                out = enc
+                    .encode_host(&frame(t), W * 4, false, t as u64, 25, false)
+                    .expect("delta");
                 t += 1;
             }
-            assert_eq!(u16::from_be_bytes([out[2], out[3]]), 6, "{codec:?}: the key frame carries the id it was asked for");
+            assert_eq!(
+                u16::from_be_bytes([out[2], out[3]]),
+                6,
+                "{codec:?}: the key frame carries the id it was asked for"
+            );
             let mut fresh = VideoDecoder::new(codec).expect("decoder");
-            assert!(decode_one(&mut fresh, &out), "{codec:?}: the key frame must decode alone");
-            assert!(luma_psnr(&fresh.frame().unwrap(), &frame(6)) > 28.0, "{codec:?}");
+            assert!(
+                decode_one(&mut fresh, &out),
+                "{codec:?}: the key frame must decode alone"
+            );
+            assert!(
+                luma_psnr(&fresh.frame().unwrap(), &frame(6)) > 28.0,
+                "{codec:?}"
+            );
         }
     }
 
@@ -1513,16 +1888,25 @@ mod software_tests {
             for t in 0..4usize {
                 enc.encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0)
                     .unwrap_or_else(|e| panic!("{codec:?} encode {t}: {e}"));
-                assert_eq!(enc.last_reference(), Reference::Untracked, "{codec:?} frame {t}");
+                assert_eq!(
+                    enc.last_reference(),
+                    Reference::Untracked,
+                    "{codec:?} frame {t}"
+                );
             }
-            assert!(!enc.invalidate_reference(2), "{codec:?}: the refusal is what asks for the key frame");
+            assert!(
+                !enc.invalidate_reference(2),
+                "{codec:?}: the refusal is what asks for the key frame"
+            );
         }
         for codec in [Codec::Vp8, Codec::Vp9] {
             let s = settings(codec);
             let mut enc = session(codec, &s, false);
-            enc.encode_host(&frame(0), W * 4, false, 0, 25, true).unwrap();
+            enc.encode_host(&frame(0), W * 4, false, 0, 25, true)
+                .unwrap();
             assert_eq!(enc.last_reference(), Reference::None, "{codec:?}");
-            enc.encode_host(&frame(1), W * 4, false, 1, 25, false).unwrap();
+            enc.encode_host(&frame(1), W * 4, false, 1, 25, false)
+                .unwrap();
             assert_eq!(enc.last_reference(), Reference::Frame(0), "{codec:?}");
             assert!(enc.invalidate_reference(1), "{codec:?}");
         }
@@ -1539,7 +1923,12 @@ mod software_tests {
         s.video_cbr_mode = true;
         s.video_bitrate_kbps = 2000;
         let mut enc = session(Codec::Av1, &s, false);
-        let mut frames: Vec<Vec<u8>> = (0..8usize).map(|t| enc.encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0).unwrap()).collect();
+        let mut frames: Vec<Vec<u8>> = (0..8usize)
+            .map(|t| {
+                enc.encode_host(&frame(t), W * 4, false, t as u64, 25, t == 0)
+                    .unwrap()
+            })
+            .collect();
         if !codec_sys::svtav1::HAS_EVENTS {
             assert_eq!(enc.last_reference(), Reference::Untracked);
             assert!(!enc.invalidate_reference(5));
@@ -1550,11 +1939,25 @@ mod software_tests {
         // predicts from ALTREF, the key frame.
         assert!(enc.invalidate_reference(5));
         for t in 8..10usize {
-            frames.push(enc.encode_host(&frame(t), W * 4, false, t as u64, 25, false).unwrap());
-            assert_eq!(parse_video_type(frames[t][1]), Some((Codec::Av1, FRAME_DELTA)), "frame {t}");
-            assert_eq!(enc.last_reference(), Reference::Frame(if t == 8 { 0 } else { 8 }), "frame {t}");
+            frames.push(
+                enc.encode_host(&frame(t), W * 4, false, t as u64, 25, false)
+                    .unwrap(),
+            );
+            assert_eq!(
+                parse_video_type(frames[t][1]),
+                Some((Codec::Av1, FRAME_DELTA)),
+                "frame {t}"
+            );
+            assert_eq!(
+                enc.last_reference(),
+                Reference::Frame(if t == 8 { 0 } else { 8 }),
+                "frame {t}"
+            );
         }
-        let (mut whole, mut lossy) = (VideoDecoder::new(Codec::Av1).unwrap(), VideoDecoder::new(Codec::Av1).unwrap());
+        let (mut whole, mut lossy) = (
+            VideoDecoder::new(Codec::Av1).unwrap(),
+            VideoDecoder::new(Codec::Av1).unwrap(),
+        );
         for (i, f) in frames.iter().enumerate() {
             assert!(decode_one(&mut whole, f), "frame {i}");
             if !(5..8).contains(&i) {
@@ -1562,12 +1965,24 @@ mod software_tests {
             }
         }
         let (a, b) = (whole.frame().unwrap(), lossy.frame().unwrap());
-        let same = a.y.chunks(a.y_stride).zip(b.y.chunks(b.y_stride)).take(H).all(|(x, y)| x[..W] == y[..W]);
-        assert!(same, "the decoder that lost frames 5-7 shows frame 9 unlike the one that saw them");
-        let key = enc.encode_host(&frame(10), W * 4, false, 10, 25, true).unwrap();
+        let same =
+            a.y.chunks(a.y_stride)
+                .zip(b.y.chunks(b.y_stride))
+                .take(H)
+                .all(|(x, y)| x[..W] == y[..W]);
+        assert!(
+            same,
+            "the decoder that lost frames 5-7 shows frame 9 unlike the one that saw them"
+        );
+        let key = enc
+            .encode_host(&frame(10), W * 4, false, 10, 25, true)
+            .unwrap();
         assert_eq!(parse_video_type(key[1]), Some((Codec::Av1, FRAME_KEY)));
         assert_eq!(enc.last_reference(), Reference::None);
-        assert!(decode_one(&mut VideoDecoder::new(Codec::Av1).unwrap(), &key), "the key frame decodes alone");
+        assert!(
+            decode_one(&mut VideoDecoder::new(Codec::Av1).unwrap(), &key),
+            "the key frame decodes alone"
+        );
     }
 
     /// The byte order a session is built for reaches the conversion: a red picture handed as
@@ -1579,21 +1994,40 @@ mod software_tests {
             let mut means = Vec::new();
             for rgba in [false, true] {
                 let mut px = [0u8; 4];
-                if rgba { px[0] = 220 } else { px[2] = 220 }
+                if rgba {
+                    px[0] = 220
+                } else {
+                    px[2] = 220
+                }
                 px[3] = 255;
                 let src: Vec<u8> = px.repeat(W * H);
                 let mut enc = session(codec, &s, rgba);
-                let out = enc.encode_host(&src, W * 4, rgba, 0, 20, true).expect("encode");
+                let out = enc
+                    .encode_host(&src, W * 4, rgba, 0, 20, true)
+                    .expect("encode");
                 let mut dec = VideoDecoder::new(codec).expect("decoder");
                 assert!(decode_one(&mut dec, &out));
                 let f = dec.frame().unwrap();
                 let cw = f.chroma_width();
                 let ch = f.chroma_height();
-                let v: f64 = (0..ch).flat_map(|y| (0..cw).map(move |x| (x, y))).map(|(x, y)| f.v[y * f.uv_stride + x] as f64).sum::<f64>() / (cw * ch) as f64;
+                let v: f64 = (0..ch)
+                    .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                    .map(|(x, y)| f.v[y * f.uv_stride + x] as f64)
+                    .sum::<f64>()
+                    / (cw * ch) as f64;
                 means.push(v);
             }
-            assert!(means[0] > 180.0, "{codec:?}: red must land high in V, got {:.0}", means[0]);
-            assert!((means[0] - means[1]).abs() < 6.0, "{codec:?}: BGRA {:.0} vs RGBA {:.0}", means[0], means[1]);
+            assert!(
+                means[0] > 180.0,
+                "{codec:?}: red must land high in V, got {:.0}",
+                means[0]
+            );
+            assert!(
+                (means[0] - means[1]).abs() < 6.0,
+                "{codec:?}: BGRA {:.0} vs RGBA {:.0}",
+                means[0],
+                means[1]
+            );
         }
     }
 
@@ -1607,11 +2041,18 @@ mod software_tests {
                 s.video_crf = crf;
                 let mut enc = session(codec, &s, false);
                 (0..12usize)
-                    .map(|t| enc.encode_host(&frame(t), W * 4, false, t as u64, crf as u32, t == 0).unwrap().len())
+                    .map(|t| {
+                        enc.encode_host(&frame(t), W * 4, false, t as u64, crf as u32, t == 0)
+                            .unwrap()
+                            .len()
+                    })
                     .sum()
             };
             let (fine, coarse) = (run(15), run(45));
-            assert!(coarse * 2 < fine, "{codec:?}: crf 45 = {coarse} bytes vs crf 15 = {fine}");
+            assert!(
+                coarse * 2 < fine,
+                "{codec:?}: crf 45 = {coarse} bytes vs crf 15 = {fine}"
+            );
 
             const KBPS: i32 = 800;
             let mut s = settings(codec);
@@ -1620,7 +2061,9 @@ mod software_tests {
             let mut enc = session(codec, &s, false);
             let mut bytes = 0usize;
             for t in 0..90usize {
-                let out = enc.encode_host(&noise(t), W * 4, false, t as u64, 25, t == 0).unwrap();
+                let out = enc
+                    .encode_host(&noise(t), W * 4, false, t as u64, 25, t == 0)
+                    .unwrap();
                 // A constant-rate encoder is free to answer a frame with nothing -- SVT-AV1
                 // drops one rather than overshoot its buffer -- and that frame carries no
                 // payload to count rather than a negative one.
@@ -1630,7 +2073,10 @@ mod software_tests {
             }
             let kbps = bytes as f64 * 8.0 * 30.0 / 60.0 / 1000.0;
             println!("{codec:?} CBR {KBPS} kbps on noise: {kbps:.0} kbps");
-            assert!(kbps > KBPS as f64 * 0.5 && kbps < KBPS as f64 * 1.6, "{codec:?}: {kbps:.0} kbps");
+            assert!(
+                kbps > KBPS as f64 * 0.5 && kbps < KBPS as f64 * 1.6,
+                "{codec:?}: {kbps:.0} kbps"
+            );
         }
     }
 
@@ -1645,21 +2091,50 @@ mod software_tests {
             s.video_crf = 40;
             let mut enc = session(codec, &s, false);
             let mut dec = VideoDecoder::new(codec).expect("decoder");
-            let coarse = enc.encode_host(&frame(0), W * 4, false, 0, 40, true).unwrap();
+            let coarse = enc
+                .encode_host(&frame(0), W * 4, false, 0, 40, true)
+                .unwrap();
             assert!(decode_one(&mut dec, &coarse));
-            let fine = enc.encode_host(&frame(1), W * 4, false, 1, 15, false).unwrap();
+            let fine = enc
+                .encode_host(&frame(1), W * 4, false, 1, 15, false)
+                .unwrap();
             let live = enc.backend_name() == "libvpx";
             let kind = if live { FRAME_DELTA } else { FRAME_KEY };
-            assert_eq!(parse_video_type(fine[1]), Some((codec, kind)), "{codec:?}: a quality change {}", if live { "is live" } else { "re-opens with a key frame" });
+            assert_eq!(
+                parse_video_type(fine[1]),
+                Some((codec, kind)),
+                "{codec:?}: a quality change {}",
+                if live {
+                    "is live"
+                } else {
+                    "re-opens with a key frame"
+                }
+            );
             assert!(decode_one(&mut dec, &fine));
-            let held = enc.encode_host(&frame(2), W * 4, false, 2, 40, false).unwrap();
-            assert_eq!(parse_video_type(held[1]), Some((codec, FRAME_DELTA)), "{codec:?}: a single decrease waits out the hysteresis");
+            let held = enc
+                .encode_host(&frame(2), W * 4, false, 2, 40, false)
+                .unwrap();
+            assert_eq!(
+                parse_video_type(held[1]),
+                Some((codec, FRAME_DELTA)),
+                "{codec:?}: a single decrease waits out the hysteresis"
+            );
             assert!(decode_one(&mut dec, &held));
             s.target_fps = 15.0;
             enc.reconfigure_rate(&s).expect("rate reconfigure");
-            let after = enc.encode_host(&frame(3), W * 4, false, 3, 15, false).unwrap();
-            let kind = if enc.backend_name() == "libvpx" { FRAME_DELTA } else { FRAME_KEY };
-            assert_eq!(parse_video_type(after[1]), Some((codec, kind)), "{codec:?}: a frame-rate change");
+            let after = enc
+                .encode_host(&frame(3), W * 4, false, 3, 15, false)
+                .unwrap();
+            let kind = if enc.backend_name() == "libvpx" {
+                FRAME_DELTA
+            } else {
+                FRAME_KEY
+            };
+            assert_eq!(
+                parse_video_type(after[1]),
+                Some((codec, kind)),
+                "{codec:?}: a frame-rate change"
+            );
             assert!(decode_one(&mut dec, &after));
             assert!(luma_psnr(&dec.frame().unwrap(), &frame(3)) > 28.0);
         }
@@ -1676,7 +2151,9 @@ mod software_tests {
             let (mut spent, mut changed) = ([0usize; 2], None);
             for t in 0..12usize {
                 let crf = if t < 6 { 40 } else { 15 };
-                let out = enc.encode_host(&frame(t), W * 4, false, t as u64, crf, t == 0).unwrap();
+                let out = enc
+                    .encode_host(&frame(t), W * 4, false, t as u64, crf, t == 0)
+                    .unwrap();
                 if t == 6 {
                     changed = parse_video_type(out[1]);
                 }
@@ -1686,9 +2163,20 @@ mod software_tests {
                     spent[1] += out.len();
                 }
             }
-            assert!(spent[1] * 2 > spent[0] * 3, "{codec:?}: bytes over five deltas before and after {spent:?}");
-            let kind = if enc.backend_name() == "libvpx" { FRAME_DELTA } else { FRAME_KEY };
-            assert_eq!(changed, Some((codec, kind)), "{codec:?}: the frame after the change");
+            assert!(
+                spent[1] * 2 > spent[0] * 3,
+                "{codec:?}: bytes over five deltas before and after {spent:?}"
+            );
+            let kind = if enc.backend_name() == "libvpx" {
+                FRAME_DELTA
+            } else {
+                FRAME_KEY
+            };
+            assert_eq!(
+                changed,
+                Some((codec, kind)),
+                "{codec:?}: the frame after the change"
+            );
         }
     }
 
@@ -1708,7 +2196,9 @@ mod software_tests {
                     s.video_bitrate_kbps = 4500;
                     enc.reconfigure_rate(&s).expect("rate reconfigure");
                 }
-                let out = enc.encode_host(&noise(t), W * 4, false, t as u64, 25, t == 0).unwrap();
+                let out = enc
+                    .encode_host(&noise(t), W * 4, false, t as u64, 25, t == 0)
+                    .unwrap();
                 if t == 30 {
                     changed = parse_video_type(out[1]);
                 }
@@ -1721,9 +2211,20 @@ mod software_tests {
                     spent[1] += out.len();
                 }
             }
-            assert!(spent[1] > spent[0] * 2, "{codec:?}: bytes over fifteen frames before and after {spent:?}");
-            let kind = if takes_a_live_rate(&enc) { FRAME_DELTA } else { FRAME_KEY };
-            assert_eq!(changed, Some((codec, kind)), "{codec:?}: the frame after the change");
+            assert!(
+                spent[1] > spent[0] * 2,
+                "{codec:?}: bytes over fifteen frames before and after {spent:?}"
+            );
+            let kind = if takes_a_live_rate(&enc) {
+                FRAME_DELTA
+            } else {
+                FRAME_KEY
+            };
+            assert_eq!(
+                changed,
+                Some((codec, kind)),
+                "{codec:?}: the frame after the change"
+            );
         }
     }
 
@@ -1736,19 +2237,31 @@ mod software_tests {
         for codec in lockstep_codecs() {
             let mut s = settings(codec);
             let mut enc = session(codec, &s, false);
-            let out = enc.encode_host(&frame(0), W * 4, false, 0, 25, true).expect("encode");
+            let out = enc
+                .encode_host(&frame(0), W * 4, false, 0, 25, true)
+                .expect("encode");
             let mut dec = VideoDecoder::new(codec).expect("decoder");
             assert!(decode_one(&mut dec, &out));
-            let want = if codec == Codec::Vp8 { ColorTags::BT470BG_LIMITED } else { ColorTags::BT709_LIMITED };
+            let want = if codec == Codec::Vp8 {
+                ColorTags::BT470BG_LIMITED
+            } else {
+                ColorTags::BT709_LIMITED
+            };
             assert_eq!(dec.color_tags(), Some(want), "{codec:?}");
             if software_fullcolor(codec) {
                 s.video_fullcolor = true;
                 let mut enc = session(codec, &s, false);
                 assert!(enc.is_fullcolor(), "{codec:?} carries the 4:4:4 request");
-                let out = enc.encode_host(&frame(0), W * 4, false, 0, 25, true).expect("encode");
+                let out = enc
+                    .encode_host(&frame(0), W * 4, false, 0, 25, true)
+                    .expect("encode");
                 let mut dec = VideoDecoder::new(codec).expect("decoder");
                 assert!(decode_one(&mut dec, &out));
-                let want = if codec == Codec::Vp9 { ColorTags::BT709_LIMITED } else { ColorTags::BT709_FULL };
+                let want = if codec == Codec::Vp9 {
+                    ColorTags::BT709_LIMITED
+                } else {
+                    ColorTags::BT709_FULL
+                };
                 assert_eq!(dec.color_tags(), Some(want), "{codec:?} 4:4:4");
             }
         }
@@ -1763,7 +2276,9 @@ mod software_tests {
             s.video_fullcolor = true;
             let mut enc = session(codec, &s, false);
             assert_eq!(enc.is_fullcolor(), software_fullcolor(codec), "{codec:?}");
-            let out = enc.encode_host(&frame(0), W * 4, false, 0, 25, true).unwrap();
+            let out = enc
+                .encode_host(&frame(0), W * 4, false, 0, 25, true)
+                .unwrap();
             let mut dec = VideoDecoder::new(codec).expect("decoder");
             assert!(decode_one(&mut dec, &out));
         }
@@ -1777,16 +2292,28 @@ mod software_tests {
     fn decoded_chroma_is_neutral_on_a_tile_that_averages_to_gray() {
         const N: usize = 128;
         let bgra = chroma_siting::bgra(N, N);
-        let settings = RustCaptureSettings { width: N as i32, height: N as i32, target_fps: 30.0, video_crf: 20, ..Default::default() };
+        let settings = RustCaptureSettings {
+            width: N as i32,
+            height: N as i32,
+            target_fps: 30.0,
+            video_crf: 20,
+            ..Default::default()
+        };
         for codec in SOFTWARE {
             let mut enc = session(codec, &settings, false);
             let out = drain_first(&mut enc, &bgra, N * 4, 20);
             assert!(!out.is_empty(), "{codec:?} encoded nothing");
             let mut dec = VideoDecoder::new(codec).expect("decoder");
-            assert!(dec.decode(&out[VIDEO_HEADER_LEN..]).unwrap_or(false), "{codec:?} decoded nothing");
+            assert!(
+                dec.decode(&out[VIDEO_HEADER_LEN..]).unwrap_or(false),
+                "{codec:?} decoded nothing"
+            );
             let worst = chroma_siting::worst(&dec.frame().expect("frame"));
             println!("[chroma-siting] {codec:?}: worst |C-128| {worst:.1}");
-            assert!(worst <= 8.0, "{codec:?} sites chroma {worst:.1} off neutral");
+            assert!(
+                worst <= 8.0,
+                "{codec:?} sites chroma {worst:.1} off neutral"
+            );
         }
     }
 
@@ -1799,12 +2326,21 @@ mod software_tests {
     fn the_chart_decodes_to_the_color_that_was_painted() {
         const N: usize = 256;
         let bgra = chroma_siting::chart_bgra(N, N / 2);
-        let settings = RustCaptureSettings { width: N as i32, height: (N / 2) as i32, target_fps: 30.0, video_crf: 20, ..Default::default() };
+        let settings = RustCaptureSettings {
+            width: N as i32,
+            height: (N / 2) as i32,
+            target_fps: 30.0,
+            video_crf: 20,
+            ..Default::default()
+        };
         for codec in SOFTWARE {
             let mut enc = session(codec, &settings, false);
             let out = drain_first(&mut enc, &bgra, N * 4, 20);
             let mut dec = VideoDecoder::new(codec).expect("decoder");
-            assert!(dec.decode(&out[VIDEO_HEADER_LEN..]).unwrap_or(false), "{codec:?}");
+            assert!(
+                dec.decode(&out[VIDEO_HEADER_LEN..]).unwrap_or(false),
+                "{codec:?}"
+            );
             let declared = codec != Codec::Vp8;
             let (k, other, other_name) = if declared {
                 (chroma_siting::BT709, chroma_siting::BT601, "BT.601")
@@ -1814,20 +2350,33 @@ mod software_tests {
             let frame = dec.frame().expect("frame");
             let worst = chroma_siting::chart_error(&frame, k);
             let under_other = chroma_siting::chart_error(&frame, other);
-            println!("[chart] {codec:?}: worst |dRGB| {worst:.1} against the declared matrix, {under_other:.1} against {other_name}");
+            println!(
+                "[chart] {codec:?}: worst |dRGB| {worst:.1} against the declared matrix, {under_other:.1} against {other_name}"
+            );
             assert!(
                 worst <= 12.0,
                 "{codec:?} paints {worst:.1} off the chart against the matrix it declares, and {under_other:.1} against {other_name}: {}",
-                if under_other < worst { "it converted with that one and declared the other" } else { "neither matrix explains it" }
+                if under_other < worst {
+                    "it converted with that one and declared the other"
+                } else {
+                    "neither matrix explains it"
+                }
             );
         }
     }
 
     /// The first packet of a fresh session, feeding `bgra` until one arrives: an encoder that
     /// pipelines answers the opening frames with nothing.
-    pub(super) fn drain_first(enc: &mut FrameEncoder, bgra: &[u8], stride: usize, qp: u32) -> Vec<u8> {
+    pub(super) fn drain_first(
+        enc: &mut FrameEncoder,
+        bgra: &[u8],
+        stride: usize,
+        qp: u32,
+    ) -> Vec<u8> {
         for t in 0..8u64 {
-            let out = enc.encode_host(bgra, stride, false, t, qp, t == 0).unwrap_or_else(|e| panic!("encode: {e}"));
+            let out = enc
+                .encode_host(bgra, stride, false, t, qp, t == 0)
+                .unwrap_or_else(|e| panic!("encode: {e}"));
             if !out.is_empty() {
                 return out;
             }
@@ -1885,7 +2434,11 @@ pub(crate) mod chroma_siting {
     /// names, which is what a client's presentation path computes.
     pub fn rgb(ycc: [f64; 3], k: (f64, f64)) -> [f64; 3] {
         let (kr, kb) = k;
-        let (y, cb, cr) = ((ycc[0] - 16.0) / 219.0, (ycc[1] - 128.0) / 224.0, (ycc[2] - 128.0) / 224.0);
+        let (y, cb, cr) = (
+            (ycc[0] - 16.0) / 219.0,
+            (ycc[1] - 128.0) / 224.0,
+            (ycc[2] - 128.0) / 224.0,
+        );
         let r = y + 2.0 * (1.0 - kr) * cr;
         let b = y + 2.0 * (1.0 - kb) * cb;
         let g = (y - kr * r - kb * b) / (1.0 - kr - kb);
@@ -1895,8 +2448,14 @@ pub(crate) mod chroma_siting {
     /// The eight-patch color chart the matrix checks paint: the neutrals, whose chroma a wrong
     /// matrix leaves alone, and the saturated corners, which it moves by tens of levels.
     pub const CHART: [[u8; 3]; 8] = [
-        [255, 255, 255], [128, 128, 128], [0, 0, 0], [255, 0, 0],
-        [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255],
+        [255, 255, 255],
+        [128, 128, 128],
+        [0, 0, 0],
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [255, 255, 0],
+        [0, 255, 255],
     ];
 
     /// `CHART` as a `w`x`h` BGRA frame of eight columns.
@@ -1959,17 +2518,37 @@ pub(crate) mod chroma_siting {
     /// and every partial average a wrong siting would take is far from neutral.
     #[test]
     fn the_tile_separates_the_sitings() {
-        let c: Vec<(f64, f64)> = TILE.iter().map(|&p| chroma(p.map(f64::from), BT709)).collect();
+        let c: Vec<(f64, f64)> = TILE
+            .iter()
+            .map(|&p| chroma(p.map(f64::from), BT709))
+            .collect();
         let mean = |of: &[usize]| {
-            let (u, v) = of.iter().fold((0.0, 0.0), |(u, v), &i| (u + c[i].0, v + c[i].1));
+            let (u, v) = of
+                .iter()
+                .fold((0.0, 0.0), |(u, v), &i| (u + c[i].0, v + c[i].1));
             let n = of.len() as f64;
             (u / n - 128.0).hypot(v / n - 128.0)
         };
         let all = mean(&[0, 1, 2, 3]);
-        assert!(all < 0.5, "the whole tile must average to neutral chroma, off by {all:.1}");
-        for part in [vec![0], vec![1], vec![2], vec![3], vec![0, 1], vec![2, 3], vec![0, 2], vec![1, 3]] {
+        assert!(
+            all < 0.5,
+            "the whole tile must average to neutral chroma, off by {all:.1}"
+        );
+        for part in [
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![0, 1],
+            vec![2, 3],
+            vec![0, 2],
+            vec![1, 3],
+        ] {
             let d = mean(&part);
-            assert!(d > 40.0, "pixels {part:?} average to chroma only {d:.1} from neutral");
+            assert!(
+                d > 40.0,
+                "pixels {part:?} average to chroma only {d:.1} from neutral"
+            );
         }
     }
 }
@@ -2007,8 +2586,15 @@ mod hardware_encoder_tests {
     #[ignore]
     fn gpu_hardware_encoders_serve_h264_once_probed() {
         let served = hardware_encoders(0);
-        assert!(served.iter().any(|(codec, ..)| *codec == Codec::H264), "node 0 serves {served:?}");
-        assert!(served.iter().all(|(_, backend, _)| matches!(*backend, "nvenc" | "vaapi")));
+        assert!(
+            served.iter().any(|(codec, ..)| *codec == Codec::H264),
+            "node 0 serves {served:?}"
+        );
+        assert!(
+            served
+                .iter()
+                .all(|(_, backend, _)| matches!(*backend, "nvenc" | "vaapi"))
+        );
         assert_eq!(hardware_encoders(0), served);
     }
 }

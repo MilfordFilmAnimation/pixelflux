@@ -217,14 +217,17 @@ type PwThreadLoopInt = unsafe extern "C" fn(*mut c_void) -> c_int;
 type PwThreadLoopVoid = unsafe extern "C" fn(*mut c_void);
 type PwContextNew = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
 type PwContextConnect = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
-type PwContextConnectFd = unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void;
+type PwContextConnectFd =
+    unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, usize) -> *mut c_void;
 type PwContextDestroy = unsafe extern "C" fn(*mut c_void);
 type PwCoreDisconnect = unsafe extern "C" fn(*mut c_void) -> c_int;
 type PwPropertiesNew = unsafe extern "C" fn(*const c_char, ...) -> *mut c_void;
 type PwPropertiesSet = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
 type PwStreamNew = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void) -> *mut c_void;
-type PwStreamAddListener = unsafe extern "C" fn(*mut c_void, *mut c_void, *const PwStreamEvents, *mut c_void);
-type PwStreamConnect = unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *mut *const c_void, u32) -> c_int;
+type PwStreamAddListener =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *const PwStreamEvents, *mut c_void);
+type PwStreamConnect =
+    unsafe extern "C" fn(*mut c_void, c_int, u32, u32, *mut *const c_void, u32) -> c_int;
 type PwStreamUpdateParams = unsafe extern "C" fn(*mut c_void, *mut *const c_void, u32) -> c_int;
 type PwStreamDequeueBuffer = unsafe extern "C" fn(*mut c_void) -> *mut PwBuffer;
 type PwStreamQueueBuffer = unsafe extern "C" fn(*mut c_void, *mut PwBuffer) -> c_int;
@@ -267,10 +270,12 @@ pub struct Api {
 pub fn api() -> Result<&'static Api, String> {
     static API: std::sync::OnceLock<Result<Api, String>> = std::sync::OnceLock::new();
     API.get_or_init(|| unsafe {
-        let lib = Library::new("libpipewire-0.3.so.0").map_err(|e| format!("libpipewire-0.3 not available: {}", e))?;
+        let lib = Library::new("libpipewire-0.3.so.0")
+            .map_err(|e| format!("libpipewire-0.3 not available: {}", e))?;
         macro_rules! sym {
             ($name:literal, $t:ty) => {
-                *lib.get::<$t>(concat!($name, "\0").as_bytes()).map_err(|e| format!("{}: {}", $name, e))?
+                *lib.get::<$t>(concat!($name, "\0").as_bytes())
+                    .map_err(|e| format!("{}: {}", $name, e))?
             };
         }
         let init: PwInit = sym!("pw_init", PwInit);
@@ -379,13 +384,19 @@ pub fn pod_choice_long(v: &mut Vec<u8>, choice: u32, values: &[i64]) {
 
 /// A rectangle choice; `values` are `(w, h)` pairs, default first.
 pub fn pod_choice_rect(v: &mut Vec<u8>, choice: u32, values: &[(u32, u32)]) {
-    let bytes: Vec<u8> = values.iter().flat_map(|(w, h)| [w.to_ne_bytes(), h.to_ne_bytes()].concat()).collect();
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|(w, h)| [w.to_ne_bytes(), h.to_ne_bytes()].concat())
+        .collect();
     pod_choice(v, choice, SPA_TYPE_RECTANGLE, 8, &bytes);
 }
 
 /// A fraction choice; `values` are `(num, den)` pairs, default first.
 pub fn pod_choice_frac(v: &mut Vec<u8>, choice: u32, values: &[(u32, u32)]) {
-    let bytes: Vec<u8> = values.iter().flat_map(|(n, d)| [n.to_ne_bytes(), d.to_ne_bytes()].concat()).collect();
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|(n, d)| [n.to_ne_bytes(), d.to_ne_bytes()].concat())
+        .collect();
     pod_choice(v, choice, SPA_TYPE_FRACTION, 8, &bytes);
 }
 
@@ -423,7 +434,8 @@ pub struct PodProp<'a> {
 }
 
 fn u32_at(v: &[u8], off: usize) -> Option<u32> {
-    v.get(off..off + 4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+    v.get(off..off + 4)
+        .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
 }
 
 /// The bytes of the pod a PipeWire callback points at: its header names the payload size.
@@ -452,7 +464,12 @@ pub fn object_props(pod: &[u8]) -> Option<(u32, u32, Vec<PodProp<'_>>)> {
         let vsize = u32_at(body, off + 8)? as usize;
         let vty = u32_at(body, off + 12)?;
         let payload = body.get(off + 16..off + 16 + vsize)?;
-        props.push(PodProp { key, flags, ty: vty, payload });
+        props.push(PodProp {
+            key,
+            flags,
+            ty: vty,
+            payload,
+        });
         off += 16 + vsize.div_ceil(8) * 8;
     }
     Some((ty, id, props))
@@ -472,18 +489,27 @@ pub fn pod_value(ty: u32, payload: &[u8]) -> Option<(u32, &[u8])> {
 impl PodProp<'_> {
     pub fn as_u32(&self) -> Option<u32> {
         let (ty, b) = pod_value(self.ty, self.payload)?;
-        (ty == SPA_TYPE_ID || ty == SPA_TYPE_INT).then(|| u32_at(b, 0)).flatten()
+        (ty == SPA_TYPE_ID || ty == SPA_TYPE_INT)
+            .then(|| u32_at(b, 0))
+            .flatten()
     }
 
     pub fn as_i64(&self) -> Option<i64> {
         let (ty, b) = pod_value(self.ty, self.payload)?;
-        (ty == SPA_TYPE_LONG).then(|| b.get(..8).map(|x| i64::from_ne_bytes(x.try_into().unwrap()))).flatten()
+        (ty == SPA_TYPE_LONG)
+            .then(|| {
+                b.get(..8)
+                    .map(|x| i64::from_ne_bytes(x.try_into().unwrap()))
+            })
+            .flatten()
     }
 
     /// A rectangle or fraction pair.
     pub fn as_pair(&self) -> Option<(u32, u32)> {
         let (ty, b) = pod_value(self.ty, self.payload)?;
-        (ty == SPA_TYPE_RECTANGLE || ty == SPA_TYPE_FRACTION).then(|| Some((u32_at(b, 0)?, u32_at(b, 4)?))).flatten()
+        (ty == SPA_TYPE_RECTANGLE || ty == SPA_TYPE_FRACTION)
+            .then(|| Some((u32_at(b, 0)?, u32_at(b, 4)?)))
+            .flatten()
     }
 }
 
@@ -504,7 +530,10 @@ mod tests {
         assert_eq!(mem::size_of::<SpaData>(), 40);
         assert_eq!(mem::size_of::<SpaChunk>(), 16);
         assert_eq!(mem::size_of::<SpaMetaHeader>(), 32);
-        assert_eq!(mem::size_of::<SpaMetaRegion>(), SPA_META_REGION_SIZE as usize);
+        assert_eq!(
+            mem::size_of::<SpaMetaRegion>(),
+            SPA_META_REGION_SIZE as usize
+        );
         assert_eq!(mem::size_of::<SpaMetaCursor>(), 28);
         assert_eq!(mem::size_of::<SpaMetaBitmap>(), 20);
         assert_eq!(cursor_meta_size(64, 64), 28 + 20 + 64 * 64 * 4);
@@ -518,28 +547,80 @@ mod tests {
     #[test]
     fn built_pods_read_back() {
         let pod = object(SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_ENUM_FORMAT, |p| {
-            prop(p, SPA_FORMAT_MEDIA_TYPE, |v| pod_id(v, SPA_MEDIA_TYPE_VIDEO));
-            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| pod_choice_id(v, SPA_CHOICE_ENUM, &[SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRX, SPA_VIDEO_FORMAT_BGRA]));
-            prop_flags(p, SPA_FORMAT_VIDEO_MODIFIER, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE, |v| {
-                pod_choice_long(v, SPA_CHOICE_ENUM, &[0x0300_0000_0000_0001, 0x0300_0000_0000_0001, 0])
+            prop(p, SPA_FORMAT_MEDIA_TYPE, |v| {
+                pod_id(v, SPA_MEDIA_TYPE_VIDEO)
             });
-            prop(p, SPA_FORMAT_VIDEO_SIZE, |v| pod_choice_rect(v, SPA_CHOICE_RANGE, &[(1280, 720), (1, 1), (16384, 16384)]));
+            prop(p, SPA_FORMAT_VIDEO_FORMAT, |v| {
+                pod_choice_id(
+                    v,
+                    SPA_CHOICE_ENUM,
+                    &[
+                        SPA_VIDEO_FORMAT_BGRX,
+                        SPA_VIDEO_FORMAT_BGRX,
+                        SPA_VIDEO_FORMAT_BGRA,
+                    ],
+                )
+            });
+            prop_flags(
+                p,
+                SPA_FORMAT_VIDEO_MODIFIER,
+                SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE,
+                |v| {
+                    pod_choice_long(
+                        v,
+                        SPA_CHOICE_ENUM,
+                        &[0x0300_0000_0000_0001, 0x0300_0000_0000_0001, 0],
+                    )
+                },
+            );
+            prop(p, SPA_FORMAT_VIDEO_SIZE, |v| {
+                pod_choice_rect(v, SPA_CHOICE_RANGE, &[(1280, 720), (1, 1), (16384, 16384)])
+            });
             prop(p, SPA_FORMAT_VIDEO_FRAMERATE, |v| pod_frac(v, 0, 1));
-            prop(p, SPA_FORMAT_VIDEO_MAX_FRAMERATE, |v| pod_choice_frac(v, SPA_CHOICE_RANGE, &[(60, 1), (1, 1), (60, 1)]));
+            prop(p, SPA_FORMAT_VIDEO_MAX_FRAMERATE, |v| {
+                pod_choice_frac(v, SPA_CHOICE_RANGE, &[(60, 1), (1, 1), (60, 1)])
+            });
             prop(p, SPA_FORMAT_VIDEO_MAX_FRAMERATE + 1, |v| pod_int(v, 4));
         });
         assert_eq!(pod.len() % 8, 0);
         let (ty, id, props) = object_props(&pod).unwrap();
         assert_eq!((ty, id), (SPA_TYPE_OBJECT_FORMAT, SPA_PARAM_ENUM_FORMAT));
-        assert_eq!(find_prop(&props, SPA_FORMAT_MEDIA_TYPE).unwrap().as_u32(), Some(SPA_MEDIA_TYPE_VIDEO));
-        assert_eq!(find_prop(&props, SPA_FORMAT_VIDEO_FORMAT).unwrap().as_u32(), Some(SPA_VIDEO_FORMAT_BGRX));
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_MEDIA_TYPE).unwrap().as_u32(),
+            Some(SPA_MEDIA_TYPE_VIDEO)
+        );
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_VIDEO_FORMAT).unwrap().as_u32(),
+            Some(SPA_VIDEO_FORMAT_BGRX)
+        );
         let modifier = find_prop(&props, SPA_FORMAT_VIDEO_MODIFIER).unwrap();
-        assert_eq!(modifier.flags, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+        assert_eq!(
+            modifier.flags,
+            SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE
+        );
         assert_eq!(modifier.as_i64(), Some(0x0300_0000_0000_0001));
-        assert_eq!(find_prop(&props, SPA_FORMAT_VIDEO_SIZE).unwrap().as_pair(), Some((1280, 720)));
-        assert_eq!(find_prop(&props, SPA_FORMAT_VIDEO_FRAMERATE).unwrap().as_pair(), Some((0, 1)));
-        assert_eq!(find_prop(&props, SPA_FORMAT_VIDEO_MAX_FRAMERATE).unwrap().as_pair(), Some((60, 1)));
-        assert_eq!(find_prop(&props, SPA_FORMAT_VIDEO_MAX_FRAMERATE + 1).unwrap().as_u32(), Some(4));
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_VIDEO_SIZE).unwrap().as_pair(),
+            Some((1280, 720))
+        );
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_VIDEO_FRAMERATE)
+                .unwrap()
+                .as_pair(),
+            Some((0, 1))
+        );
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_VIDEO_MAX_FRAMERATE)
+                .unwrap()
+                .as_pair(),
+            Some((60, 1))
+        );
+        assert_eq!(
+            find_prop(&props, SPA_FORMAT_VIDEO_MAX_FRAMERATE + 1)
+                .unwrap()
+                .as_u32(),
+            Some(4)
+        );
         assert!(find_prop(&props, SPA_FORMAT_MEDIA_SUBTYPE).is_none());
         let bytes = unsafe { pod_bytes(pod.as_ptr() as *const c_void) };
         assert_eq!(bytes.len(), pod.len());

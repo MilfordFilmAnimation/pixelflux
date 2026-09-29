@@ -32,11 +32,11 @@ use std::os::fd::RawFd;
 use std::sync::OnceLock;
 
 use super::codec::{
-    frame_type_from_key, h264_frame_type, h265_frame_type, push_video_header, vp8_is_key,
-    vp9_is_key, Codec, VIDEO_HEADER_LEN,
+    Codec, VIDEO_HEADER_LEN, frame_type_from_key, h264_frame_type, h265_frame_type,
+    push_video_header, vp8_is_key, vp9_is_key,
 };
-use super::sps::{self, ColorSignal};
 use super::reference::Reference;
+use super::sps::{self, ColorSignal};
 use crate::RustCaptureSettings;
 
 const V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9;
@@ -255,7 +255,9 @@ fn abi_matches() -> Result<(), String> {
     ];
     for (name, got, want) in sizes {
         if got != want {
-            return Err(format!("{name} is {got} bytes here, the interface wants {want}"));
+            return Err(format!(
+                "{name} is {got} bytes here, the interface wants {want}"
+            ));
         }
     }
     Ok(())
@@ -403,7 +405,9 @@ fn node() -> Option<&'static NodeInfo> {
         }
         for index in 0..64 {
             let path = format!("/dev/video{index}");
-            let Ok(c_path) = std::ffi::CString::new(path.clone()) else { continue };
+            let Ok(c_path) = std::ffi::CString::new(path.clone()) else {
+                continue;
+            };
             let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
             if fd < 0 {
                 continue;
@@ -428,7 +432,11 @@ fn node() -> Option<&'static NodeInfo> {
                 let driver = String::from_utf8_lossy(&caps.driver)
                     .trim_end_matches('\0')
                     .to_string();
-                frame_sizes(fd, &path, coded[0]).map(|info| NodeInfo { driver, coded, ..info })
+                frame_sizes(fd, &path, coded[0]).map(|info| NodeInfo {
+                    driver,
+                    coded,
+                    ..info
+                })
             })();
             unsafe { libc::close(fd) };
             if let Some(info) = found {
@@ -544,12 +552,14 @@ unsafe impl Send for V4l2M2mEncoder {}
 impl V4l2M2mEncoder {
     pub fn new(codec: Codec, settings: &RustCaptureSettings, rgba: bool) -> Result<Self, String> {
         let info = node().ok_or("no V4L2 M2M encode node")?;
-        let coded = coded_fourcc(codec).filter(|f| info.coded.contains(f)).ok_or_else(|| {
-            format!("{} encodes no {}", info.path, codec.display())
-        })?;
+        let coded = coded_fourcc(codec)
+            .filter(|f| info.coded.contains(f))
+            .ok_or_else(|| format!("{} encodes no {}", info.path, codec.display()))?;
         let (width, height) = (settings.width, settings.height);
         if width <= 0 || height <= 0 {
-            return Err(format!("the encoder needs positive dimensions, got {width}x{height}"));
+            return Err(format!(
+                "the encoder needs positive dimensions, got {width}x{height}"
+            ));
         }
         if !info.fits(width as u32, height as u32) {
             return Err(format!(
@@ -560,7 +570,11 @@ impl V4l2M2mEncoder {
         let path = std::ffi::CString::new(info.path.clone()).map_err(|e| e.to_string())?;
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
         if fd < 0 {
-            return Err(format!("{} did not open: {}", info.path, std::io::Error::last_os_error()));
+            return Err(format!(
+                "{} did not open: {}",
+                info.path,
+                std::io::Error::last_os_error()
+            ));
         }
         let mut encoder = Self {
             fd,
@@ -625,8 +639,16 @@ impl V4l2M2mEncoder {
     /// starts on a node that carries none of it. The descriptor itself is reopened by the caller:
     /// a device that refused a parameter answers `ESRCH` to every later call on that descriptor.
     fn release(&mut self) {
-        let _ = self.stream(VIDIOC_STREAMOFF, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, "STREAMOFF output");
-        let _ = self.stream(VIDIOC_STREAMOFF, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, "STREAMOFF capture");
+        let _ = self.stream(
+            VIDIOC_STREAMOFF,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            "STREAMOFF output",
+        );
+        let _ = self.stream(
+            VIDIOC_STREAMOFF,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            "STREAMOFF capture",
+        );
         if self.output_map != libc::MAP_FAILED {
             unsafe { libc::munmap(self.output_map, self.output_size) };
             self.output_map = libc::MAP_FAILED;
@@ -651,11 +673,14 @@ impl V4l2M2mEncoder {
         output_format.pix_mp.height = self.height as u32;
         output_format.pix_mp.pixelformat = input;
         output_format.pix_mp.plane_fmt[0].bytesperline = self.row_bytes as u32;
-        output_format.pix_mp.plane_fmt[0].sizeimage = (self.row_bytes * self.height as usize) as u32;
+        output_format.pix_mp.plane_fmt[0].sizeimage =
+            (self.row_bytes * self.height as usize) as u32;
         self.call(VIDIOC_S_FMT, &mut output_format, "S_FMT output")?;
         self.bytesperline = output_format.pix_mp.plane_fmt[0].bytesperline as usize;
         self.output_size = output_format.pix_mp.plane_fmt[0].sizeimage as usize;
-        if self.bytesperline < self.row_bytes || self.output_size < self.bytesperline * self.height as usize {
+        if self.bytesperline < self.row_bytes
+            || self.output_size < self.bytesperline * self.height as usize
+        {
             return Err(format!(
                 "the node offered {} bytes per line and {} per frame for {}x{}",
                 self.bytesperline, self.output_size, self.width, self.height
@@ -671,11 +696,19 @@ impl V4l2M2mEncoder {
         self.call(VIDIOC_S_FMT, &mut capture_format, "S_FMT capture")?;
 
         self.set_frame_rate(self.fps)?;
-        let seconds = if settings.keyframe_interval_s > 0.0 { settings.keyframe_interval_s } else { 10.0 };
+        let seconds = if settings.keyframe_interval_s > 0.0 {
+            settings.keyframe_interval_s
+        } else {
+            10.0
+        };
         let keyframe = ((self.fps * seconds) as i32).clamp(1, 600);
         self.set_control(CID_BITRATE_MODE, BITRATE_MODE_VBR, "rate control mode")?;
         self.set_control(CID_BITRATE, self.bitrate_bps as i32, "bitrate")?;
-        self.set_control(CID_REPEAT_SEQ_HEADER, 1, "sequence header with every key frame")?;
+        self.set_control(
+            CID_REPEAT_SEQ_HEADER,
+            1,
+            "sequence header with every key frame",
+        )?;
         self.set_control(CID_H264_I_PERIOD, keyframe, "key frame period")?;
         self.set_control(CID_GOP_SIZE, keyframe, "GOP size")?;
 
@@ -683,11 +716,20 @@ impl V4l2M2mEncoder {
         self.request_buffers(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, CAPTURE_BUFFERS as u32)?;
         self.output_map = self.map_buffer(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0)?.0;
         for index in 0..CAPTURE_BUFFERS {
-            self.capture[index] = self.map_buffer(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index as u32)?;
+            self.capture[index] =
+                self.map_buffer(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index as u32)?;
         }
 
-        self.stream(VIDIOC_STREAMON, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, "STREAMON capture")?;
-        self.stream(VIDIOC_STREAMON, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, "STREAMON output")?;
+        self.stream(
+            VIDIOC_STREAMON,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            "STREAMON capture",
+        )?;
+        self.stream(
+            VIDIOC_STREAMON,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            "STREAMON output",
+        )?;
         for index in 0..CAPTURE_BUFFERS {
             self.queue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, index as u32, 0)?;
         }
@@ -720,10 +762,18 @@ impl V4l2M2mEncoder {
     }
 
     fn request_buffers(&self, type_: u32, count: u32) -> Result<(), String> {
-        let mut request = RequestBuffers { count, type_, memory: V4L2_MEMORY_MMAP, ..Default::default() };
+        let mut request = RequestBuffers {
+            count,
+            type_,
+            memory: V4L2_MEMORY_MMAP,
+            ..Default::default()
+        };
         self.call(VIDIOC_REQBUFS, &mut request, "REQBUFS")?;
         if request.count < count {
-            return Err(format!("the node gave {} buffers of the {count} asked for", request.count));
+            return Err(format!(
+                "the node gave {} buffers of the {count} asked for",
+                request.count
+            ));
         }
         Ok(())
     }
@@ -751,7 +801,10 @@ impl V4l2M2mEncoder {
             )
         };
         if map == libc::MAP_FAILED {
-            return Err(format!("mapping a buffer failed: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "mapping a buffer failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Ok((map, length))
     }
@@ -792,12 +845,21 @@ impl V4l2M2mEncoder {
     /// exists to bound the wait: a device that stopped answering has to become an error the ladder
     /// can act on, not a stream that never returns.
     fn wait_for_frame(&self) -> Result<(), String> {
-        let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
+        let mut poll = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let ready = unsafe { libc::poll(&mut poll, 1, FRAME_TIMEOUT_MS) };
         match ready {
             1 => Ok(()),
-            0 => Err(format!("the encoder produced nothing in {FRAME_TIMEOUT_MS} ms")),
-            _ => Err(format!("waiting for a frame failed: {}", std::io::Error::last_os_error())),
+            0 => Err(format!(
+                "the encoder produced nothing in {FRAME_TIMEOUT_MS} ms"
+            )),
+            _ => Err(format!(
+                "waiting for a frame failed: {}",
+                std::io::Error::last_os_error()
+            )),
         }
     }
 
@@ -809,7 +871,13 @@ impl V4l2M2mEncoder {
         }
         let destination = self.output_map as *mut u8;
         if stride == self.bytesperline {
-            unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), destination, self.bytesperline * height) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    pixels.as_ptr(),
+                    destination,
+                    self.bytesperline * height,
+                )
+            };
             return Ok(());
         }
         for row in 0..height {
@@ -919,7 +987,9 @@ impl V4l2M2mEncoder {
                 _ => None,
             };
             let set = colored.as_deref().unwrap_or(original);
-            let Some(replacement) = self.reorder.set(set).or(colored) else { continue };
+            let Some(replacement) = self.reorder.set(set).or(colored) else {
+                continue;
+            };
             let out = out.get_or_insert_with(|| Vec::with_capacity(unit.len() + 16 * 4));
             out.extend_from_slice(&unit[copied..start]);
             out.extend_from_slice(&replacement);
@@ -983,7 +1053,11 @@ impl V4l2M2mEncoder {
         if force_idr {
             self.set_control(CID_FORCE_KEY_FRAME, 1, "force key frame")?;
         }
-        self.queue(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0, self.output_size as u32)?;
+        self.queue(
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            0,
+            self.output_size as u32,
+        )?;
         self.wait_for_frame()?;
         let (index, length) = self.dequeue(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?;
         let slot = index as usize;
@@ -1023,8 +1097,16 @@ impl V4l2M2mEncoder {
 
 impl Drop for V4l2M2mEncoder {
     fn drop(&mut self) {
-        let _ = self.stream(VIDIOC_STREAMOFF, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, "STREAMOFF output");
-        let _ = self.stream(VIDIOC_STREAMOFF, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, "STREAMOFF capture");
+        let _ = self.stream(
+            VIDIOC_STREAMOFF,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            "STREAMOFF output",
+        );
+        let _ = self.stream(
+            VIDIOC_STREAMOFF,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            "STREAMOFF capture",
+        );
         if self.output_map != libc::MAP_FAILED {
             unsafe { libc::munmap(self.output_map, self.output_size) };
         }
@@ -1042,7 +1124,7 @@ impl Drop for V4l2M2mEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoders::sps::fixtures::{reorder_of, without, PI4_SPS, VCE_SPS};
+    use crate::encoders::sps::fixtures::{PI4_SPS, VCE_SPS, reorder_of, without};
 
     /// A session of `codec` on a device of `driver` that never opened a node, for what a session
     /// does with the units a device hands back.
@@ -1074,7 +1156,13 @@ mod tests {
 
     /// An access unit as a device hands it back: the set, a PPS, and an IDR slice.
     fn unit(sps: &[u8]) -> Vec<u8> {
-        [&[0, 0, 0, 1][..], sps, &[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80], &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x21]].concat()
+        [
+            &[0, 0, 0, 1][..],
+            sps,
+            &[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80],
+            &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x21],
+        ]
+        .concat()
     }
 
     /// The first set of an access unit.
@@ -1089,12 +1177,29 @@ mod tests {
     #[test]
     fn a_device_set_leaves_bounded_at_zero() {
         let mut session = stand_in(Codec::H264, "unknown-codec");
-        let tagged = session.tag_sequence(&unit(VCE_SPS)).expect("a set to bound");
+        let tagged = session
+            .tag_sequence(&unit(VCE_SPS))
+            .expect("a set to bound");
         assert_eq!(reorder_of(&first_set(&tagged)), Some((0, 2)));
-        assert_eq!(sps::read_color(&first_set(&tagged)), sps::read_color(VCE_SPS), "the device's own color moved");
-        assert!(tagged.ends_with(&unit(VCE_SPS)[4 + VCE_SPS.len()..]), "the units after the set changed");
-        assert_eq!(session.tag_sequence(&unit(VCE_SPS)), Some(tagged), "the next key frame's set differs");
-        assert_eq!(session.tag_sequence(&[0, 0, 0, 1, 0x41, 0x9a, 0x02]), None, "a delta without a set was touched");
+        assert_eq!(
+            sps::read_color(&first_set(&tagged)),
+            sps::read_color(VCE_SPS),
+            "the device's own color moved"
+        );
+        assert!(
+            tagged.ends_with(&unit(VCE_SPS)[4 + VCE_SPS.len()..]),
+            "the units after the set changed"
+        );
+        assert_eq!(
+            session.tag_sequence(&unit(VCE_SPS)),
+            Some(tagged),
+            "the next key frame's set differs"
+        );
+        assert_eq!(
+            session.tag_sequence(&[0, 0, 0, 1, 0x41, 0x9a, 0x02]),
+            None,
+            "a delta without a set was touched"
+        );
     }
 
     /// A Raspberry Pi 4 on an old firmware declares no color and bounds its own stream: the
@@ -1103,7 +1208,11 @@ mod tests {
     #[test]
     fn the_pi_color_and_the_bound_are_written_together() {
         let mut session = stand_in(Codec::H264, "bcm2835-codec");
-        let tagged = first_set(&session.tag_sequence(&unit(PI4_SPS)).expect("a color to write"));
+        let tagged = first_set(
+            &session
+                .tag_sequence(&unit(PI4_SPS))
+                .expect("a color to write"),
+        );
         assert_eq!(sps::read_color(&tagged), Some(ColorSignal::BT601_FULL));
         assert_eq!(reorder_of(&tagged), Some((0, 1)));
         let mut session = stand_in(Codec::H264, "bcm2835-codec");
@@ -1117,17 +1226,29 @@ mod tests {
     /// decoder from: an H.265 or VP8 unit labeled H.264 is decoded as H.264.
     #[test]
     fn the_header_names_the_session_codec() {
-        use crate::encoders::codec::{parse_video_type, FRAME_KEY};
+        use crate::encoders::codec::{FRAME_KEY, parse_video_type};
         let units: [(Codec, Vec<u8>); 3] = [
             (Codec::H264, unit(VCE_SPS)),
-            (Codec::H265, vec![0, 0, 0, 1, 0x40, 0x01, 0x0c, 0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x10]),
-            (Codec::Vp8, vec![0x50, 0x2a, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x05, 0xd0, 0x02]),
+            (
+                Codec::H265,
+                vec![
+                    0, 0, 0, 1, 0x40, 0x01, 0x0c, 0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x10,
+                ],
+            ),
+            (
+                Codec::Vp8,
+                vec![0x50, 0x2a, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x05, 0xd0, 0x02],
+            ),
         ];
         for (codec, bytes) in units {
             let mut session = stand_in(codec, "unknown-codec");
             session.omit_headers = false;
             let framed = session.frame(&bytes, 7);
-            assert_eq!(parse_video_type(framed[1]), Some((codec, FRAME_KEY)), "{codec:?}");
+            assert_eq!(
+                parse_video_type(framed[1]),
+                Some((codec, FRAME_KEY)),
+                "{codec:?}"
+            );
             assert_eq!(&framed[2..4], &[0, 7], "{codec:?}: the frame number");
         }
     }
@@ -1170,10 +1291,19 @@ mod tests {
         let mut info = node(16, 1920, 2);
         info.coded = vec![V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC];
         assert!(info.serves(Codec::H264) && info.serves(Codec::H265));
-        assert!(!info.serves(Codec::Vp8), "a format it does not enumerate is not served");
-        assert!(!info.serves(Codec::Av1), "and one the interface cannot name is never served");
+        assert!(
+            !info.serves(Codec::Vp8),
+            "a format it does not enumerate is not served"
+        );
+        assert!(
+            !info.serves(Codec::Av1),
+            "and one the interface cannot name is never served"
+        );
         info.coded = vec![V4L2_PIX_FMT_VP9];
-        assert!(!info.serves(Codec::H264), "a node without H.264 is not asked for it");
+        assert!(
+            !info.serves(Codec::H264),
+            "a node without H.264 is not asked for it"
+        );
         assert!(info.serves(Codec::Vp9));
     }
 
@@ -1181,23 +1311,40 @@ mod tests {
     /// rather than guessing one.
     #[test]
     fn a_codec_maps_to_the_fourcc_the_kernel_names() {
-        assert_eq!(coded_fourcc(Codec::H264), Some(u32::from_le_bytes(*b"H264")));
-        assert_eq!(coded_fourcc(Codec::H265), Some(u32::from_le_bytes(*b"HEVC")));
+        assert_eq!(
+            coded_fourcc(Codec::H264),
+            Some(u32::from_le_bytes(*b"H264"))
+        );
+        assert_eq!(
+            coded_fourcc(Codec::H265),
+            Some(u32::from_le_bytes(*b"HEVC"))
+        );
         assert_eq!(coded_fourcc(Codec::Vp8), Some(u32::from_le_bytes(*b"VP80")));
         assert_eq!(coded_fourcc(Codec::Vp9), Some(u32::from_le_bytes(*b"VP90")));
         assert_eq!(coded_fourcc(Codec::Av1), None);
         assert_eq!(coded_fourcc(Codec::Jpeg), None);
     }
 
-
     #[test]
     fn a_node_takes_the_sizes_inside_its_range_and_on_its_step() {
         let stepwise = node(32, 1920, 2);
         assert!(stepwise.fits(1920, 1080), "1080p is inside 32..1920 by 2");
-        assert!(stepwise.fits(1920, 1200), "the ceiling is square, so 1920x1200 fits");
-        assert!(!stepwise.fits(2560, 1440), "a size past the ceiling does not fit");
-        assert!(!stepwise.fits(30, 30), "a size below the floor does not fit");
-        assert!(!stepwise.fits(1921, 1080), "an odd width is off a step of two");
+        assert!(
+            stepwise.fits(1920, 1200),
+            "the ceiling is square, so 1920x1200 fits"
+        );
+        assert!(
+            !stepwise.fits(2560, 1440),
+            "a size past the ceiling does not fit"
+        );
+        assert!(
+            !stepwise.fits(30, 30),
+            "a size below the floor does not fit"
+        );
+        assert!(
+            !stepwise.fits(1921, 1080),
+            "an odd width is off a step of two"
+        );
     }
 
     /// A device that publishes one size answers for that size alone, which a step of zero says.
@@ -1210,8 +1357,16 @@ mod tests {
 
     #[test]
     fn the_input_format_follows_the_bytes_the_caller_holds() {
-        assert_eq!(input_format(false), V4L2_PIX_FMT_BGRA, "an X11 capture hands over B,G,R,A");
-        assert_eq!(input_format(true), V4L2_PIX_FMT_RGBA, "an rgba caller hands over R,G,B,A");
+        assert_eq!(
+            input_format(false),
+            V4L2_PIX_FMT_BGRA,
+            "an X11 capture hands over B,G,R,A"
+        );
+        assert_eq!(
+            input_format(true),
+            V4L2_PIX_FMT_RGBA,
+            "an rgba caller hands over R,G,B,A"
+        );
         assert_ne!(V4L2_PIX_FMT_BGRA, V4L2_PIX_FMT_RGBA);
     }
 }
@@ -1238,7 +1393,13 @@ mod hardware_tests {
 
     /// A strip of primaries in the byte order a capture hands over: B, G, R, A.
     fn chart(width: usize, height: usize) -> Vec<u8> {
-        let colors = [[255u8, 255, 255], [0, 0, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
+        let colors = [
+            [255u8, 255, 255],
+            [0, 0, 0],
+            [0, 0, 255],
+            [0, 255, 0],
+            [255, 0, 0],
+        ];
         let mut frame = Vec::with_capacity(width * height * 4);
         for _ in 0..height {
             for x in 0..width {
@@ -1268,23 +1429,36 @@ mod hardware_tests {
     #[ignore]
     fn v4l2_node_answers_for_the_sizes_it_encodes() {
         assert!(available(), "no M2M encode node on this machine");
-        assert!(encodes(Codec::H264, 1920, 1080), "1080p is inside every such device's range");
+        assert!(
+            encodes(Codec::H264, 1920, 1080),
+            "1080p is inside every such device's range"
+        );
         assert!(!encodes(Codec::H264, 0, 0), "a zero size is not encodable");
     }
 
     #[test]
     #[ignore]
     fn v4l2_encodes_host_frames_to_h264() {
-        let mut encoder =
-            V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false).expect("the session comes up");
+        let mut encoder = V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false)
+            .expect("the session comes up");
         let frame = chart(1280, 720);
-        let first = encoder.encode_host(&frame, 1280 * 4, false, 0, 26, true).expect("first frame");
+        let first = encoder
+            .encode_host(&frame, 1280 * 4, false, 0, 26, true)
+            .expect("first frame");
         let types = nal_types(&first);
         assert!(!first.is_empty(), "the first access unit is empty");
-        assert!(types.contains(&7), "the key frame carries no SPS: {types:?}");
-        assert!(types.contains(&5), "the first frame is not an IDR: {types:?}");
+        assert!(
+            types.contains(&7),
+            "the key frame carries no SPS: {types:?}"
+        );
+        assert!(
+            types.contains(&5),
+            "the first frame is not an IDR: {types:?}"
+        );
 
-        let second = encoder.encode_host(&frame, 1280 * 4, false, 1, 26, false).expect("second");
+        let second = encoder
+            .encode_host(&frame, 1280 * 4, false, 1, 26, false)
+            .expect("second");
         assert!(!second.is_empty(), "the second access unit is empty");
         assert!(
             second.len() < first.len(),
@@ -1299,15 +1473,21 @@ mod hardware_tests {
     #[test]
     #[ignore]
     fn v4l2_takes_a_live_rate_change() {
-        let mut encoder =
-            V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false).expect("the session comes up");
+        let mut encoder = V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false)
+            .expect("the session comes up");
         let frame = chart(1280, 720);
-        encoder.encode_host(&frame, 1280 * 4, false, 0, 26, true).expect("first frame");
+        encoder
+            .encode_host(&frame, 1280 * 4, false, 0, 26, true)
+            .expect("first frame");
         let mut lowered = settings(1280, 720);
         lowered.video_bitrate_kbps = 1000;
         lowered.target_fps = 15.0;
-        encoder.reconfigure_rate(&lowered).expect("the device takes a live rate change");
-        encoder.encode_host(&frame, 1280 * 4, false, 1, 26, false).expect("a frame after it");
+        encoder
+            .reconfigure_rate(&lowered)
+            .expect("the device takes a live rate change");
+        encoder
+            .encode_host(&frame, 1280 * 4, false, 1, 26, false)
+            .expect("a frame after it");
     }
 
     /// What the device costs at 1080p, printed to quote rather than asserted: the frame rate it
@@ -1330,8 +1510,8 @@ mod hardware_tests {
             ("noise  ", (0..4).map(|n| moving(w, h, n)).collect()),
         ];
         for (name, frames) in contents {
-            let mut encoder =
-                V4l2M2mEncoder::new(Codec::H264, &settings(width, height), false).expect("the session comes up");
+            let mut encoder = V4l2M2mEncoder::new(Codec::H264, &settings(width, height), false)
+                .expect("the session comes up");
             let cpu_before = process_cpu_seconds();
             let started = std::time::Instant::now();
             let mut bytes = 0usize;
@@ -1358,7 +1538,10 @@ mod hardware_tests {
 
     /// CPU charged to this process, user and system, across every thread.
     fn process_cpu_seconds() -> f64 {
-        let mut spec = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut spec = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut spec) };
         spec.tv_sec as f64 + spec.tv_nsec as f64 / 1e9
     }
@@ -1366,7 +1549,13 @@ mod hardware_tests {
     /// The chart with its bars walked sideways, which is what a window being dragged looks like
     /// to an encoder: flat areas that move rather than pixels that change everywhere.
     fn shifted_chart(width: usize, height: usize, step: usize) -> Vec<u8> {
-        let colors = [[255u8, 255, 255], [0, 0, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
+        let colors = [
+            [255u8, 255, 255],
+            [0, 0, 0],
+            [0, 0, 255],
+            [0, 255, 0],
+            [255, 0, 0],
+        ];
         let mut frame = Vec::with_capacity(width * height * 4);
         for _ in 0..height {
             for x in 0..width {
@@ -1384,7 +1573,12 @@ mod hardware_tests {
         for y in 0..height {
             for x in 0..width {
                 let value = ((x + step * 37) ^ (y + step * 11)) as u8;
-                frame.extend_from_slice(&[value, value.wrapping_mul(3), value.wrapping_mul(7), 255]);
+                frame.extend_from_slice(&[
+                    value,
+                    value.wrapping_mul(3),
+                    value.wrapping_mul(7),
+                    255,
+                ]);
             }
         }
         frame
@@ -1400,7 +1594,10 @@ mod hardware_tests {
         asked.target_fps = 60.0;
         let encoder = V4l2M2mEncoder::new(Codec::H264, &asked, false)
             .expect("a session came up at some rate the device takes");
-        assert!(encoder.fps <= 60.0, "the session reports a rate it never asked for");
+        assert!(
+            encoder.fps <= 60.0,
+            "the session reports a rate it never asked for"
+        );
         assert!(encoder.fps >= 15.0, "the session stepped below the floor");
     }
 
@@ -1413,12 +1610,17 @@ mod hardware_tests {
     fn v4l2_the_color_reads_back_through_a_decoder() {
         use crate::webcam::decode::{ColorTags, Decoder as _, VideoDecoder};
 
-        let mut encoder =
-            V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false).expect("the session comes up");
+        let mut encoder = V4l2M2mEncoder::new(Codec::H264, &settings(1280, 720), false)
+            .expect("the session comes up");
         let frame = chart(1280, 720);
-        let unit = encoder.encode_host(&frame, 1280 * 4, false, 0, 26, true).expect("a frame");
+        let unit = encoder
+            .encode_host(&frame, 1280 * 4, false, 0, 26, true)
+            .expect("a frame");
         let mut decoder = VideoDecoder::new(Codec::H264).expect("a decoder");
-        assert!(decoder.decode(&unit).expect("the stream decodes"), "no frame came back");
+        assert!(
+            decoder.decode(&unit).expect("the stream decodes"),
+            "no frame came back"
+        );
 
         let Some(signal) = encoder.signal() else {
             assert_eq!(
@@ -1430,7 +1632,10 @@ mod hardware_tests {
         };
         assert_eq!(
             decoder.color_tags(),
-            Some(ColorTags { matrix: signal.matrix, full_range: signal.full_range }),
+            Some(ColorTags {
+                matrix: signal.matrix,
+                full_range: signal.full_range
+            }),
             "the decoder reads a different signal than the session declares"
         );
     }
@@ -1440,11 +1645,17 @@ mod hardware_tests {
     fn v4l2_refuses_a_size_past_the_ceiling() {
         let info = node().expect("a node");
         let too_wide = (info.max_width + info.step_width.max(2)) as i32;
-        assert!(!encodes(Codec::H264, too_wide, 1080), "a size past the ceiling reported as encodable");
+        assert!(
+            !encodes(Codec::H264, too_wide, 1080),
+            "a size past the ceiling reported as encodable"
+        );
         let error = match V4l2M2mEncoder::new(Codec::H264, &settings(too_wide, 1080), false) {
             Ok(_) => panic!("a session past the ceiling came up"),
             Err(e) => e,
         };
-        assert!(error.contains("encodes"), "the refusal does not name the range: {error}");
+        assert!(
+            error.contains("encodes"),
+            "the refusal does not name the range: {error}"
+        );
     }
 }

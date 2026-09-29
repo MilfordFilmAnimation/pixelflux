@@ -30,13 +30,13 @@ use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes::ConnectionExt as XfixesExt;
 use x11rb::protocol::xproto::{
-    ConnectionExt as XprotoExt, ImageFormat, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT,
+    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as XprotoExt, ImageFormat,
     KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::xtest::ConnectionExt as XtestExt;
 use x11rb::rust_connection::RustConnection;
 
-use crate::computer_use::{encode_png_rgba, CuBackend, CuButton};
+use crate::computer_use::{CuBackend, CuButton, encode_png_rgba};
 
 /// One wheel "click" of scroll per unit of CU `scroll_amount`, capped so a hostile amount
 /// cannot flood the server with press/release pairs.
@@ -83,7 +83,12 @@ impl CuX11Backend {
             .ok()
             .and_then(|c| c.reply().ok())
             .is_some();
-        Ok(Self { conn, root, has_xfixes, reverse_keymap: RefCell::new(None) })
+        Ok(Self {
+            conn,
+            root,
+            has_xfixes,
+            reverse_keymap: RefCell::new(None),
+        })
     }
 
     /// Build the reverse view of the server's current keymap from `GetKeyboardMapping`.
@@ -95,7 +100,10 @@ impl CuX11Backend {
     /// when the map carries a level-3 modifier key to synthesize; columns 2/3 (group 2)
     /// never are.
     fn build_reverse_keymap(&self) -> ServerKeymap {
-        let mut km = ServerKeymap { by_sym: HashMap::new(), altgr_keycode: 0 };
+        let mut km = ServerKeymap {
+            by_sym: HashMap::new(),
+            altgr_keycode: 0,
+        };
         let setup = self.conn.setup();
         let (lo, hi) = (setup.min_keycode, setup.max_keycode);
         let Some(reply) = self
@@ -129,7 +137,9 @@ impl CuX11Backend {
             for (i, syms) in reply.keysyms.chunks_exact(per).enumerate() {
                 let sym = syms[col];
                 if sym != 0 {
-                    km.by_sym.entry(sym).or_insert((lo as u32 + i as u32, level));
+                    km.by_sym
+                        .entry(sym)
+                        .or_insert((lo as u32 + i as u32, level));
                 }
             }
         }
@@ -298,8 +308,7 @@ impl CuX11Backend {
             // Still ours when every populated level carries OUR keysym: the server's XKB
             // integration mirrors a core single-group binding into the group-2 columns,
             // so the refetch shows `sym` at more levels than the bind wrote.
-            let still_ours =
-                cur.contains(&sym) && cur.iter().all(|&s| s == 0 || s == sym);
+            let still_ours = cur.contains(&sym) && cur.iter().all(|&s| s == 0 || s == sym);
             if still_ours {
                 cur.fill(0);
                 changed = true;
@@ -361,7 +370,11 @@ impl CuBackend for CuX11Backend {
         if scancode > u8::MAX as u32 {
             return;
         }
-        let kind = if pressed { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT };
+        let kind = if pressed {
+            KEY_PRESS_EVENT
+        } else {
+            KEY_RELEASE_EVENT
+        };
         self.fake_input(kind, scancode as u8, x11rb::NONE, 0, 0);
     }
 
@@ -382,7 +395,11 @@ impl CuBackend for CuX11Backend {
             CuButton::Middle => 2,
             CuButton::Right => 3,
         };
-        let kind = if pressed { BUTTON_PRESS_EVENT } else { BUTTON_RELEASE_EVENT };
+        let kind = if pressed {
+            BUTTON_PRESS_EVENT
+        } else {
+            BUTTON_RELEASE_EVENT
+        };
         self.fake_input(kind, detail, x11rb::NONE, 0, 0);
     }
 
@@ -422,7 +439,9 @@ impl CuBackend for CuX11Backend {
         if data.len() != expected {
             return Err(format!(
                 "unexpected image size {} for {}x{} (only 32-bpp roots are supported)",
-                data.len(), w, h
+                data.len(),
+                w,
+                h
             ));
         }
         // The agent needs to see the pointer; the stream's cursor settings do not apply here.
@@ -432,21 +451,22 @@ impl CuBackend for CuX11Backend {
                 .xfixes_get_cursor_image()
                 .ok()
                 .and_then(|c| c.reply().ok())
-                && c.width > 0 && c.height > 0 {
-                    let (img_x, img_y) =
-                        super::cursor_image_origin(c.x, c.y, c.xhot, c.yhot, 0, 0);
-                    super::overlay_cursor(
-                        &mut data,
-                        w as usize * 4,
-                        w as i32,
-                        h as i32,
-                        c.width as i32,
-                        c.height as i32,
-                        &c.cursor_image,
-                        img_x,
-                        img_y,
-                    );
-                }
+            && c.width > 0
+            && c.height > 0
+        {
+            let (img_x, img_y) = super::cursor_image_origin(c.x, c.y, c.xhot, c.yhot, 0, 0);
+            super::overlay_cursor(
+                &mut data,
+                w as usize * 4,
+                w as i32,
+                h as i32,
+                c.width as i32,
+                c.height as i32,
+                &c.cursor_image,
+                img_x,
+                img_y,
+            );
+        }
         // The grab is BGRX; the padding byte is undefined for depth-24 roots, so alpha is
         // forced opaque or the PNG would come out transparent.
         for px in data.as_chunks_mut::<4>().0 {
@@ -477,7 +497,9 @@ impl CuBackend for CuX11Backend {
 
     fn altgr_keycode(&self) -> u32 {
         let mut cached = self.reverse_keymap.borrow_mut();
-        cached.get_or_insert_with(|| self.build_reverse_keymap()).altgr_keycode
+        cached
+            .get_or_insert_with(|| self.build_reverse_keymap())
+            .altgr_keycode
     }
 
     fn with_transient_keysyms(&self, keysyms: &[u32], seq: &mut dyn FnMut(&HashMap<u32, u32>)) {

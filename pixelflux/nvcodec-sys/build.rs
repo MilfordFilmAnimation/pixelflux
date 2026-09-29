@@ -47,7 +47,10 @@
 #[cfg(feature = "regen")]
 fn mark_extern_blocks_unsafe(path: &std::path::Path) -> std::io::Result<()> {
     let src = std::fs::read_to_string(path)?;
-    std::fs::write(path, src.replace("\nextern \"C\" {", "\nunsafe extern \"C\" {"))
+    std::fs::write(
+        path,
+        src.replace("\nextern \"C\" {", "\nunsafe extern \"C\" {"),
+    )
 }
 
 #[cfg(feature = "regen")]
@@ -67,7 +70,9 @@ fn main() -> std::io::Result<()> {
         .allowlist_var("NV_MAX.*")
         .size_t_is_usize(true)
         .layout_tests(true)
-        .default_enum_style(bindgen::EnumVariation::Rust { non_exhaustive: false })
+        .default_enum_style(bindgen::EnumVariation::Rust {
+            non_exhaustive: false,
+        })
         .newtype_enum("_NVENCSTATUS")
         .newtype_enum("_NV_ENC_PIC_TYPE")
         .newtype_enum("_NV_ENC_PIC_STRUCT")
@@ -126,23 +131,48 @@ fn main() -> std::io::Result<()> {
     if let Ok(cuda_path) = std::env::var("CUDA_PATH") {
         let cuda_header = format!("{}/include/cuda.h", cuda_path);
         let cuda_funcs = [
-            "cuGetErrorString", "cuGetErrorName", "cuInit", "cuDeviceGetCount", "cuDeviceGet",
-            "cuDeviceGetName", "cuDeviceGetUuid", "cuCtxCreate_v2", "cuCtxDestroy_v2",
-            "cuCtxPushCurrent_v2", "cuCtxPopCurrent_v2", "cuStreamCreate", "cuStreamDestroy_v2",
-            "cuMemAllocHost_v2", "cuMemAllocPitch_v2", "cuMemFree_v2", "cuMemFreeHost",
-            "cuMemcpy2D_v2", "cuMemcpy2DUnaligned_v2", "cuMemcpy2DAsync_v2", "cuMemcpyDtoH_v2",
-            "cuImportExternalMemory", "cuImportExternalSemaphore", "cuExternalMemoryGetMappedBuffer",
-            "cuExternalMemoryGetMappedMipmappedArray", "cuMipmappedArrayGetLevel",
-            "cuMipmappedArrayDestroy", "cuDestroyExternalMemory", "cuDestroyExternalSemaphore",
-            "cuWaitExternalSemaphoresAsync", "cuSignalExternalSemaphoresAsync",
-            "cuTexObjectCreate", "cuTexObjectDestroy",
+            "cuGetErrorString",
+            "cuGetErrorName",
+            "cuInit",
+            "cuDeviceGetCount",
+            "cuDeviceGet",
+            "cuDeviceGetName",
+            "cuDeviceGetUuid",
+            "cuCtxCreate_v2",
+            "cuCtxDestroy_v2",
+            "cuCtxPushCurrent_v2",
+            "cuCtxPopCurrent_v2",
+            "cuStreamCreate",
+            "cuStreamDestroy_v2",
+            "cuMemAllocHost_v2",
+            "cuMemAllocPitch_v2",
+            "cuMemFree_v2",
+            "cuMemFreeHost",
+            "cuMemcpy2D_v2",
+            "cuMemcpy2DUnaligned_v2",
+            "cuMemcpy2DAsync_v2",
+            "cuMemcpyDtoH_v2",
+            "cuImportExternalMemory",
+            "cuImportExternalSemaphore",
+            "cuExternalMemoryGetMappedBuffer",
+            "cuExternalMemoryGetMappedMipmappedArray",
+            "cuMipmappedArrayGetLevel",
+            "cuMipmappedArrayDestroy",
+            "cuDestroyExternalMemory",
+            "cuDestroyExternalSemaphore",
+            "cuWaitExternalSemaphoresAsync",
+            "cuSignalExternalSemaphoresAsync",
+            "cuTexObjectCreate",
+            "cuTexObjectDestroy",
         ];
         let mut cuda_builder = bindgen::builder()
             .header(&cuda_header)
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .size_t_is_usize(true)
             .layout_tests(true)
-            .default_enum_style(bindgen::EnumVariation::Rust { non_exhaustive: false })
+            .default_enum_style(bindgen::EnumVariation::Rust {
+                non_exhaustive: false,
+            })
             .newtype_enum("cudaError_enum")
             .newtype_enum("CUmemorytype_enum")
             .generate_comments(false)

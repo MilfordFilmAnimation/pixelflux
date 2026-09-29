@@ -38,8 +38,8 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gbm::{BufferObject, BufferObjectFlags, Device as RawGbmDevice, Format as GbmFormat};
@@ -54,15 +54,15 @@ use x11rb::protocol::xproto::{self, ConnectionExt as XprotoExt, ImageFormat, Ima
 use x11rb::rust_connection::RustConnection;
 
 use super::{
-    clamp_offset, cursor_image_origin, require_32bpp, resolve_dims, wait_for_frame, Controls,
-    RootDamage,
+    Controls, RootDamage, clamp_offset, cursor_image_origin, require_32bpp, resolve_dims,
+    wait_for_frame,
 };
+use crate::RustCaptureSettings;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
 use crate::encoders::{self, FrameEncoder, FrameSource};
 use crate::pace::{FramePace, TickTrigger};
-use crate::pipeline::{decide_hw_fullframe, Damage, EncoderQuality};
+use crate::pipeline::{Damage, EncoderQuality, decide_hw_fullframe};
 use crate::recording_sink::RecordingSink;
-use crate::RustCaptureSettings;
 
 /// GPU buffers the screen is blitted into, used round-robin so an encoder still reading the
 /// previous frame never has the next blitted over it.
@@ -181,21 +181,34 @@ fn x_err(what: &str, e: impl std::fmt::Display) -> String {
 
 /// The DRM device a file descriptor names, as the kernel numbers it.
 fn device_of_fd(fd: &OwnedFd) -> Result<u64, String> {
-    let file = File::from(fd.try_clone().map_err(|e| x_err("dup of the DRI3 device", e))?);
-    file.metadata().map(|m| m.rdev()).map_err(|e| x_err("fstat of the DRI3 device", e))
+    let file = File::from(
+        fd.try_clone()
+            .map_err(|e| x_err("dup of the DRI3 device", e))?,
+    );
+    file.metadata()
+        .map(|m| m.rdev())
+        .map_err(|e| x_err("fstat of the DRI3 device", e))
 }
 
 /// Whether two DRM nodes belong to one GPU: an Xorg whose glamor runs on the modesetting
 /// driver hands DRI3 clients its primary node, where the encoder opens the render node.
 fn same_gpu(a: u64, b: u64) -> bool {
-    let gpu = |dev: u64| std::fs::canonicalize(format!("/sys/dev/char/{}:{}/device", libc::major(dev), libc::minor(dev))).ok();
+    let gpu = |dev: u64| {
+        std::fs::canonicalize(format!(
+            "/sys/dev/char/{}:{}/device",
+            libc::major(dev),
+            libc::minor(dev)
+        ))
+        .ok()
+    };
     a == b || gpu(a).is_some_and(|g| gpu(b) == Some(g))
 }
 
 impl XScreen {
     /// Connect and negotiate everything the blit needs, or say what the server lacks.
     fn open(node: i32) -> Result<(Self, OwnedFd), String> {
-        let (conn, screen_num) = x11rb::connect(None).map_err(|e| x_err("X11 connect failed", e))?;
+        let (conn, screen_num) =
+            x11rb::connect(None).map_err(|e| x_err("X11 connect failed", e))?;
         require_32bpp(&conn, screen_num)?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -223,7 +236,8 @@ impl XScreen {
             .reply()
             .map_err(|e| x_err("the server has no Render extension", e))?
             .formats;
-        let direct = |f: &render::Pictforminfo, d: u8| f.type_ == render::PictType::DIRECT && f.depth == d;
+        let direct =
+            |f: &render::Pictforminfo, d: u8| f.type_ == render::PictType::DIRECT && f.depth == d;
         let rgb_format = formats
             .iter()
             .find(|f| direct(f, depth) && f.direct.red_shift == 16 && f.direct.blue_shift == 0)
@@ -310,23 +324,57 @@ impl XScreen {
     /// premultiplied 0xAARRGGBB word per pixel, which is what Render's OVER expects.
     fn upload_sprite(&self, argb: &[u32], width: u16, height: u16) -> Result<Sprite, String> {
         let conn = &self.conn;
-        let pixmap = conn.generate_id().map_err(|e| x_err("sprite pixmap id", e))?;
+        let pixmap = conn
+            .generate_id()
+            .map_err(|e| x_err("sprite pixmap id", e))?;
         conn.create_pixmap(32, pixmap, self.root, width, height)
             .map_err(|e| x_err("sprite CreatePixmap", e))?;
         let gc = conn.generate_id().map_err(|e| x_err("sprite GC id", e))?;
-        conn.create_gc(gc, pixmap, &xproto::CreateGCAux::new().graphics_exposures(0))
-            .map_err(|e| x_err("sprite CreateGC", e))?;
-        let picture = conn.generate_id().map_err(|e| x_err("sprite picture id", e))?;
-        conn.render_create_picture(picture, pixmap, self.argb_format, &render::CreatePictureAux::new())
-            .map_err(|e| x_err("sprite CreatePicture", e))?;
+        conn.create_gc(
+            gc,
+            pixmap,
+            &xproto::CreateGCAux::new().graphics_exposures(0),
+        )
+        .map_err(|e| x_err("sprite CreateGC", e))?;
+        let picture = conn
+            .generate_id()
+            .map_err(|e| x_err("sprite picture id", e))?;
+        conn.render_create_picture(
+            picture,
+            pixmap,
+            self.argb_format,
+            &render::CreatePictureAux::new(),
+        )
+        .map_err(|e| x_err("sprite CreatePicture", e))?;
         let mut data = Vec::with_capacity(argb.len() * 4);
         for px in argb {
-            let bytes = if self.byte_order == ImageOrder::LSB_FIRST { px.to_le_bytes() } else { px.to_be_bytes() };
+            let bytes = if self.byte_order == ImageOrder::LSB_FIRST {
+                px.to_le_bytes()
+            } else {
+                px.to_be_bytes()
+            };
             data.extend_from_slice(&bytes);
         }
-        conn.put_image(ImageFormat::Z_PIXMAP, pixmap, gc, width, height, 0, 0, 0, 32, &data)
-            .map_err(|e| x_err("sprite PutImage", e))?;
-        Ok(Sprite { pixmap, picture, gc, width, height })
+        conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            pixmap,
+            gc,
+            width,
+            height,
+            0,
+            0,
+            0,
+            32,
+            &data,
+        )
+        .map_err(|e| x_err("sprite PutImage", e))?;
+        Ok(Sprite {
+            pixmap,
+            picture,
+            gc,
+            width,
+            height,
+        })
     }
 
     fn free_sprite(&self, s: &Sprite) {
@@ -355,8 +403,12 @@ impl GpuCapture {
     fn alloc_bo(&mut self, w: u16, h: u16) -> Result<BufferObject<()>, String> {
         loop {
             let bo = if self.x.modifiers.is_empty() {
-                self.gbm
-                    .create_buffer_object::<()>(w as u32, h as u32, GbmFormat::Argb8888, BufferObjectFlags::RENDERING)
+                self.gbm.create_buffer_object::<()>(
+                    w as u32,
+                    h as u32,
+                    GbmFormat::Argb8888,
+                    BufferObjectFlags::RENDERING,
+                )
             } else {
                 // The entry point without the flags argument, which implies exactly the
                 // rendering use this asks for: the one that takes flags arrived in Mesa 21.1
@@ -372,7 +424,9 @@ impl GpuCapture {
             let bo = match bo {
                 Ok(bo) => bo,
                 Err(e) if !self.x.modifiers.is_empty() => {
-                    crate::log::debug!("[X11] DRI3 capture: allocation with the server's modifiers failed ({e:?}); trying without");
+                    crate::log::debug!(
+                        "[X11] DRI3 capture: allocation with the server's modifiers failed ({e:?}); trying without"
+                    );
                     self.x.modifiers.clear();
                     continue;
                 }
@@ -403,9 +457,15 @@ impl GpuCapture {
         for _ in 0..POOL_N {
             let bo = self.alloc_bo(w, h)?;
             let dmabuf = crate::create_dmabuf_from_bo(&bo);
-            let server_fd = bo.fd().map_err(|e| format!("dmabuf fd for the server: {e:?}"))?;
+            let server_fd = bo
+                .fd()
+                .map_err(|e| format!("dmabuf fd for the server: {e:?}"))?;
             let modifier: u64 = bo.modifier().into();
-            let pixmap = self.x.conn.generate_id().map_err(|e| x_err("pixmap id", e))?;
+            let pixmap = self
+                .x
+                .conn
+                .generate_id()
+                .map_err(|e| x_err("pixmap id", e))?;
             self.x
                 .conn
                 .dri3_pixmap_from_buffers(
@@ -428,15 +488,31 @@ impl GpuCapture {
                 )
                 .map_err(|e| x_err("PixmapFromBuffers", e))?
                 .check()
-                .map_err(|e| format!("the server did not import the buffer (modifier {modifier:#x}): {e}"))?;
-            let picture = self.x.conn.generate_id().map_err(|e| x_err("picture id", e))?;
+                .map_err(|e| {
+                    format!("the server did not import the buffer (modifier {modifier:#x}): {e}")
+                })?;
+            let picture = self
+                .x
+                .conn
+                .generate_id()
+                .map_err(|e| x_err("picture id", e))?;
             self.x
                 .conn
-                .render_create_picture(picture, pixmap, self.x.rgb_format, &render::CreatePictureAux::new())
+                .render_create_picture(
+                    picture,
+                    pixmap,
+                    self.x.rgb_format,
+                    &render::CreatePictureAux::new(),
+                )
                 .map_err(|e| x_err("CreatePicture", e))?
                 .check()
                 .map_err(|e| x_err("CreatePicture", e))?;
-            fresh.push(GpuBuffer { _bo: bo, dmabuf, pixmap, picture });
+            fresh.push(GpuBuffer {
+                _bo: bo,
+                dmabuf,
+                pixmap,
+                picture,
+            });
         }
         self.free_buffers();
         self.buffers = fresh;
@@ -457,8 +533,12 @@ impl GpuCapture {
         self.settings.width = w as i32;
         self.settings.height = h as i32;
         let in_place = match self.encoder.as_mut() {
-            Some(FrameEncoder::Nvenc(enc)) => enc.reconfigure_resolution(&self.settings).map(|_| ()),
-            Some(FrameEncoder::Vaapi(_)) => Err("a VA-API session is rebuilt at a new size".to_string()),
+            Some(FrameEncoder::Nvenc(enc)) => {
+                enc.reconfigure_resolution(&self.settings).map(|_| ())
+            }
+            Some(FrameEncoder::Vaapi(_)) => {
+                Err("a VA-API session is rebuilt at a new size".to_string())
+            }
             Some(FrameEncoder::Vpx(_) | FrameEncoder::Hevc(_) | FrameEncoder::Av1(_)) => {
                 Err("a software session takes host frames".to_string())
             }
@@ -480,19 +560,26 @@ impl GpuCapture {
     }
 
     fn enc(&mut self) -> &mut FrameEncoder {
-        self.encoder.as_mut().expect("the DRI3 capture always carries an encoder between frames")
+        self.encoder
+            .as_mut()
+            .expect("the DRI3 capture always carries an encoder between frames")
     }
 
     /// The encoder's name for the logs.
     fn backend(&self) -> &'static str {
-        self.encoder.as_ref().map(|e| e.backend_name()).unwrap_or("none")
+        self.encoder
+            .as_ref()
+            .map(|e| e.backend_name())
+            .unwrap_or("none")
     }
 
     /// Replace the encoder with the startup construction, releasing the old session first so
     /// the two never hold device memory at once.
     fn rebuild_encoder(&mut self) -> Result<(), String> {
         drop(self.encoder.take());
-        let source = FrameSource::Dmabuf { egl_display: self.egl_display };
+        let source = FrameSource::Dmabuf {
+            egl_display: self.egl_display,
+        };
         let mut settings = self.settings.clone();
         match encoders::select_frame_encoder(&mut settings, source, None, "X11") {
             Some(enc) if enc.is_hardware() => {
@@ -514,7 +601,17 @@ impl GpuCapture {
         let dst = self.buffers[idx].pixmap;
         self.x
             .conn
-            .copy_area(self.x.root, dst, self.x.gc, self.cap_x, self.cap_y, 0, 0, w, h)
+            .copy_area(
+                self.x.root,
+                dst,
+                self.x.gc,
+                self.cap_x,
+                self.cap_y,
+                0,
+                0,
+                w,
+                h,
+            )
             .map_err(|e| x_err("CopyArea", e))?;
         if with_cursor {
             self.composite_cursor(idx)?;
@@ -548,7 +645,8 @@ impl GpuCapture {
             self.watermark = Some(self.x.upload_sprite(&argb, w as u16, h as u16)?);
         }
         let (fw, fh) = (self.settings.width, self.settings.height);
-        self.overlay.update_position(fw, fh, self.request.watermark_location_enum);
+        self.overlay
+            .update_position(fw, fh, self.request.watermark_location_enum);
         let (x, y) = self.overlay.position();
         let sprite = self.watermark.as_ref().unwrap();
         if x >= fw || y >= fh || x + sprite.width as i32 <= 0 || y + sprite.height as i32 <= 0 {
@@ -589,37 +687,79 @@ impl GpuCapture {
         if c.width == 0 || c.height == 0 {
             return Ok(());
         }
-        let stale = self
-            .cursor
-            .as_ref()
-            .is_none_or(|s| s.serial != c.cursor_serial || s.width != c.width || s.height != c.height);
+        let stale = self.cursor.as_ref().is_none_or(|s| {
+            s.serial != c.cursor_serial || s.width != c.width || s.height != c.height
+        });
         if stale {
             if let Some(old) = self.cursor.take() {
                 self.x.free_cursor(&old);
             }
             let conn = &self.x.conn;
-            let pixmap = conn.generate_id().map_err(|e| x_err("cursor pixmap id", e))?;
+            let pixmap = conn
+                .generate_id()
+                .map_err(|e| x_err("cursor pixmap id", e))?;
             conn.create_pixmap(32, pixmap, self.x.root, c.width, c.height)
                 .map_err(|e| x_err("cursor CreatePixmap", e))?;
             let gc = conn.generate_id().map_err(|e| x_err("cursor GC id", e))?;
-            conn.create_gc(gc, pixmap, &xproto::CreateGCAux::new().graphics_exposures(0))
-                .map_err(|e| x_err("cursor CreateGC", e))?;
-            let picture = conn.generate_id().map_err(|e| x_err("cursor picture id", e))?;
-            conn.render_create_picture(picture, pixmap, self.x.argb_format, &render::CreatePictureAux::new())
-                .map_err(|e| x_err("cursor CreatePicture", e))?;
+            conn.create_gc(
+                gc,
+                pixmap,
+                &xproto::CreateGCAux::new().graphics_exposures(0),
+            )
+            .map_err(|e| x_err("cursor CreateGC", e))?;
+            let picture = conn
+                .generate_id()
+                .map_err(|e| x_err("cursor picture id", e))?;
+            conn.render_create_picture(
+                picture,
+                pixmap,
+                self.x.argb_format,
+                &render::CreatePictureAux::new(),
+            )
+            .map_err(|e| x_err("cursor CreatePicture", e))?;
             let mut data = Vec::with_capacity(c.cursor_image.len() * 4);
             for px in &c.cursor_image {
-                let bytes = if self.x.byte_order == ImageOrder::LSB_FIRST { px.to_le_bytes() } else { px.to_be_bytes() };
+                let bytes = if self.x.byte_order == ImageOrder::LSB_FIRST {
+                    px.to_le_bytes()
+                } else {
+                    px.to_be_bytes()
+                };
                 data.extend_from_slice(&bytes);
             }
-            conn.put_image(ImageFormat::Z_PIXMAP, pixmap, gc, c.width, c.height, 0, 0, 0, 32, &data)
-                .map_err(|e| x_err("cursor PutImage", e))?;
-            self.cursor = Some(CursorSprite { pixmap, picture, gc, width: c.width, height: c.height, serial: c.cursor_serial });
+            conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap,
+                gc,
+                c.width,
+                c.height,
+                0,
+                0,
+                0,
+                32,
+                &data,
+            )
+            .map_err(|e| x_err("cursor PutImage", e))?;
+            self.cursor = Some(CursorSprite {
+                pixmap,
+                picture,
+                gc,
+                width: c.width,
+                height: c.height,
+                serial: c.cursor_serial,
+            });
         }
         let sprite = self.cursor.as_ref().unwrap();
-        let (img_x, img_y) = cursor_image_origin(c.x, c.y, c.xhot, c.yhot, self.cap_x as i32, self.cap_y as i32);
+        let (img_x, img_y) = cursor_image_origin(
+            c.x,
+            c.y,
+            c.xhot,
+            c.yhot,
+            self.cap_x as i32,
+            self.cap_y as i32,
+        );
         let (fw, fh) = (self.settings.width, self.settings.height);
-        if img_x >= fw || img_y >= fh || img_x + c.width as i32 <= 0 || img_y + c.height as i32 <= 0 {
+        if img_x >= fw || img_y >= fh || img_x + c.width as i32 <= 0 || img_y + c.height as i32 <= 0
+        {
             return Ok(());
         }
         self.x
@@ -696,14 +836,22 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
         .ok()
         .and_then(|dev| unsafe { EGLDisplay::new(dev) }.ok());
     if wants_egl && egl.is_none() {
-        return declined(&format!("no EGL display on {} for the NVENC import", x.device));
+        return declined(&format!(
+            "no EGL display on {} for the NVENC import",
+            x.device
+        ));
     }
     let egl_display = egl
         .as_ref()
         .map(|e| e.get_display_handle().handle)
         .unwrap_or(std::ptr::null());
 
-    let geo = match x.conn.get_geometry(x.root).ok().and_then(|c| c.reply().ok()) {
+    let geo = match x
+        .conn
+        .get_geometry(x.root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+    {
         Some(g) => g,
         None => return declined("the root geometry could not be read"),
     };
@@ -739,7 +887,12 @@ fn open(settings: &RustCaptureSettings) -> Option<GpuCapture> {
         return declined(&e);
     }
     let mut live = gpu.settings.clone();
-    gpu.encoder = match encoders::select_frame_encoder(&mut live, FrameSource::Dmabuf { egl_display }, None, "X11") {
+    gpu.encoder = match encoders::select_frame_encoder(
+        &mut live,
+        FrameSource::Dmabuf { egl_display },
+        None,
+        "X11",
+    ) {
         Some(enc) if enc.is_hardware() => Some(enc),
         Some(_) => return declined("the session encodes in software"),
         None => return declined("no hardware encoder opened for this session"),
@@ -780,7 +933,9 @@ where
     F: FnMut(Vec<EncodedStripe>),
 {
     let mut gpu = open(&settings)?;
-    controls.codec.store(gpu.enc().codec().id(), Ordering::Relaxed);
+    controls
+        .codec
+        .store(gpu.enc().codec().id(), Ordering::Relaxed);
 
     let recording_sink = RecordingSink::try_bind(&settings.recording_socket, settings.target_fps);
     let mut state = StripeState::default();
@@ -822,17 +977,22 @@ where
             }
         }
         if controls.force_idr.swap(false, Ordering::Relaxed)
-            || recording_sink.as_ref().is_some_and(|s| s.should_force_idr())
+            || recording_sink
+                .as_ref()
+                .is_some_and(|s| s.should_force_idr())
         {
             pending_force_idr = true;
         }
         if controls.rate_dirty.swap(false, Ordering::Acquire) {
             gpu.settings.video_bitrate_kbps = controls.bitrate_kbps.load(Ordering::Relaxed);
-            gpu.settings.video_vbv_multiplier = controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+            gpu.settings.video_vbv_multiplier =
+                controls.vbv_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
             gpu.settings.target_fps = fps;
             let live = gpu.settings.clone();
             if let Err(e) = gpu.enc().reconfigure_rate(&live) {
-                eprintln!("[X11] DRI3 capture: rate reconfigure failed ({e}); rebuilding the encoder.");
+                eprintln!(
+                    "[X11] DRI3 capture: rate reconfigure failed ({e}); rebuilding the encoder."
+                );
                 if let Err(e) = gpu.rebuild_encoder() {
                     return Some(Err(format!("DRI3 capture ended: {e}")));
                 }
@@ -862,7 +1022,13 @@ where
             recheck_geometry = true;
         }
         if recheck_geometry {
-            match gpu.x.conn.get_geometry(gpu.x.root).ok().and_then(|c| c.reply().ok()) {
+            match gpu
+                .x
+                .conn
+                .get_geometry(gpu.x.root)
+                .ok()
+                .and_then(|c| c.reply().ok())
+            {
                 Some(g) => {
                     gpu.root_w = g.width;
                     gpu.root_h = g.height;
@@ -870,7 +1036,9 @@ where
                 None => {
                     x_failures += 1;
                     if x_failures > MAX_X_FAILURES {
-                        return Some(Err("DRI3 capture ended: the X server stopped answering".to_string()));
+                        return Some(Err(
+                            "DRI3 capture ended: the X server stopped answering".to_string()
+                        ));
                     }
                     continue;
                 }
@@ -880,7 +1048,9 @@ where
             let (w, h) = resolve_dims(gpu.root_w, gpu.root_h, &gpu.request);
             if w as i32 != gpu.settings.width || h as i32 != gpu.settings.height {
                 if let Err(e) = gpu.reshape(w, h) {
-                    return Some(Err(format!("DRI3 capture could not follow the new geometry: {e}")));
+                    return Some(Err(format!(
+                        "DRI3 capture could not follow the new geometry: {e}"
+                    )));
                 }
                 state = StripeState::default();
                 pending_force_idr = true;
@@ -892,7 +1062,11 @@ where
             &mut state,
             &gpu.settings,
             frame_counter,
-            if is_dirty { Damage::Unknown } else { Damage::None },
+            if is_dirty {
+                Damage::Unknown
+            } else {
+                Damage::None
+            },
             false,
             pending_force_idr,
             quality,
@@ -927,7 +1101,12 @@ where
             if let Some(q) = decision.hold_qp {
                 gpu.enc().hold_quantizer(q, decision.hold_band);
             }
-            let result = gpu.enc().encode_dmabuf(&dmabuf, frame_counter as u64, decision.target_qp, decision.force_idr);
+            let result = gpu.enc().encode_dmabuf(
+                &dmabuf,
+                frame_counter as u64,
+                decision.target_qp,
+                decision.force_idr,
+            );
             match result {
                 Ok(data) if !data.is_empty() => {
                     encode_errors = 0;
@@ -960,7 +1139,9 @@ where
                     if !delivered_any {
                         // Nothing has reached a client, so this is still the time to decline.
                         drop(gpu);
-                        declined(&format!("the encoder could not read the server's buffer: {e}"));
+                        declined(&format!(
+                            "the encoder could not read the server's buffer: {e}"
+                        ));
                         return None;
                     }
                     encode_errors += 1;
@@ -969,9 +1150,13 @@ where
                     }
                     if encode_errors >= crate::HW_ERROR_RECOVERY_THRESHOLD {
                         if encoder_rebuilt {
-                            return Some(Err("the encoder failed repeatedly on the DRI3 path".to_string()));
+                            return Some(Err(
+                                "the encoder failed repeatedly on the DRI3 path".to_string()
+                            ));
                         }
-                        eprintln!("[X11] rebuilding the encoder after repeated errors on the DRI3 path.");
+                        eprintln!(
+                            "[X11] rebuilding the encoder after repeated errors on the DRI3 path."
+                        );
                         if let Err(e) = gpu.rebuild_encoder() {
                             return Some(Err(format!("DRI3 capture ended: {e}")));
                         }
@@ -1039,17 +1224,19 @@ mod modifier_tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::*;
     use super::super::gpu_test_support::{decoded_mean, paint_root, painted_ycbcr, settings};
-    use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN};
-    use crate::webcam::decode::{VideoDecoder, Codec as DecCodec, Decoder};
+    use super::*;
+    use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, VIDEO_HEADER_LEN, parse_video_type};
+    use crate::webcam::decode::{Codec as DecCodec, Decoder, VideoDecoder};
 
     /// The primary node of the encode node's GPU is the same GPU to the DRI3 check, as the
     /// node an Xorg on the modesetting driver hands its DRI3 clients. Ignored by default.
     #[test]
     #[ignore]
     fn gpu_dri3_counts_the_primary_node_of_the_encode_gpu_as_it() {
-        let node = settings(crate::encoders::codec::Codec::H264).encode_node_index.max(0);
+        let node = settings(crate::encoders::codec::Codec::H264)
+            .encode_node_index
+            .max(0);
         let render = format!("/dev/dri/renderD{}", 128 + node);
         let render_dev = std::fs::metadata(&render).expect("encode node").rdev();
         let primary = std::fs::read_dir(format!("/sys/class/drm/renderD{}/device/drm", 128 + node))
@@ -1057,9 +1244,17 @@ mod gpu_tests {
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .find(|name| name.starts_with("card"))
             .expect("a primary node on the encode node's GPU");
-        let primary_dev = std::fs::metadata(format!("/dev/dri/{primary}")).expect("primary node").rdev();
-        assert_ne!(primary_dev, render_dev, "{primary} and {render} are distinct nodes");
-        assert!(same_gpu(primary_dev, render_dev), "{primary} is the GPU of {render}");
+        let primary_dev = std::fs::metadata(format!("/dev/dri/{primary}"))
+            .expect("primary node")
+            .rdev();
+        assert_ne!(
+            primary_dev, render_dev,
+            "{primary} and {render} are distinct nodes"
+        );
+        assert!(
+            same_gpu(primary_dev, render_dev),
+            "{primary} is the GPU of {render}"
+        );
     }
 
     /// The watermark is composited by the server, so it reaches the frame without the CPU
@@ -1083,21 +1278,32 @@ mod gpu_tests {
         let mut s = settings(crate::encoders::codec::Codec::H264);
         s.watermark_path = path.to_string_lossy().into_owned();
         let Some(mut gpu) = open(&s) else {
-            println!("the DRI3 path declined a watermarked session on this host; nothing to capture");
+            println!(
+                "the DRI3 path declined a watermarked session on this host; nothing to capture"
+            );
             return;
         };
         let idx = gpu.grab(false).expect("blit and composite");
         let dmabuf = gpu.buffers[idx].dmabuf.clone();
-        let pkt = gpu.enc().encode_dmabuf(&dmabuf, 0, 25, true).expect("encode in place");
+        let pkt = gpu
+            .enc()
+            .encode_dmabuf(&dmabuf, 0, 25, true)
+            .expect("encode in place");
         let mut dec = VideoDecoder::new(DecCodec::H264).expect("H.264 decoder");
-        assert!(dec.decode(&pkt[VIDEO_HEADER_LEN..]).expect("decode"), "no picture");
+        assert!(
+            dec.decode(&pkt[VIDEO_HEADER_LEN..]).expect("decode"),
+            "no picture"
+        );
         let v = dec.frame().expect("decoded frame");
         // Straight-alpha source over the painted screen, which is what both paths must produce.
-        let blend = |m: u8, bg: u8| {
-            (m as f64 * ALPHA as f64 + bg as f64 * (255.0 - ALPHA as f64)) / 255.0
-        };
+        let blend =
+            |m: u8, bg: u8| (m as f64 * ALPHA as f64 + bg as f64 * (255.0 - ALPHA as f64)) / 255.0;
         let want = crate::encoders::chroma_siting::ycbcr(
-            [blend(MARK.0, SCREEN.0), blend(MARK.1, SCREEN.1), blend(MARK.2, SCREEN.2)],
+            [
+                blend(MARK.0, SCREEN.0),
+                blend(MARK.1, SCREEN.1),
+                blend(MARK.2, SCREEN.2),
+            ],
             crate::encoders::chroma_siting::BT709,
         );
         let (mx, my) = (48usize, 48usize);
@@ -1142,24 +1348,40 @@ mod gpu_tests {
         let encode = |gpu: &mut GpuCapture, i: u64, key: bool| -> Vec<u8> {
             let idx = gpu.grab(false).expect("blit into the pool");
             let dmabuf = gpu.buffers[idx].dmabuf.clone();
-            gpu.enc().encode_dmabuf(&dmabuf, i, 25, key).expect("encode in place")
+            gpu.enc()
+                .encode_dmabuf(&dmabuf, i, 25, key)
+                .expect("encode in place")
         };
 
         let pkt = encode(&mut gpu, 0, true);
-        assert_eq!(parse_video_type(pkt[1]), Some((crate::encoders::codec::Codec::H264, FRAME_KEY)));
+        assert_eq!(
+            parse_video_type(pkt[1]),
+            Some((crate::encoders::codec::Codec::H264, FRAME_KEY))
+        );
         let mean = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
         let want = painted_ycbcr(FIRST);
         for i in 0..3 {
-            assert!((mean[i] - want[i]).abs() <= 8.0, "plane {i}: captured {:.1}, painted {:.1}", mean[i], want[i]);
+            assert!(
+                (mean[i] - want[i]).abs() <= 8.0,
+                "plane {i}: captured {:.1}, painted {:.1}",
+                mean[i],
+                want[i]
+            );
         }
 
         for i in 1..4u64 {
             let pkt = encode(&mut gpu, i, false);
-            assert_eq!(parse_video_type(pkt[1]), Some((crate::encoders::codec::Codec::H264, FRAME_DELTA)));
+            assert_eq!(
+                parse_video_type(pkt[1]),
+                Some((crate::encoders::codec::Codec::H264, FRAME_DELTA))
+            );
             let _ = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
         }
 
-        assert!(paint_root(SECOND), "the root was painted once, so a repaint must work");
+        assert!(
+            paint_root(SECOND),
+            "the root was painted once, so a repaint must work"
+        );
         let pkt = encode(&mut gpu, 4, false);
         let mean = decoded_mean(&mut dec, &pkt[VIDEO_HEADER_LEN..]);
         let want = painted_ycbcr(SECOND);

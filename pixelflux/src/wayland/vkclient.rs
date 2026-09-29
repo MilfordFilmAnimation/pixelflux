@@ -26,14 +26,14 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use wayland_client::protocol::{wl_registry, wl_seat};
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
     zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
 };
 
-use crate::wayland::keymap::{compile_rmlvo, KeymapPolicy};
-use crate::wayland::wlclient::{bounded_roundtrip, impl_sync_callback, memfd_with, SyncState};
+use crate::wayland::keymap::{KeymapPolicy, compile_rmlvo};
+use crate::wayland::wlclient::{SyncState, bounded_roundtrip, impl_sync_callback, memfd_with};
 
 /// Overlay keycodes stay under the X11 255 ceiling so XWayland apps under the app
 /// compositor can still receive them (the seat's own overlay sits above 255).
@@ -67,7 +67,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, .. } = event {
+        if let wl_registry::Event::Global {
+            name, interface, ..
+        } = event
+        {
             // Version 1 of each suffices: the seat is only the manager argument.
             match interface.as_str() {
                 "wl_seat" if state.seat.is_none() => {
@@ -90,7 +93,9 @@ delegate_noop!(Globals: ZwpVirtualKeyboardV1);
 /// commit, and xkbcommon compilation is the expensive part of a call.
 pub(crate) fn us_base_text() -> Option<&'static str> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE.get_or_init(|| compile_rmlvo("", "", "us", "", "")).as_deref()
+    CACHE
+        .get_or_init(|| compile_rmlvo("", "", "us", "", ""))
+        .as_deref()
 }
 
 /// The keymap policy over that base, shared across calls: rebuilding it costs a
@@ -101,9 +106,10 @@ fn shared_policy() -> Option<&'static Mutex<KeymapPolicy>> {
     static POLICY: OnceLock<Option<Mutex<KeymapPolicy>>> = OnceLock::new();
     POLICY
         .get_or_init(|| {
-            let mut policy =
-                KeymapPolicy::with_overlay_range(OVERLAY_FIRST_XKB, OVERLAY_LAST_XKB);
-            policy.rebuild_base(us_base_text()?.to_string()).then(|| Mutex::new(policy))
+            let mut policy = KeymapPolicy::with_overlay_range(OVERLAY_FIRST_XKB, OVERLAY_LAST_XKB);
+            policy
+                .rebuild_base(us_base_text()?.to_string())
+                .then(|| Mutex::new(policy))
         })
         .as_ref()
 }
@@ -165,7 +171,10 @@ fn connect_typer(socket_path: &str) -> Result<Typer, String> {
     let _registry = conn.display().get_registry(&qh, ());
     let mut state = Globals::default();
     bounded_roundtrip(&conn, &mut queue, &mut state)?;
-    let seat = state.seat.take().ok_or("app compositor advertises no wl_seat")?;
+    let seat = state
+        .seat
+        .take()
+        .ok_or("app compositor advertises no wl_seat")?;
     let manager = state
         .manager
         .take()
@@ -173,7 +182,13 @@ fn connect_typer(socket_path: &str) -> Result<Typer, String> {
     let vk = manager.create_virtual_keyboard(&seat, &qh, ());
     // Surfaces an "unauthorized" bind error before the first keymap upload.
     bounded_roundtrip(&conn, &mut queue, &mut state)?;
-    Ok(Typer { conn, queue, state, vk, uploaded_generation: 0 })
+    Ok(Typer {
+        conn,
+        queue,
+        state,
+        vk,
+        uploaded_generation: 0,
+    })
 }
 
 fn flush_keysyms(
@@ -209,7 +224,10 @@ fn flush_keysyms(
             typer.vk.key(0, kc - EVDEV_OFFSET, 1);
             typer.vk.key(0, kc - EVDEV_OFFSET, 0);
         }
-        typer.queue.flush().map_err(|e| format!("flush keys: {e}"))?;
+        typer
+            .queue
+            .flush()
+            .map_err(|e| format!("flush keys: {e}"))?;
         bounded_roundtrip(&typer.conn, &mut typer.queue, &mut typer.state)?;
     }
     Ok(())
@@ -231,7 +249,9 @@ pub fn type_keysyms_to(socket_path: &str, keysyms: &[u32]) -> Result<(), String>
         .ok_or("us base keymap failed to compile")?
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut typers = typers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut typers = typers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut last_err = None;
     for _ in 0..2 {
         if !typers.contains_key(socket_path) {

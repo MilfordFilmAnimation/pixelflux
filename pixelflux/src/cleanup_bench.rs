@@ -23,15 +23,20 @@
 //! `cargo test --release --lib cleanup_bench::cleanup_bench -- --exact --ignored --nocapture
 //! --test-threads=1`, and `cleanup_bench::cleanup_hold_experiment` the same way.
 
-use crate::encoders::codec::{parse_video_type, Codec, FRAME_KEY, JPEG_HEADER_LEN, VIDEO_HEADER_LEN};
+use crate::RustCaptureSettings;
+use crate::encoders::codec::{
+    Codec, FRAME_KEY, JPEG_HEADER_LEN, VIDEO_HEADER_LEN, parse_video_type,
+};
 use crate::pipeline::X11Pipeline;
 use crate::webcam::decode::{Decoder, JpegDecoder, VideoDecoder};
-use crate::RustCaptureSettings;
 use std::collections::HashMap;
 use std::time::Instant;
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(format!("PF_BENCH_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(format!("PF_BENCH_{name}"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// A document taller than the screen: dense text in a few colors on white, a title bar, and a
@@ -47,8 +52,13 @@ impl Canvas {
     fn for_bench(w: usize, h: usize) -> Self {
         match std::env::var("PF_BENCH_IMAGE") {
             Ok(path) => {
-                let img = image::open(&path).unwrap_or_else(|e| panic!("{path}: {e}")).to_rgba8();
-                assert!(img.width() as usize >= w && img.height() as usize >= h * 2, "{path} is smaller than the scroll");
+                let img = image::open(&path)
+                    .unwrap_or_else(|e| panic!("{path}: {e}"))
+                    .to_rgba8();
+                assert!(
+                    img.width() as usize >= w && img.height() as usize >= h * 2,
+                    "{path} is smaller than the scroll"
+                );
                 let (iw, ih) = (img.width() as usize, img.height() as usize);
                 let mut bgra = vec![0u8; w * ih * 4];
                 for y in 0..ih {
@@ -86,7 +96,10 @@ impl Canvas {
                 if gy >= 12 || gx >= 7 {
                     continue;
                 }
-                let mut s = (cell_x as u32).wrapping_mul(2654435761).wrapping_add((cell_y as u32).wrapping_mul(40503)).wrapping_add(1);
+                let mut s = (cell_x as u32)
+                    .wrapping_mul(2654435761)
+                    .wrapping_add((cell_y as u32).wrapping_mul(40503))
+                    .wrapping_add(1);
                 s ^= s << 13;
                 s ^= s >> 17;
                 s ^= s << 5;
@@ -171,8 +184,13 @@ fn ssim(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
                 }
             }
             let (ma, mb) = (sa / 64.0, sb / 64.0);
-            let (va, vb, cov) = (saa / 64.0 - ma * ma, sbb / 64.0 - mb * mb, sab / 64.0 - ma * mb);
-            sum += ((2.0 * ma * mb + c1) * (2.0 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2));
+            let (va, vb, cov) = (
+                saa / 64.0 - ma * ma,
+                sbb / 64.0 - mb * mb,
+                sab / 64.0 - ma * mb,
+            );
+            sum += ((2.0 * ma * mb + c1) * (2.0 * cov + c2))
+                / ((ma * ma + mb * mb + c1) * (va + vb + c2));
             n += 1;
         }
     }
@@ -195,11 +213,20 @@ fn link_wait(frames: &[(f64, usize)], mbit: f64, from: f64) -> f64 {
 }
 
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
-    let mse = a.iter().zip(b).map(|(&x, &y)| {
-        let d = x as f64 - y as f64;
-        d * d
-    }).sum::<f64>() / a.len() as f64;
-    if mse <= 0.0 { 99.0 } else { 10.0 * (255.0 * 255.0 / mse).log10() }
+    let mse = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| {
+            let d = x as f64 - y as f64;
+            d * d
+        })
+        .sum::<f64>()
+        / a.len() as f64;
+    if mse <= 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    }
 }
 
 #[test]
@@ -241,9 +268,21 @@ fn cleanup_bench() {
     let codec = p.codec();
     println!(
         "bench {} {} {}x{} turbo={} cbr={} kbps={} crf={} paint={}/{} caret={} prestill={prestill} jump={jump} encoder={}",
-        codec.display(), if settings.video_fullframe { "full" } else { "striped" }, w, h,
-        settings.video_streaming_mode, settings.video_cbr_mode, settings.video_bitrate_kbps,
-        settings.video_crf, settings.use_paint_over_quality, settings.video_paintover_crf, caret_period,
+        codec.display(),
+        if settings.video_fullframe {
+            "full"
+        } else {
+            "striped"
+        },
+        w,
+        h,
+        settings.video_streaming_mode,
+        settings.video_cbr_mode,
+        settings.video_bitrate_kbps,
+        settings.video_crf,
+        settings.use_paint_over_quality,
+        settings.video_paintover_crf,
+        caret_period,
         p.encoder_name()
     );
     let budget = settings.video_bitrate_kbps as f64 * 1000.0 / 8.0 / fps;
@@ -285,20 +324,34 @@ fn cleanup_bench() {
                 (&s.data[JPEG_HEADER_LEN..], 'J')
             } else {
                 let (_, k) = parse_video_type(s.data[1]).expect("video type");
-                (&s.data[VIDEO_HEADER_LEN..], if k == FRAME_KEY { 'K' } else if k == 0x02 { 'I' } else { 'P' })
+                (
+                    &s.data[VIDEO_HEADER_LEN..],
+                    if k == FRAME_KEY {
+                        'K'
+                    } else if k == 0x02 {
+                        'I'
+                    } else {
+                        'P'
+                    },
+                )
             };
             kinds.push(kind);
-            let dec = decoders.entry(s.stripe_y_start).or_insert_with(|| match codec {
-                Codec::Jpeg => Box::new(JpegDecoder::new().expect("jpeg decoder")) as Box<dyn Decoder>,
-                c => Box::new(VideoDecoder::new(c).expect("decoder")),
-            });
+            let dec = decoders
+                .entry(s.stripe_y_start)
+                .or_insert_with(|| match codec {
+                    Codec::Jpeg => {
+                        Box::new(JpegDecoder::new().expect("jpeg decoder")) as Box<dyn Decoder>
+                    }
+                    c => Box::new(VideoDecoder::new(c).expect("decoder")),
+                });
             match dec.decode(payload) {
                 Ok(true) => {
                     let pic = dec.frame().expect("picture");
                     let y0 = s.stripe_y_start as usize;
                     for r in 0..(s.stripe_height as usize).min(pic.height).min(h - y0) {
-                        shown[(y0 + r) * w..(y0 + r) * w + w.min(pic.width)]
-                            .copy_from_slice(&pic.y[r * pic.y_stride..r * pic.y_stride + w.min(pic.width)]);
+                        shown[(y0 + r) * w..(y0 + r) * w + w.min(pic.width)].copy_from_slice(
+                            &pic.y[r * pic.y_stride..r * pic.y_stride + w.min(pic.width)],
+                        );
                     }
                 }
                 Ok(false) => {}
@@ -329,17 +382,30 @@ fn cleanup_bench() {
         if measure {
             let src = source_luma(&frame, codec);
             last_psnr = psnr(&shown, &src);
-            last_ssim = if rel >= -1 { ssim(&shown, &src, w, h) } else { 0.0 };
+            last_ssim = if rel >= -1 {
+                ssim(&shown, &src, w, h)
+            } else {
+                0.0
+            };
         }
         if rel == 0 {
             psnr_at_stop = last_psnr;
         }
-        records.push((rel, bytes, kinds, ms, if measure { last_psnr } else { -1.0 }, last_ssim));
+        records.push((
+            rel,
+            bytes,
+            kinds,
+            ms,
+            if measure { last_psnr } else { -1.0 },
+            last_ssim,
+        ));
     }
     if let Some(path) = rows_path {
         let rows: Vec<String> = records
             .iter()
-            .map(|(rel, bytes, kinds, ms, q, ss)| format!("[{rel},{bytes},\"{kinds}\",{ms:.2},{q:.3},{ss:.5}]"))
+            .map(|(rel, bytes, kinds, ms, q, ss)| {
+                format!("[{rel},{bytes},\"{kinds}\",{ms:.2},{q:.3},{ss:.5}]")
+            })
             .collect();
         std::fs::write(&path, format!("[{}]\n", rows.join(","))).expect("rows");
     }
@@ -351,27 +417,68 @@ fn cleanup_bench() {
         let periodic = *rel >= 0 && rel % 30 == 0;
         let big = *rel >= 0 && *bytes as f64 > 3.0 * budget;
         if near_stop || keyish || near_resume || periodic || big {
-            let k = if kinds.len() > 6 { format!("{}..{}", &kinds[..3], kinds.len()) } else { kinds.clone() };
-            let q = if *q >= 0.0 { format!("{q:5.2}") } else { "  -  ".into() };
-            println!("  t={rel:+5} {:>7.1} kB {k:>6} x{:<5.1} {ms:6.2} ms  psnr {q} ssim {ss:.4}", *bytes as f64 / 1000.0, *bytes as f64 / budget);
+            let k = if kinds.len() > 6 {
+                format!("{}..{}", &kinds[..3], kinds.len())
+            } else {
+                kinds.clone()
+            };
+            let q = if *q >= 0.0 {
+                format!("{q:5.2}")
+            } else {
+                "  -  ".into()
+            };
+            println!(
+                "  t={rel:+5} {:>7.1} kB {k:>6} x{:<5.1} {ms:6.2} ms  psnr {q} ssim {ss:.4}",
+                *bytes as f64 / 1000.0,
+                *bytes as f64 / budget
+            );
         }
     }
-    let still_rows: Vec<&(i64, usize, String, f64, f64, f64)> = records.iter().filter(|r| (0..resume_at).contains(&r.0)).collect();
+    let still_rows: Vec<&(i64, usize, String, f64, f64, f64)> = records
+        .iter()
+        .filter(|r| (0..resume_at).contains(&r.0))
+        .collect();
     let still_sent = still_rows.iter().filter(|r| r.1 > 0).count();
-    let end_psnr = still_rows.iter().rev().find(|r| r.4 >= 0.0).map_or(last_psnr, |r| r.4);
+    let end_psnr = still_rows
+        .iter()
+        .rev()
+        .find(|r| r.4 >= 0.0)
+        .map_or(last_psnr, |r| r.4);
     let end_ssim = still_rows.last().map_or(last_ssim, |r| r.5);
     let reach = |db: f64| still_rows.iter().find(|r| r.4 >= db).map(|r| r.0);
-    let secs = |f: Option<i64>| f.map_or("never".to_string(), |f| format!("{:.2}s", f as f64 / fps));
-    let target = if target_db > 0.0 { target_db } else { end_psnr - 0.5 };
+    let secs =
+        |f: Option<i64>| f.map_or("never".to_string(), |f| format!("{:.2}s", f as f64 / fps));
+    let target = if target_db > 0.0 {
+        target_db
+    } else {
+        end_psnr - 0.5
+    };
     let from = stop as f64 / fps - 0.5;
-    let waits: Vec<String> = [12.0, 20.0, 50.0, 100.0].iter().map(|&m| format!("{m:.0}:{:.0}", link_wait(&sent, m, from))).collect();
+    let waits: Vec<String> = [12.0, 20.0, 50.0, 100.0]
+        .iter()
+        .map(|&m| format!("{m:.0}:{:.0}", link_wait(&sent, m, from)))
+        .collect();
     println!("  still frames sent: {still_sent} of {still}; psnr at stop {psnr_at_stop:.2}");
     println!(
         "summary codec={} turbo={} cbr={} kbps={} {}x{} first_key={:?} keys={still_keys} max_kB={:.1}@{} still_kB={:.1} still_kbps={:.0} resume_kB={:.1} end_psnr={:.2} end_ssim={:.5} to_end-1dB={} to_end-0.5dB={} to_target({target:.2})={} link_wait_ms={}",
-        codec.name(), settings.video_streaming_mode, settings.video_cbr_mode, settings.video_bitrate_kbps, w, h,
-        first_key, still_max.0 as f64 / 1000.0, still_max.1, still_bytes as f64 / 1000.0,
-        still_bytes as f64 * 8.0 / 1000.0 / (still as f64 / fps), resume_bytes as f64 / 1000.0, end_psnr, end_ssim,
-        secs(reach(end_psnr - 1.0)), secs(reach(end_psnr - 0.5)), secs(reach(target)), waits.join(",")
+        codec.name(),
+        settings.video_streaming_mode,
+        settings.video_cbr_mode,
+        settings.video_bitrate_kbps,
+        w,
+        h,
+        first_key,
+        still_max.0 as f64 / 1000.0,
+        still_max.1,
+        still_bytes as f64 / 1000.0,
+        still_bytes as f64 * 8.0 / 1000.0 / (still as f64 / fps),
+        resume_bytes as f64 / 1000.0,
+        end_psnr,
+        end_ssim,
+        secs(reach(end_psnr - 1.0)),
+        secs(reach(end_psnr - 0.5)),
+        secs(reach(target)),
+        waits.join(",")
     );
 }
 
@@ -379,7 +486,10 @@ fn cleanup_bench() {
 /// H.264 session a full-frame capture runs (one stripe), else the ladder's full-frame encoder.
 enum Session {
     #[cfg(feature = "gpl")]
-    X264(crate::encoders::software::H264EncoderWrapper, crate::encoders::session::Planes),
+    X264(
+        crate::encoders::software::H264EncoderWrapper,
+        crate::encoders::session::Planes,
+    ),
     Frame(crate::encoders::FrameEncoder),
 }
 
@@ -388,34 +498,71 @@ impl Session {
         #[cfg(feature = "gpl")]
         if settings.codec == Codec::H264 && settings.use_cpu {
             let bps = settings.video_bitrate_kbps.max(1) as u32 * 1000;
-            let vbv = crate::encoders::vbv_bits(bps, settings.target_fps, 0.0, settings.video_vbv_multiplier) / 1000;
+            let vbv = crate::encoders::vbv_bits(
+                bps,
+                settings.target_fps,
+                0.0,
+                settings.video_vbv_multiplier,
+            ) / 1000;
             let enc = crate::encoders::software::H264EncoderWrapper::new(
-                settings.width, settings.height, settings.video_crf, false, settings.target_fps, 4,
-                settings.video_cbr_mode, settings.video_bitrate_kbps, vbv as i32, 0, 0,
-            ).expect("x264");
-            let planes = crate::encoders::session::Planes::new(settings.width as usize, settings.height as usize, false);
+                settings.width,
+                settings.height,
+                settings.video_crf,
+                false,
+                settings.target_fps,
+                4,
+                settings.video_cbr_mode,
+                settings.video_bitrate_kbps,
+                vbv as i32,
+                0,
+                0,
+            )
+            .expect("x264");
+            let planes = crate::encoders::session::Planes::new(
+                settings.width as usize,
+                settings.height as usize,
+                false,
+            );
             return (Session::X264(enc, planes), "x264".into());
         }
         let mut s = settings.clone();
-        let enc = crate::encoders::select_frame_encoder(&mut s, crate::encoders::FrameSource::Host { rgba: false }, None, "bench")
-            .expect("a full-frame session");
+        let enc = crate::encoders::select_frame_encoder(
+            &mut s,
+            crate::encoders::FrameSource::Host { rgba: false },
+            None,
+            "bench",
+        )
+        .expect("a full-frame session");
         let name = format!("{} {}", enc.backend_name(), s.codec.display());
         (Session::Frame(enc), name)
     }
 
     /// Encode `bgra`, holding the quantizer `held` (a quality index) when asked; the bytes past
     /// the wire header and whether they are a key frame.
-    fn encode(&mut self, bgra: &[u8], w: usize, n: u64, crf: u32, key: bool, held: Option<u32>) -> (Vec<u8>, bool) {
+    fn encode(
+        &mut self,
+        bgra: &[u8],
+        w: usize,
+        n: u64,
+        crf: u32,
+        key: bool,
+        held: Option<u32>,
+    ) -> (Vec<u8>, bool) {
         match self {
             #[cfg(feature = "gpl")]
             Session::X264(enc, planes) => {
-                planes.convert(bgra, w * 4, false, false, false, 4).expect("convert");
+                planes
+                    .convert(bgra, w * 4, false, false, false, 4)
+                    .expect("convert");
                 if let Some(q) = held {
                     enc.hold_quantizer(q as i32);
                 }
                 let mut out = Vec::new();
                 let cw = planes.chroma_width() as i32;
-                if !enc.encode_with_headers(&planes.y, &planes.u, &planes.v, w as i32, cw, cw, n as u16, 0, key, false, &mut out) {
+                if !enc.encode_with_headers(
+                    &planes.y, &planes.u, &planes.v, w as i32, cw, cw, n as u16, 0, key, false,
+                    &mut out,
+                ) {
                     return (Vec::new(), false);
                 }
                 let k = out[1] & 0x0f == FRAME_KEY;
@@ -425,7 +572,9 @@ impl Session {
                 if let Some(q) = held {
                     enc.hold_quantizer(q, None);
                 }
-                let out = enc.encode_host(bgra, w * 4, false, n, crf, key).expect("encode");
+                let out = enc
+                    .encode_host(bgra, w * 4, false, n, crf, key)
+                    .expect("encode");
                 if out.is_empty() {
                     return (out, false);
                 }
@@ -466,7 +615,11 @@ fn cleanup_hold_experiment() {
         let (mut session, name) = Session::open(&settings);
         let mut dec = VideoDecoder::new(codec).expect("decoder");
         let mut n = 0u64;
-        let mut step = |session: &mut Session, dec: &mut VideoDecoder, scroll: usize, key: bool, held: Option<u32>| {
+        let mut step = |session: &mut Session,
+                        dec: &mut VideoDecoder,
+                        scroll: usize,
+                        key: bool,
+                        held: Option<u32>| {
             let frame = canvas.frame(h, scroll, false);
             let t = Instant::now();
             let (bytes, k) = session.encode(&frame, w, n, crf, key || n == 0, held);
@@ -478,9 +631,15 @@ fn cleanup_hold_experiment() {
             let pic = dec.frame().expect("picture");
             let mut shown = vec![0u8; w * h];
             for r in 0..h {
-                shown[r * w..r * w + w].copy_from_slice(&pic.y[r * pic.y_stride..r * pic.y_stride + w]);
+                shown[r * w..r * w + w]
+                    .copy_from_slice(&pic.y[r * pic.y_stride..r * pic.y_stride + w]);
             }
-            (bytes.len(), k, ms, psnr(&shown, &source_luma(&frame, codec)))
+            (
+                bytes.len(),
+                k,
+                ms,
+                psnr(&shown, &source_luma(&frame, codec)),
+            )
         };
         let motion = 90usize;
         for t in 0..motion {
@@ -504,16 +663,32 @@ fn cleanup_hold_experiment() {
         let after_kb: f64 = after.iter().map(|r| r.0 as f64).sum::<f64>() / 1000.0;
         let mut resume = Vec::new();
         for t in 0..30 {
-            resume.push(step(&mut session, &mut dec, stop + (t + 1) * 4, false, None));
+            resume.push(step(
+                &mut session,
+                &mut dec,
+                stop + (t + 1) * 4,
+                false,
+                None,
+            ));
         }
-        let resume_first: Vec<String> = resume.iter().take(4).map(|r| format!("{:.1}kB/{:.1}dB", r.0 as f64 / 1000.0, r.3)).collect();
+        let resume_first: Vec<String> = resume
+            .iter()
+            .take(4)
+            .map(|r| format!("{:.1}kB/{:.1}dB", r.0 as f64 / 1000.0, r.3))
+            .collect();
         let resume_psnr = resume.iter().map(|r| r.3).sum::<f64>() / resume.len() as f64;
         let resume_kb = resume.iter().map(|r| r.0 as f64).sum::<f64>() / 1000.0;
         println!(
             "hold {name:<16} {w}x{h} cbr={} kbps={} mode={mode:<5} cleanup {:>7.1} kB (x{:<5.1} budget) key={} {:5.2} ms | psnr before {before:5.2} after {:5.2} +1s {:5.2} | still 1s {after_kb:6.1} kB | resume 30f {resume_kb:6.1} kB avg {resume_psnr:5.2} dB first {}",
-            settings.video_cbr_mode, settings.video_bitrate_kbps,
-            cleanup.0 as f64 / 1000.0, cleanup.0 as f64 / budget, cleanup.1, cleanup.2, cleanup.3,
-            after.last().unwrap().3, resume_first.join(" ")
+            settings.video_cbr_mode,
+            settings.video_bitrate_kbps,
+            cleanup.0 as f64 / 1000.0,
+            cleanup.0 as f64 / budget,
+            cleanup.1,
+            cleanup.2,
+            cleanup.3,
+            after.last().unwrap().3,
+            resume_first.join(" ")
         );
     }
 }

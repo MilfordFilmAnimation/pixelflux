@@ -13,9 +13,9 @@
 
 use std::ffi::CString;
 
-use super::codec::{h265_frame_type, push_video_header, Codec, VIDEO_HEADER_LEN};
+use super::codec::{Codec, VIDEO_HEADER_LEN, h265_frame_type, push_video_header};
 use super::reference::Reference;
-use super::session::{encode_threads, Pending, Planes, Quality, RateSettings};
+use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
 use crate::RustCaptureSettings;
 
 /// One software HEVC session for one capture.
@@ -117,7 +117,14 @@ impl HevcEncoder {
 
     /// Open a fresh encoder with the live settings, whose first frame is a key frame.
     fn reopen(&mut self) -> Result<(), String> {
-        self.backend = Backend::open(self.planes.width, self.planes.height, self.threads, self.planes.i444, self.rate, self.quality.current)?;
+        self.backend = Backend::open(
+            self.planes.width,
+            self.planes.height,
+            self.threads,
+            self.planes.i444,
+            self.rate,
+            self.quality.current,
+        )?;
         self.fresh = true;
         Ok(())
     }
@@ -137,7 +144,9 @@ impl HevcEncoder {
     /// Re-open the encoder when a rate or frame-rate setting changed: neither library's rate
     /// control takes a new target while it runs.
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
-        let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
+        let Some(rate) = self.rate.changed(settings) else {
+            return Ok(());
+        };
         self.rate = rate;
         self.reopen()
     }
@@ -152,7 +161,12 @@ impl HevcEncoder {
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
-        if !self.rate.cbr && self.quality.update(Codec::H265.quantizer(crf as i32)).is_some() {
+        if !self.rate.cbr
+            && self
+                .quality
+                .update(Codec::H265.quantizer(crf as i32))
+                .is_some()
+        {
             self.reopen()?;
         }
         let held = self.held.take();
@@ -162,11 +176,23 @@ impl HevcEncoder {
         let key = force_idr || self.fresh;
         let full_range = self.is_full_range();
         let pts = self.next_pts;
-        let coded = self.backend.encode(&mut self.planes, pixels, stride, rgba, full_range, self.threads as usize, pts, key, held)?;
+        let coded = self.backend.encode(
+            &mut self.planes,
+            pixels,
+            stride,
+            rgba,
+            full_range,
+            self.threads as usize,
+            pts,
+            key,
+            held,
+        )?;
         self.next_pts += 1;
         self.fresh = false;
         self.pending.push(pts, frame_number as u16);
-        let Some(coded) = coded else { return Ok(Vec::new()) };
+        let Some(coded) = coded else {
+            return Ok(Vec::new());
+        };
         if held.is_none() {
             self.last_quality = Some(coded.qp);
         }
@@ -191,13 +217,16 @@ impl HevcEncoder {
 
 /// The CBR quantizer bounds in HEVC's domain, zero where the settings name none.
 fn qp_bounds(rate: RateSettings) -> (u32, u32) {
-    (Codec::H265.quantizer_bound(rate.min_qp), Codec::H265.quantizer_bound(rate.max_qp))
+    (
+        Codec::H265.quantizer_bound(rate.min_qp),
+        Codec::H265.quantizer_bound(rate.max_qp),
+    )
 }
 
-#[cfg(feature = "gpl")]
-use x265::Backend;
 #[cfg(not(feature = "gpl"))]
 use kvazaar::Backend;
+#[cfg(feature = "gpl")]
+use x265::Backend;
 
 #[cfg(feature = "gpl")]
 mod x265 {
@@ -244,7 +273,8 @@ mod x265 {
 
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
-            match unsafe { ((*self.api).param_parse.unwrap())(self.params, n.as_ptr(), v.as_ptr()) } {
+            match unsafe { ((*self.api).param_parse.unwrap())(self.params, n.as_ptr(), v.as_ptr()) }
+            {
                 0 => Ok(()),
                 X265_PARAM_BAD_NAME => Err(format!("x265 knows no option {name}")),
                 _ => Err(format!("x265 refused {name}={value}")),
@@ -278,7 +308,14 @@ mod x265 {
             options
         }
 
-        pub fn open(width: usize, height: usize, threads: i32, i444: bool, rate: RateSettings, q: u32) -> Result<Self, String> {
+        pub fn open(
+            width: usize,
+            height: usize,
+            threads: i32,
+            i444: bool,
+            rate: RateSettings,
+            q: u32,
+        ) -> Result<Self, String> {
             let api = unsafe { x265_api_get(8) };
             if api.is_null() {
                 return Err("x265 carries no 8-bit encoder".into());
@@ -287,13 +324,22 @@ mod x265 {
             if params.is_null() {
                 return Err("x265 allocated no parameters".into());
             }
-            let mut me = Self { api, params, encoder: ptr::null_mut() };
+            let mut me = Self {
+                api,
+                params,
+                encoder: ptr::null_mut(),
+            };
             let (preset, tune) = (c"ultrafast", c"zerolatency");
-            if unsafe { ((*api).param_default_preset.unwrap())(params, preset.as_ptr(), tune.as_ptr()) } < 0 {
+            if unsafe {
+                ((*api).param_default_preset.unwrap())(params, preset.as_ptr(), tune.as_ptr())
+            } < 0
+            {
                 return Err("x265 refused the ultrafast zerolatency preset".into());
             }
             if width < 16 || height < 16 {
-                return Err(format!("x265 encodes no picture as small as {width}x{height}"));
+                return Err(format!(
+                    "x265 encodes no picture as small as {width}x{height}"
+                ));
             }
             let mut options: Vec<(&str, String)> = vec![
                 ("log-level", "none".into()),
@@ -369,11 +415,24 @@ mod x265 {
             pic.stride[2] = planes.chroma_width() as c_int;
             pic.pts = pts as i64;
             pic.bitDepth = 8;
-            pic.sliceType = if key { X265_TYPE_IDR as c_int } else { X265_TYPE_AUTO as c_int };
+            pic.sliceType = if key {
+                X265_TYPE_IDR as c_int
+            } else {
+                X265_TYPE_AUTO as c_int
+            };
             pic.forceqp = held.map_or(0, |q| q as c_int + 1);
             let mut nals: *mut x265_nal = ptr::null_mut();
             let mut count: u32 = 0;
-            let ret = unsafe { encoder_encode(api, self.encoder, &mut nals, &mut count, &mut pic, out.as_mut_ptr()) };
+            let ret = unsafe {
+                encoder_encode(
+                    api,
+                    self.encoder,
+                    &mut nals,
+                    &mut count,
+                    &mut pic,
+                    out.as_mut_ptr(),
+                )
+            };
             if ret < 0 {
                 return Err("x265 refused the frame".into());
             }
@@ -382,9 +441,15 @@ mod x265 {
             }
             let mut bytes = Vec::new();
             for nal in unsafe { std::slice::from_raw_parts(nals, count as usize) } {
-                bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(nal.payload, nal.sizeBytes as usize) });
+                bytes.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(nal.payload, nal.sizeBytes as usize)
+                });
             }
-            Ok(Some(Coded { bytes, pts: out[0].pts.max(0) as u64, qp: out[0].frameData.qp.round().clamp(0.0, 51.0) as u32 }))
+            Ok(Some(Coded {
+                bytes,
+                pts: out[0].pts.max(0) as u64,
+                qp: out[0].frameData.qp.round().clamp(0.0, 51.0) as u32,
+            }))
         }
     }
 }
@@ -428,21 +493,37 @@ mod kvazaar {
         /// The frame rate the library was configured at, as `(num, den)`.
         #[cfg(test)]
         pub fn frame_rate(&self) -> (u32, u32) {
-            unsafe { ((*self.config).framerate_num as u32, (*self.config).framerate_denom as u32) }
+            unsafe {
+                (
+                    (*self.config).framerate_num as u32,
+                    (*self.config).framerate_denom as u32,
+                )
+            }
         }
 
         fn set(&self, name: &str, value: &str) -> Result<(), String> {
             let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
-            if unsafe { ((*self.api).config_parse.unwrap())(self.config, n.as_ptr(), v.as_ptr()) } == 0 {
+            if unsafe { ((*self.api).config_parse.unwrap())(self.config, n.as_ptr(), v.as_ptr()) }
+                == 0
+            {
                 return Err(format!("kvazaar refused {name}={value}"));
             }
             Ok(())
         }
 
-        pub fn open(width: usize, height: usize, threads: i32, i444: bool, rate: RateSettings, q: u32) -> Result<Self, String> {
+        pub fn open(
+            width: usize,
+            height: usize,
+            threads: i32,
+            i444: bool,
+            rate: RateSettings,
+            q: u32,
+        ) -> Result<Self, String> {
             let _ = i444;
             if !width.is_multiple_of(8) || !height.is_multiple_of(8) {
-                return Err(format!("kvazaar takes only pictures a multiple of eight, not {width}x{height}"));
+                return Err(format!(
+                    "kvazaar takes only pictures a multiple of eight, not {width}x{height}"
+                ));
             }
             let api = unsafe { kvz_api_get(8) };
             if api.is_null() {
@@ -452,7 +533,11 @@ mod kvazaar {
             if config.is_null() {
                 return Err("kvazaar allocated no configuration".into());
             }
-            let me = Self { api, config, encoder: ptr::null_mut() };
+            let me = Self {
+                api,
+                config,
+                encoder: ptr::null_mut(),
+            };
             unsafe {
                 if ((*api).config_init.unwrap())(config) == 0 {
                     return Err("kvazaar refused to initialize its configuration".into());
@@ -507,7 +592,8 @@ mod kvazaar {
             _held: Option<u32>,
         ) -> Result<Option<Coded>, String> {
             let api = unsafe { &*self.api };
-            let pic = unsafe { (api.picture_alloc.unwrap())(planes.width as i32, planes.height as i32) };
+            let pic =
+                unsafe { (api.picture_alloc.unwrap())(planes.width as i32, planes.height as i32) };
             if pic.is_null() {
                 return Err("kvazaar allocated no picture".into());
             }
@@ -520,7 +606,21 @@ mod kvazaar {
                 let u = std::slice::from_raw_parts_mut(p.u, chroma_stride * h.div_ceil(2));
                 let v = std::slice::from_raw_parts_mut(p.v, chroma_stride * h.div_ceil(2));
                 p.pts = pts as i64;
-                super::super::session::convert_into(pixels, stride, w, h, rgba, false, full_range, false, threads, y, u, v, (luma_stride, chroma_stride))
+                super::super::session::convert_into(
+                    pixels,
+                    stride,
+                    w,
+                    h,
+                    rgba,
+                    false,
+                    full_range,
+                    false,
+                    threads,
+                    y,
+                    u,
+                    v,
+                    (luma_stride, chroma_stride),
+                )
             };
             if let Err(e) = result {
                 unsafe { (api.picture_free.unwrap())(pic) };
@@ -531,7 +631,15 @@ mod kvazaar {
             let mut recon: *mut kvz_picture = ptr::null_mut();
             let mut info: kvz_frame_info = unsafe { std::mem::zeroed() };
             let ok = unsafe {
-                (api.encoder_encode.unwrap())(self.encoder, pic, &mut data, &mut len, &mut recon, ptr::null_mut(), &mut info)
+                (api.encoder_encode.unwrap())(
+                    self.encoder,
+                    pic,
+                    &mut data,
+                    &mut len,
+                    &mut recon,
+                    ptr::null_mut(),
+                    &mut info,
+                )
             };
             let mut coded = None;
             if ok != 0 && !data.is_null() {
@@ -542,8 +650,16 @@ mod kvazaar {
                     bytes.extend_from_slice(&c.data[..c.len as usize]);
                     chunk = c.next;
                 }
-                let out_pts = if recon.is_null() { pts } else { unsafe { (*recon).pts.max(0) as u64 } };
-                coded = Some(Coded { bytes, pts: out_pts, qp: info.qp.clamp(0, 51) as u32 });
+                let out_pts = if recon.is_null() {
+                    pts
+                } else {
+                    unsafe { (*recon).pts.max(0) as u64 }
+                };
+                coded = Some(Coded {
+                    bytes,
+                    pts: out_pts,
+                    qp: info.qp.clamp(0, 51) as u32,
+                });
             }
             unsafe {
                 (api.picture_free.unwrap())(pic);
@@ -566,17 +682,34 @@ mod tests {
     /// between are deltas that name no reference.
     #[test]
     fn key_frames_come_on_request_and_deltas_name_no_reference() {
-        let settings = RustCaptureSettings { width: 64, height: 48, target_fps: 30.0, codec: Codec::H265, video_crf: 25, ..Default::default() };
+        let settings = RustCaptureSettings {
+            width: 64,
+            height: 48,
+            target_fps: 30.0,
+            codec: Codec::H265,
+            video_crf: 25,
+            ..Default::default()
+        };
         let mut enc = HevcEncoder::new(&settings, false).expect("session");
         assert_eq!(enc.library(), Backend::LIBRARY);
         let bgra = vec![128u8; 64 * 48 * 4];
         let mut kinds = Vec::new();
         for t in 0..4u64 {
-            let out = enc.encode_host(&bgra, 64 * 4, false, t, 25, t == 2).expect("encode");
+            let out = enc
+                .encode_host(&bgra, 64 * 4, false, t, 25, t == 2)
+                .expect("encode");
             kinds.push(super::super::codec::parse_video_type(out[1]).map(|(_, k)| k));
             assert_eq!(enc.last_reference(), Reference::Untracked);
         }
-        assert_eq!(kinds, [Some(super::super::codec::FRAME_KEY), Some(super::super::codec::FRAME_DELTA), Some(super::super::codec::FRAME_KEY), Some(super::super::codec::FRAME_DELTA)]);
+        assert_eq!(
+            kinds,
+            [
+                Some(super::super::codec::FRAME_KEY),
+                Some(super::super::codec::FRAME_DELTA),
+                Some(super::super::codec::FRAME_KEY),
+                Some(super::super::codec::FRAME_DELTA)
+            ]
+        );
         assert!(!enc.invalidate_reference(1));
     }
 
@@ -585,8 +718,13 @@ mod tests {
     fn the_frame_rate_reaches_the_library_as_its_fraction() {
         for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
             let settings = RustCaptureSettings {
-                width: 64, height: 48, target_fps: num as f64 / den as f64, codec: Codec::H265, video_cbr_mode: true,
-                video_bitrate_kbps: 2000, ..Default::default()
+                width: 64,
+                height: 48,
+                target_fps: num as f64 / den as f64,
+                codec: Codec::H265,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 2000,
+                ..Default::default()
             };
             let enc = HevcEncoder::new(&settings, false).expect("session");
             assert_eq!(enc.backend.frame_rate(), (num, den), "{}", Backend::LIBRARY);

@@ -43,8 +43,6 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use wayland_client::protocol::wl_registry;
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
 use crate::wayland::kdeproto::output_device::{
     kde_output_device_mode_v2::{self, KdeOutputDeviceModeV2},
     kde_output_device_v2::{self, KdeOutputDeviceV2},
@@ -53,13 +51,15 @@ use crate::wayland::kdeproto::output_management::{
     kde_output_configuration_v2::{self, KdeOutputConfigurationV2},
     kde_output_management_v2::KdeOutputManagementV2,
 };
+use wayland_client::protocol::wl_registry;
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_plasma::screencast::v1::client::{
     zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
     zkde_screencast_unstable_v1::ZkdeScreencastUnstableV1,
 };
 
 use crate::wayland::outclient::trailing_number;
-use crate::wayland::wlclient::{bounded_roundtrip, impl_sync_callback, SyncState, IO_TIMEOUT};
+use crate::wayland::wlclient::{IO_TIMEOUT, SyncState, bounded_roundtrip, impl_sync_callback};
 
 /// `zkde_screencast_unstable_v1.pointer` value asking for no cursor in the
 /// stream nobody consumes.
@@ -104,7 +104,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CastState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             // stream_virtual_output is a version-2 request.
             if interface == "zkde_screencast_unstable_v1" && state.manager.is_none() && version >= 2
             {
@@ -150,7 +155,8 @@ enum GrowError {
 /// Connect to the compositor at `socket_path` and read its registry, which binds the
 /// screencast manager when one is served at the version carrying `stream_virtual_output`.
 fn connect(socket_path: &str) -> Result<(Connection, EventQueue<CastState>, CastState), String> {
-    let stream = UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
+    let stream =
+        UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
     let conn = Connection::from_socket(stream).map_err(|e| format!("wayland setup: {e}"))?;
     let mut queue: EventQueue<CastState> = conn.new_event_queue();
     let _registry = conn.display().get_registry(&queue.handle(), ());
@@ -161,15 +167,31 @@ fn connect(socket_path: &str) -> Result<(Connection, EventQueue<CastState>, Cast
 
 /// Grow a screen named `name` on the compositor at `socket_path` and return
 /// its keep-alive; the screen lives until that is dropped or its stream closed.
-fn grow(socket_path: &str, name: &str, size: (i32, i32), scale: f64) -> Result<HeldScreen, GrowError> {
+fn grow(
+    socket_path: &str,
+    name: &str,
+    size: (i32, i32),
+    scale: f64,
+) -> Result<HeldScreen, GrowError> {
     let (conn, mut queue, mut state) = connect(socket_path).map_err(GrowError::Unreachable)?;
     let qh = queue.handle();
     let Some(manager) = state.manager.clone() else {
-        return Err(GrowError::Refused("the compositor offers no zkde_screencast_unstable_v1".to_string()));
+        return Err(GrowError::Refused(
+            "the compositor offers no zkde_screencast_unstable_v1".to_string(),
+        ));
     };
-    let stream =
-        manager.stream_virtual_output(name.to_string(), size.0, size.1, scale, POINTER_HIDDEN, &qh, ());
-    queue.flush().map_err(|e| GrowError::Unreachable(format!("flush: {e}")))?;
+    let stream = manager.stream_virtual_output(
+        name.to_string(),
+        size.0,
+        size.1,
+        scale,
+        POINTER_HIDDEN,
+        &qh,
+        (),
+    );
+    queue
+        .flush()
+        .map_err(|e| GrowError::Unreachable(format!("flush: {e}")))?;
     let deadline = Instant::now() + IO_TIMEOUT;
     while state.outcome.is_none() && Instant::now() < deadline {
         bounded_roundtrip(&conn, &mut queue, &mut state).map_err(GrowError::Unreachable)?;
@@ -182,7 +204,12 @@ fn grow(socket_path: &str, name: &str, size: (i32, i32), scale: f64) -> Result<H
             _ => format!("virtual screen '{name}' produced no output device"),
         }));
     }
-    Ok(HeldScreen { conn, _queue: queue, _state: state, stream })
+    Ok(HeldScreen {
+        conn,
+        _queue: queue,
+        _state: state,
+        stream,
+    })
 }
 
 /// Whether an enabled screen named `name` is among the compositor's output devices.
@@ -228,7 +255,10 @@ pub fn add_screen(
     let held = grow(socket_path, name, size, scale).map_err(|e| match e {
         GrowError::Unreachable(e) | GrowError::Refused(e) => e,
     })?;
-    held_screens().lock().unwrap().insert(name.to_string(), held);
+    held_screens()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), held);
     Ok(())
 }
 
@@ -281,7 +311,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for KdeOutState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             if interface == "kde_output_management_v2" && state.manager.is_none() {
                 state.manager = Some(registry.bind(name, version.min(1), qh, ()));
             } else if interface == "kde_output_device_v2" {
@@ -364,7 +399,9 @@ impl Dispatch<KdeOutputConfigurationV2, ()> for KdeOutState {
 
 /// Connect to `socket_path` and read the output-device globals to a settled
 /// state: one round-trip announces them, a second delivers their events.
-fn read_devices(socket_path: &str) -> Result<(Connection, EventQueue<KdeOutState>, KdeOutState), String> {
+fn read_devices(
+    socket_path: &str,
+) -> Result<(Connection, EventQueue<KdeOutState>, KdeOutState), String> {
     let stream =
         UnixStream::connect(socket_path).map_err(|e| format!("connect {socket_path}: {e}"))?;
     let conn = Connection::from_socket(stream).map_err(|e| format!("wayland setup: {e}"))?;
@@ -437,7 +474,10 @@ pub fn set_screen_layout(
         .zip(&rects)
         .map(|(&i, r)| {
             let scale = state.devices[i].scale;
-            ((r.2 as f64 / scale).round() as i32, (r.3 as f64 / scale).round() as i32)
+            (
+                (r.2 as f64 / scale).round() as i32,
+                (r.3 as f64 / scale).round() as i32,
+            )
         })
         .collect();
     let placed: Vec<(KdeOutputDeviceV2, (i32, i32))> = order
@@ -466,7 +506,9 @@ fn apply_configuration(
 ) -> Result<(), String> {
     state.applied = None;
     config.apply();
-    queue.flush().map_err(|e| format!("flush configuration: {e}"))?;
+    queue
+        .flush()
+        .map_err(|e| format!("flush configuration: {e}"))?;
     let deadline = Instant::now() + IO_TIMEOUT;
     while state.applied.is_none() && Instant::now() < deadline {
         bounded_roundtrip(conn, queue, state)?;

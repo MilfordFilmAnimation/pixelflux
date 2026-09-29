@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use super::frame_rate::FrameRate;
 use super::software::convert_to_yuv_mt;
-use super::{vbv_bits, QP_HYSTERESIS_LIMIT};
+use super::{QP_HYSTERESIS_LIMIT, vbv_bits};
 use crate::RustCaptureSettings;
 
 /// A planar 8-bit picture, 4:2:0 or 4:4:4, with tightly packed rows.
@@ -28,12 +28,27 @@ pub struct Planes {
 
 impl Planes {
     pub fn new(width: usize, height: usize, i444: bool) -> Self {
-        let (cw, ch) = if i444 { (width, height) } else { (width.div_ceil(2), height.div_ceil(2)) };
-        Self { width, height, i444, y: vec![0; width * height], u: vec![0; cw * ch], v: vec![0; cw * ch] }
+        let (cw, ch) = if i444 {
+            (width, height)
+        } else {
+            (width.div_ceil(2), height.div_ceil(2))
+        };
+        Self {
+            width,
+            height,
+            i444,
+            y: vec![0; width * height],
+            u: vec![0; cw * ch],
+            v: vec![0; cw * ch],
+        }
     }
 
     pub fn chroma_width(&self) -> usize {
-        if self.i444 { self.width } else { self.width.div_ceil(2) }
+        if self.i444 {
+            self.width
+        } else {
+            self.width.div_ceil(2)
+        }
     }
 
     /// Convert a packed host frame (`stride` bytes per row, R,G,B,A when `rgba`, else B,G,R,A)
@@ -50,8 +65,19 @@ impl Planes {
     ) -> Result<(), String> {
         let cw = self.chroma_width();
         convert_into(
-            pixels, stride, self.width, self.height, rgba, self.i444, full_range, bt601, threads,
-            &mut self.y, &mut self.u, &mut self.v, (self.width, cw),
+            pixels,
+            stride,
+            self.width,
+            self.height,
+            rgba,
+            self.i444,
+            full_range,
+            bt601,
+            threads,
+            &mut self.y,
+            &mut self.u,
+            &mut self.v,
+            (self.width, cw),
         )
     }
 }
@@ -75,14 +101,37 @@ pub fn convert_into(
     strides: (usize, usize),
 ) -> Result<(), String> {
     check_host_frame(pixels, stride, width, height)?;
-    convert_to_yuv_mt(pixels, stride as u32, width, height, rgba, i444, full_range, bt601, y, u, v, strides, threads)
-        .map_err(|e| format!("rgb-to-yuv conversion failed: {e:?}"))
+    convert_to_yuv_mt(
+        pixels,
+        stride as u32,
+        width,
+        height,
+        rgba,
+        i444,
+        full_range,
+        bt601,
+        y,
+        u,
+        v,
+        strides,
+        threads,
+    )
+    .map_err(|e| format!("rgb-to-yuv conversion failed: {e:?}"))
 }
 
 /// Whether `pixels` holds a `width` x `height` packed picture at `stride` bytes per row.
-pub fn check_host_frame(pixels: &[u8], stride: usize, width: usize, height: usize) -> Result<(), String> {
+pub fn check_host_frame(
+    pixels: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), String> {
     let row_bytes = width * 4;
-    let needed = if height == 0 { 0 } else { stride.checked_mul(height - 1).ok_or("stride overflow")? + row_bytes };
+    let needed = if height == 0 {
+        0
+    } else {
+        stride.checked_mul(height - 1).ok_or("stride overflow")? + row_bytes
+    };
     if stride < row_bytes || pixels.len() < needed {
         return Err("Input buffer too small".into());
     }
@@ -100,7 +149,10 @@ pub struct Quality {
 
 impl Quality {
     pub fn new(quantizer: u32) -> Self {
-        Self { current: quantizer, counter: 0 }
+        Self {
+            current: quantizer,
+            counter: 0,
+        }
     }
 
     /// The quantizer to program now for `target`, once the hysteresis admits the change.
@@ -150,8 +202,15 @@ impl RateSettings {
     /// The settings as they stand now, if a rate or frame-rate value the encoder was programmed
     /// with changed: in CBR a bitrate or VBV multiplier, in any mode the frame rate.
     pub fn changed(&self, settings: &RustCaptureSettings) -> Option<Self> {
-        let next = Self { cbr: self.cbr, min_qp: self.min_qp, max_qp: self.max_qp, ..Self::new(settings) };
-        let rate_moved = self.cbr && (next.bitrate_kbps != self.bitrate_kbps || next.vbv_multiplier != self.vbv_multiplier);
+        let next = Self {
+            cbr: self.cbr,
+            min_qp: self.min_qp,
+            max_qp: self.max_qp,
+            ..Self::new(settings)
+        };
+        let rate_moved = self.cbr
+            && (next.bitrate_kbps != self.bitrate_kbps
+                || next.vbv_multiplier != self.vbv_multiplier);
         (rate_moved || next.fps != self.fps).then_some(next)
     }
 
@@ -162,7 +221,12 @@ impl RateSettings {
 
     /// The VBV buffer, in bits, the constant-rate target is held to.
     pub fn vbv(&self) -> u32 {
-        vbv_bits(self.bps().min(u32::MAX as u64) as u32, self.fps.fps(), self.keyframe_interval_s, self.vbv_multiplier)
+        vbv_bits(
+            self.bps().min(u32::MAX as u64) as u32,
+            self.fps.fps(),
+            self.keyframe_interval_s,
+            self.vbv_multiplier,
+        )
     }
 }
 
@@ -201,7 +265,11 @@ impl Pending {
 /// The encode threads a software session spreads across: one less than the host's cores,
 /// between one and eight.
 pub fn encode_threads() -> i32 {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(1).clamp(1, 8) as i32
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .clamp(1, 8) as i32
 }
 
 #[cfg(test)]
@@ -216,24 +284,55 @@ mod tests {
         for _ in 0..QP_HYSTERESIS_LIMIT {
             assert_eq!(q.update(40), None);
         }
-        assert_eq!(q.update(40), Some(40), "a higher one waits out the hysteresis");
+        assert_eq!(
+            q.update(40),
+            Some(40),
+            "a higher one waits out the hysteresis"
+        );
         assert_eq!(q.update(45), None);
-        assert_eq!(q.update(40), None, "a request back at the current value resets the count");
+        assert_eq!(
+            q.update(40),
+            None,
+            "a request back at the current value resets the count"
+        );
         assert_eq!(q.current, 40);
     }
 
     #[test]
     fn a_rate_change_is_noticed_only_where_the_encoder_reads_it() {
-        let mut settings = RustCaptureSettings { target_fps: 30.0, video_bitrate_kbps: 4000, ..Default::default() };
+        let mut settings = RustCaptureSettings {
+            target_fps: 30.0,
+            video_bitrate_kbps: 4000,
+            ..Default::default()
+        };
         let rate = RateSettings::new(&settings);
         assert_eq!(rate.changed(&settings), None);
         settings.video_bitrate_kbps = 8000;
-        assert_eq!(rate.changed(&settings), None, "a bitrate moves nothing in constant-quality mode");
+        assert_eq!(
+            rate.changed(&settings),
+            None,
+            "a bitrate moves nothing in constant-quality mode"
+        );
         settings.target_fps = 60.0;
-        assert_eq!(rate.changed(&settings).map(|r| r.fps), Some(FrameRate { num: 60, den: 1 }));
-        let ntsc = RateSettings::new(&RustCaptureSettings { target_fps: 60000.0 / 1001.0, ..settings.clone() });
-        assert_eq!(ntsc.fps, FrameRate { num: 60000, den: 1001 });
-        assert!(ntsc.changed(&settings).is_some(), "60 fps moves a session at 59.94");
+        assert_eq!(
+            rate.changed(&settings).map(|r| r.fps),
+            Some(FrameRate { num: 60, den: 1 })
+        );
+        let ntsc = RateSettings::new(&RustCaptureSettings {
+            target_fps: 60000.0 / 1001.0,
+            ..settings.clone()
+        });
+        assert_eq!(
+            ntsc.fps,
+            FrameRate {
+                num: 60000,
+                den: 1001
+            }
+        );
+        assert!(
+            ntsc.changed(&settings).is_some(),
+            "60 fps moves a session at 59.94"
+        );
         settings.video_cbr_mode = true;
         let cbr = RateSettings::new(&settings);
         settings.video_bitrate_kbps = 9000;
@@ -251,8 +350,16 @@ mod tests {
             pending.push(pts, id);
         }
         assert_eq!(pending.take(99), None, "a timestamp never submitted");
-        assert_eq!(pending.take(1), Some(8), "the encoder answered two frames in");
-        assert_eq!(pending.take(0), None, "the frame it passed over went with it");
+        assert_eq!(
+            pending.take(1),
+            Some(8),
+            "the encoder answered two frames in"
+        );
+        assert_eq!(
+            pending.take(0),
+            None,
+            "the frame it passed over went with it"
+        );
         assert_eq!(pending.take(2), Some(9));
         assert!(pending.is_empty());
         pending.push(3, 10);
@@ -264,10 +371,21 @@ mod tests {
     fn a_frame_shorter_than_its_stride_says_so() {
         assert!(check_host_frame(&[0; 16 * 4 * 4], 64, 16, 4).is_ok());
         assert!(check_host_frame(&[0; 16 * 4 * 4 - 1], 64, 16, 4).is_err());
-        assert!(check_host_frame(&[0; 16 * 4 * 4], 60, 16, 4).is_err(), "a stride shorter than a row");
+        assert!(
+            check_host_frame(&[0; 16 * 4 * 4], 60, 16, 4).is_err(),
+            "a stride shorter than a row"
+        );
         let mut planes = Planes::new(4, 2, false);
         assert_eq!((planes.u.len(), planes.chroma_width()), (2, 2));
-        assert!(planes.convert(&[0; 4 * 4 * 2], 16, false, false, false, 1).is_ok());
-        assert!(Planes::new(4, 2, true).convert(&[0; 4 * 4], 16, false, true, false, 1).is_err());
+        assert!(
+            planes
+                .convert(&[0; 4 * 4 * 2], 16, false, false, false, 1)
+                .is_ok()
+        );
+        assert!(
+            Planes::new(4, 2, true)
+                .convert(&[0; 4 * 4], 16, false, true, false, 1)
+                .is_err()
+        );
     }
 }

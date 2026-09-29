@@ -72,9 +72,10 @@ pub fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
         if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
             let code_start = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
             if let Some(s) = nal_start
-                && code_start > s {
-                    nals.push(&data[s..code_start]);
-                }
+                && code_start > s
+            {
+                nals.push(&data[s..code_start]);
+            }
             i += 3;
             nal_start = Some(i);
         } else if data[i + 2] == 0 {
@@ -85,9 +86,10 @@ pub fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
         }
     }
     if let Some(s) = nal_start
-        && data.len() > s {
-            nals.push(&data[s..]);
-        }
+        && data.len() > s
+    {
+        nals.push(&data[s..]);
+    }
     nals
 }
 
@@ -151,7 +153,11 @@ impl<'a> BitReader<'a> {
 
     fn se(&mut self) -> Option<i32> {
         let k = self.ue()? as i64;
-        Some(if k % 2 == 0 { -(k / 2) as i32 } else { ((k + 1) / 2) as i32 })
+        Some(if k % 2 == 0 {
+            -(k / 2) as i32
+        } else {
+            ((k + 1) / 2) as i32
+        })
     }
 }
 
@@ -253,7 +259,8 @@ pub fn parse_sps_dimensions(sps_nal: &[u8]) -> Option<(u32, u32)> {
     let crop_unit_x = sub_w;
     let crop_unit_y = sub_h * (2 - frame_mbs_only);
     let width = pic_width_in_mbs * 16 - crop_unit_x * (crop_l + crop_r);
-    let height = (2 - frame_mbs_only) * pic_height_in_map_units * 16 - crop_unit_y * (crop_t + crop_b);
+    let height =
+        (2 - frame_mbs_only) * pic_height_in_map_units * 16 - crop_unit_y * (crop_t + crop_b);
     Some((width, height))
 }
 
@@ -389,8 +396,14 @@ enum TrakMedia {
 
 /// One `trak`: `tkhd` (enabled, in_movie) with the display size or, for audio, the volume;
 /// `mdhd` at `timescale`; the handler; then the media header given and the sample table.
-fn trak(track_id: u32, timescale: u32, handler: &[u8; 4], media_header: Vec<u8>,
-        sample_entry: &[u8], media: TrakMedia) -> Vec<u8> {
+fn trak(
+    track_id: u32,
+    timescale: u32,
+    handler: &[u8; 4],
+    media_header: Vec<u8>,
+    sample_entry: &[u8],
+    media: TrakMedia,
+) -> Vec<u8> {
     let (width, height, volume) = match media {
         TrakMedia::Video { width, height } => (width, height, 0),
         TrakMedia::Audio { volume } => (0, 0, volume),
@@ -429,7 +442,10 @@ fn trak(track_id: u32, timescale: u32, handler: &[u8; 4], media_header: Vec<u8>,
     hdlr_p.extend_from_slice(b"pixelflux\0");
     let hdlr = mk_full_box(b"hdlr", 0, 0, &hdlr_p);
 
-    let minf = mk_box(b"minf", &[media_header, dinf(), stbl(sample_entry)].concat());
+    let minf = mk_box(
+        b"minf",
+        &[media_header, dinf(), stbl(sample_entry)].concat(),
+    );
     let mdia = mk_box(b"mdia", &[mdhd, hdlr, minf].concat());
     mk_box(b"trak", &[tkhd, mdia].concat())
 }
@@ -506,13 +522,28 @@ impl<W: Write> FragmentWriter<W> {
         let mvhd = mk_full_box(b"mvhd", 0, 0, &mvhd_p);
 
         let vmhd = mk_full_box(b"vmhd", 0, 1, &[0u8; 8]);
-        let mut traks = trak(1, TIMESCALE, b"vide", vmhd, &cfg.sample_entry,
-            TrakMedia::Video { width: cfg.width, height: cfg.height });
+        let mut traks = trak(
+            1,
+            TIMESCALE,
+            b"vide",
+            vmhd,
+            &cfg.sample_entry,
+            TrakMedia::Video {
+                width: cfg.width,
+                height: cfg.height,
+            },
+        );
         let mut mvex_p = trex(1, 0);
         if let Some(audio) = &self.audio {
             let smhd = mk_full_box(b"smhd", 0, 0, &[0u8; 4]);
-            traks.extend(trak(2, OPUS_TIMESCALE, b"soun", smhd, &audio.sample_entry,
-                TrakMedia::Audio { volume: 0x0100 }));
+            traks.extend(trak(
+                2,
+                OPUS_TIMESCALE,
+                b"soun",
+                smhd,
+                &audio.sample_entry,
+                TrakMedia::Audio { volume: 0x0100 },
+            ));
             mvex_p.extend(trex(2, 0));
         }
         let mvex = mk_box(b"mvex", &mvex_p);
@@ -533,9 +564,10 @@ impl<W: Write> FragmentWriter<W> {
     pub fn push_sample(&mut self, data: Vec<u8>, sync: bool, pts_us: u64) -> std::io::Result<()> {
         let mut dts = pts_us * (TIMESCALE as u64 / 1000) / 1000;
         if let Some(last) = self.last_dts
-            && dts <= last {
-                dts = last + 1;
-            }
+            && dts <= last
+        {
+            dts = last + 1;
+        }
         self.last_dts = Some(dts);
         if let Some(prev) = self.pending.take() {
             let duration = (dts - prev.dts).min(u32::MAX as u64) as u32;
@@ -598,7 +630,8 @@ impl<W: Write> FragmentWriter<W> {
         debug_assert_eq!(moof.len(), moof_len);
 
         self.out.write_all(&moof)?;
-        self.out.write_all(&((8 + s.data.len()) as u32).to_be_bytes())?;
+        self.out
+            .write_all(&((8 + s.data.len()) as u32).to_be_bytes())?;
         self.out.write_all(b"mdat")?;
         self.out.write_all(&s.data)?;
         self.out.flush()?;
@@ -608,7 +641,9 @@ impl<W: Write> FragmentWriter<W> {
             self.stats.sync_samples += 1;
         }
         self.stats.bytes += (moof.len() + 8 + s.data.len()) as u64;
-        self.stats.duration_us = self.stats.duration_us
+        self.stats.duration_us = self
+            .stats
+            .duration_us
             .max((s.dts + duration as u64) * 1000 / (TIMESCALE as u64 / 1000));
         Ok(())
     }
@@ -684,7 +719,10 @@ impl<W: Write> FragmentWriter<W> {
         self.stats.audio_samples += samples.len() as u64;
         self.stats.bytes += (moof.len() + 8 + data_len) as u64;
         let end = self.audio_batch_dts + samples.iter().map(|(_, d)| *d as u64).sum::<u64>();
-        self.stats.duration_us = self.stats.duration_us.max(end * 1_000_000 / OPUS_TIMESCALE as u64);
+        self.stats.duration_us = self
+            .stats
+            .duration_us
+            .max(end * 1_000_000 / OPUS_TIMESCALE as u64);
         Ok(())
     }
 
@@ -723,7 +761,10 @@ impl Default for H264SampleBuilder {
 
 impl H264SampleBuilder {
     pub fn new() -> Self {
-        Self { sps: None, pps: None }
+        Self {
+            sps: None,
+            pps: None,
+        }
     }
 
     pub fn have_parameter_sets(&self) -> bool {
@@ -808,7 +849,11 @@ impl H264SampleBuilder {
         entry_p.extend_from_slice(&avcc);
         let entry = mk_box(b"avc1", &entry_p);
 
-        Some(TrackConfig { sample_entry: entry, width, height })
+        Some(TrackConfig {
+            sample_entry: entry,
+            width,
+            height,
+        })
     }
 }
 
@@ -852,16 +897,28 @@ mod tests {
         assert!(split_annexb(&[]).is_empty());
         assert!(split_annexb(&[0x67, 0xAA, 0xBB]).is_empty());
         assert!(split_annexb(&[0, 0, 0, 1]).is_empty());
-        assert_eq!(split_annexb(&[0, 0, 1, 0x68, 0, 0, 0, 1]), vec![&[0x68u8][..]]);
+        assert_eq!(
+            split_annexb(&[0, 0, 1, 0x68, 0, 0, 0, 1]),
+            vec![&[0x68u8][..]]
+        );
     }
 
     /// Dimensions from real x264 SPS across the profiles the project's encoders emit,
     /// including the frame-cropping and 4:4:4 chroma paths.
     #[test]
     fn sps_dimensions_across_profiles() {
-        assert_eq!(parse_sps_dimensions(&hex(SPS_HIGH_1284X722)), Some((1284, 722)));
-        assert_eq!(parse_sps_dimensions(&hex(SPS_BASE_640X360)), Some((640, 360)));
-        assert_eq!(parse_sps_dimensions(&hex(SPS_444_1920X1080)), Some((1920, 1080)));
+        assert_eq!(
+            parse_sps_dimensions(&hex(SPS_HIGH_1284X722)),
+            Some((1284, 722))
+        );
+        assert_eq!(
+            parse_sps_dimensions(&hex(SPS_BASE_640X360)),
+            Some((640, 360))
+        );
+        assert_eq!(
+            parse_sps_dimensions(&hex(SPS_444_1920X1080)),
+            Some((1920, 1080))
+        );
     }
 
     /// Annex-B -> AVCC: every NAL is length-prefixed, IDR marks sync, parameter sets are
@@ -876,7 +933,10 @@ mod tests {
         au.extend_from_slice(&[0, 0, 0, 1, 0x65, 1, 2, 3, 4]);
 
         let mut b = H264SampleBuilder::new();
-        assert!(b.build_sample(&[0u8, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1e, 0xd9]).is_none());
+        assert!(
+            b.build_sample(&[0u8, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1e, 0xd9])
+                .is_none()
+        );
         let s = b.build_sample(&au).expect("IDR AU builds a sample");
         assert!(s.sync);
         assert!(b.have_parameter_sets());
@@ -900,7 +960,10 @@ mod tests {
         let mut at = 0;
         while at + 8 <= buf.len() {
             let size = u32::from_be_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
-            out.push((String::from_utf8_lossy(&buf[at + 4..at + 8]).into_owned(), buf[at + 8..at + size].to_vec()));
+            out.push((
+                String::from_utf8_lossy(&buf[at + 4..at + 8]).into_owned(),
+                buf[at + 8..at + size].to_vec(),
+            ));
             at += size;
         }
         assert_eq!(at, buf.len(), "boxes tile the buffer");
@@ -908,13 +971,18 @@ mod tests {
     }
 
     fn count(haystack: &[u8], needle: &[u8]) -> usize {
-        haystack.windows(needle.len()).filter(|w| *w == needle).count()
+        haystack
+            .windows(needle.len())
+            .filter(|w| *w == needle)
+            .count()
     }
 
     fn idr_au() -> Vec<u8> {
         let mut au = vec![0, 0, 0, 1];
         au.extend_from_slice(&hex(SPS_BASE_640X360));
-        au.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xCE, 0x38, 0x80, 0, 0, 0, 1, 0x65, 1, 2, 3, 4]);
+        au.extend_from_slice(&[
+            0, 0, 0, 1, 0x68, 0xCE, 0x38, 0x80, 0, 0, 0, 1, 0x65, 1, 2, 3, 4,
+        ]);
         au
     }
 
@@ -937,7 +1005,12 @@ mod tests {
     #[test]
     fn audio_track_fragments() {
         let head = super::super::ogg::OpusHead {
-            channels: 2, pre_skip: 312, input_sample_rate: 48000, output_gain: 0, mapping_family: 0, mapping: vec![],
+            channels: 2,
+            pre_skip: 312,
+            input_sample_rate: 48000,
+            output_gain: 0,
+            mapping_family: 0,
+            mapping: vec![],
         };
         let entry = opus_sample_entry(&head);
         assert_eq!(&entry[4..8], b"Opus");
@@ -949,19 +1022,25 @@ mod tests {
         let sample = b.build_sample(&idr_au()).unwrap();
         let mut out = Vec::new();
         {
-            let mut w = FragmentWriter::new(&mut out).with_audio(AudioTrackConfig { sample_entry: entry });
+            let mut w = FragmentWriter::new(&mut out).with_audio(AudioTrackConfig {
+                sample_entry: entry,
+            });
             w.write_init(&b.track_config().unwrap()).unwrap();
             for i in 0..AUDIO_FLUSH_SAMPLES as u64 + 2 {
                 w.push_audio(vec![0xfc, i as u8], 1000 + i * 960).unwrap();
             }
             // A gap of a second: the two pending packets close, the next opens a fragment.
-            w.push_audio(vec![0xfc, 0xee], 1000 + 28 * 960 + 48_000).unwrap();
+            w.push_audio(vec![0xfc, 0xee], 1000 + 28 * 960 + 48_000)
+                .unwrap();
             w.push_sample(sample.data.clone(), true, 0).unwrap();
             w.push_sample(sample.data, true, 33_000).unwrap();
             let st = w.finish().unwrap();
             assert_eq!(st.audio_samples, AUDIO_FLUSH_SAMPLES as u64 + 3);
             assert_eq!(st.samples, 2);
-            assert_eq!(st.duration_us, (1000 + 28 * 960 + 48_000 + 960) * 1_000_000 / 48_000);
+            assert_eq!(
+                st.duration_us,
+                (1000 + 28 * 960 + 48_000 + 960) * 1_000_000 / 48_000
+            );
         }
         let boxes = top_level(&out);
         let kinds: Vec<&str> = boxes.iter().map(|(k, _)| k.as_str()).collect();
@@ -969,19 +1048,42 @@ mod tests {
         assert_eq!(count(&boxes[1].1, b"trak"), 2);
         assert_eq!(count(&boxes[1].1, b"trex"), 2);
         assert_eq!(count(&boxes[1].1, b"soun"), 1);
-        assert_eq!(kinds.iter().filter(|k| **k == "moof").count(), 5, "{kinds:?}");
-        let tfdts: Vec<u64> = boxes.iter().filter(|(k, _)| k == "moof").map(|(_, m)| {
-            let at = m.windows(4).position(|w| w == b"tfdt").unwrap() + 8;
-            u64::from_be_bytes(m[at..at + 8].try_into().unwrap())
-        }).collect();
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "moof").count(),
+            5,
+            "{kinds:?}"
+        );
+        let tfdts: Vec<u64> = boxes
+            .iter()
+            .filter(|(k, _)| k == "moof")
+            .map(|(_, m)| {
+                let at = m.windows(4).position(|w| w == b"tfdt").unwrap() + 8;
+                u64::from_be_bytes(m[at..at + 8].try_into().unwrap())
+            })
+            .collect();
         // Audio: the full batch, then the two before the gap when the one after it
         // arrives; the first video sample goes out when the second arrives; the packet
         // after the gap and the last video sample at finish.
-        assert_eq!(tfdts, vec![1000, 1000 + AUDIO_FLUSH_SAMPLES as u64 * 960, 0, 1000 + 28 * 960 + 48_000, 2970]);
+        assert_eq!(
+            tfdts,
+            vec![
+                1000,
+                1000 + AUDIO_FLUSH_SAMPLES as u64 * 960,
+                0,
+                1000 + 28 * 960 + 48_000,
+                2970
+            ]
+        );
         let first_audio = &boxes[2].1;
         let trun = first_audio.windows(4).position(|w| w == b"trun").unwrap() + 8;
-        assert_eq!(u32::from_be_bytes(first_audio[trun..trun + 4].try_into().unwrap()), AUDIO_FLUSH_SAMPLES as u32);
-        assert_eq!(u32::from_be_bytes(first_audio[trun + 8..trun + 12].try_into().unwrap()), 960);
+        assert_eq!(
+            u32::from_be_bytes(first_audio[trun..trun + 4].try_into().unwrap()),
+            AUDIO_FLUSH_SAMPLES as u32
+        );
+        assert_eq!(
+            u32::from_be_bytes(first_audio[trun + 8..trun + 12].try_into().unwrap()),
+            960
+        );
     }
 
     /// Walk the top-level boxes of a finished two-sample stream: init once, then one
@@ -1016,7 +1118,10 @@ mod tests {
             off += size;
         }
         assert_eq!(off, buf.len());
-        let names: Vec<&str> = kinds.iter().map(|k| std::str::from_utf8(k).unwrap()).collect();
+        let names: Vec<&str> = kinds
+            .iter()
+            .map(|k| std::str::from_utf8(k).unwrap())
+            .collect();
         assert_eq!(names, vec!["ftyp", "moov", "moof", "mdat", "moof", "mdat"]);
     }
 
@@ -1027,7 +1132,9 @@ mod tests {
         while off + 24 <= buf.len() {
             if &buf[off + 4..off + 8] == b"trun" {
                 // [size][fourcc][ver+flags][sample_count][data_offset][duration]
-                out.push(u32::from_be_bytes(buf[off + 20..off + 24].try_into().unwrap()));
+                out.push(u32::from_be_bytes(
+                    buf[off + 20..off + 24].try_into().unwrap(),
+                ));
             }
             off += 1;
         }
@@ -1053,9 +1160,12 @@ mod tests {
         w.write_init(&cfg).unwrap();
         // 33 ms, 33 ms, then a 300 ms static gap before the final frame.
         w.push_sample(vec![0, 0, 0, 1, 0x65], true, 0).unwrap();
-        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 33_000).unwrap();
-        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 66_000).unwrap();
-        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 366_000).unwrap();
+        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 33_000)
+            .unwrap();
+        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 66_000)
+            .unwrap();
+        w.push_sample(vec![0, 0, 0, 1, 0x41], false, 366_000)
+            .unwrap();
         let stats = w.finish().unwrap();
         assert_eq!(stats.samples, 4);
         // 90 kHz ticks: 33 ms = 2970. The tail closes at the median (2970), not 27000.
@@ -1117,6 +1227,9 @@ mod tests {
             off += 1;
         }
         assert_eq!(times.len(), 3);
-        assert!(times.windows(2).all(|w| w[1] > w[0]), "tfdt times: {times:?}");
+        assert!(
+            times.windows(2).all(|w| w[1] > w[0]),
+            "tfdt times: {times:?}"
+        );
     }
 }

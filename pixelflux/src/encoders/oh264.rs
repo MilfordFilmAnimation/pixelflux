@@ -18,16 +18,18 @@
 //! strict-GOP streaming behavior. Host ARGB is converted to I420 with the same
 //! BT.709 limited-range path the x264 encoder uses, then fed to OpenH264 as borrowed planes.
 
-use crate::encoders::codec::{push_video_header, Codec, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, VIDEO_HEADER_LEN};
-use crate::encoders::reference::Reference;
-use crate::encoders::QP_HYSTERESIS_LIMIT;
 use crate::RustCaptureSettings;
+use crate::encoders::QP_HYSTERESIS_LIMIT;
+use crate::encoders::codec::{
+    Codec, FRAME_DELTA, FRAME_INTRA, FRAME_KEY, VIDEO_HEADER_LEN, push_video_header,
+};
+use crate::encoders::reference::Reference;
+use openh264::OpenH264API;
 use openh264::encoder::{
     BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, QpRange,
     RateControlMode, UsageType, VuiConfig,
 };
 use openh264::formats::YUVSlices;
-use openh264::OpenH264API;
 
 /// Suppresses OpenH264's built-in periodic IDR so the GOP is effectively infinite and a
 /// keyframe costs bitrate only when something genuinely needs one.
@@ -162,7 +164,11 @@ impl Openh264Encoder {
         let bps = (bitrate_kbps.max(1) as u32).saturating_mul(1000);
         let fps = Self::clamp_fps(settings.target_fps);
         let crf = crf.clamp(1, 51);
-        let (threads, slices) = if fullframe { (Self::fullframe_threads(), 4) } else { (1, 1) };
+        let (threads, slices) = if fullframe {
+            (Self::fullframe_threads(), 4)
+        } else {
+            (1, 1)
+        };
 
         let encoder = Self::build_encoder(settings, fps, bps, crf as u8, threads)?;
 
@@ -395,7 +401,10 @@ impl Openh264Encoder {
                 true
             }
             None => {
-                eprintln!("[openh264] rebuild for QP {qp} failed; staying at QP {}", self.current_qp);
+                eprintln!(
+                    "[openh264] rebuild for QP {qp} failed; staying at QP {}",
+                    self.current_qp
+                );
                 false
             }
         }
@@ -414,7 +423,10 @@ impl Openh264Encoder {
     /// target is re-set back to `current_bitrate_bps` so the encoder stays in sync with the tracked
     /// value.
     fn set_live_bitrate(&mut self, bps: i32) {
-        for layer in [openh264_sys2::SPATIAL_LAYER_ALL, openh264_sys2::SPATIAL_LAYER_0] {
+        for layer in [
+            openh264_sys2::SPATIAL_LAYER_ALL,
+            openh264_sys2::SPATIAL_LAYER_0,
+        ] {
             let ret = self.set_bitrate_option(
                 openh264_sys2::ENCODER_OPTION_MAX_BITRATE,
                 layer,
@@ -429,8 +441,11 @@ impl Openh264Encoder {
                 return;
             }
         }
-        let ret =
-            self.set_bitrate_option(openh264_sys2::ENCODER_OPTION_BITRATE, openh264_sys2::SPATIAL_LAYER_ALL, bps);
+        let ret = self.set_bitrate_option(
+            openh264_sys2::ENCODER_OPTION_BITRATE,
+            openh264_sys2::SPATIAL_LAYER_ALL,
+            bps,
+        );
         if ret == 0 {
             self.current_bitrate_bps = bps;
         } else {
@@ -459,7 +474,11 @@ impl Openh264Encoder {
         let mut info: openh264_sys2::SBitrateInfo = unsafe { std::mem::zeroed() };
         info.iLayer = layer;
         info.iBitrate = bps;
-        unsafe { self.encoder.raw_api().set_option(option, std::ptr::addr_of_mut!(info).cast()) }
+        unsafe {
+            self.encoder
+                .raw_api()
+                .set_option(option, std::ptr::addr_of_mut!(info).cast())
+        }
     }
 
     /// Encode one full host frame: `encode_stripe_argb` at y-start 0, the framing the hardware
@@ -531,7 +550,11 @@ impl Openh264Encoder {
         );
         match self.encoder.encode(&slices) {
             Ok(bitstream) => {
-                let header_sz = if self.omit_stripe_headers { 0 } else { VIDEO_HEADER_LEN };
+                let header_sz = if self.omit_stripe_headers {
+                    0
+                } else {
+                    VIDEO_HEADER_LEN
+                };
                 let mut out = Vec::with_capacity(header_sz);
                 if header_sz != 0 {
                     let frame_type = match bitstream.frame_type() {
@@ -605,9 +628,16 @@ mod tests {
     #[test]
     fn declares_the_conversion_matrix() {
         use crate::webcam::decode::{ColorTags, Decoder, VideoDecoder};
-        let s = RustCaptureSettings { width: 128, height: 96, target_fps: 30.0, ..Default::default() };
+        let s = RustCaptureSettings {
+            width: 128,
+            height: 96,
+            target_fps: 30.0,
+            ..Default::default()
+        };
         let mut enc = Openh264Encoder::new(&s).expect("openh264 init");
-        let idr = enc.encode_host_argb(&busy_frame(128, 96, 0), 128 * 4, 0, true, false).expect("encode");
+        let idr = enc
+            .encode_host_argb(&busy_frame(128, 96, 0), 128 * 4, 0, true, false)
+            .expect("encode");
         let mut dec = VideoDecoder::new(Codec::H264).expect("decoder");
         assert!(dec.decode(&idr[VIDEO_HEADER_LEN..]).expect("decode"));
         assert_eq!(dec.color_tags(), Some(ColorTags::BT709_LIMITED));
@@ -634,8 +664,13 @@ mod tests {
             }
             .expect("openh264 init");
             let height = if whole { 192 } else { 64 };
-            let idr = enc.encode_host_argb(&busy_frame(320, height, 0), 320 * 4, 0, true, false).expect("encode");
-            assert_no_reorder(&idr[VIDEO_HEADER_LEN..], &format!("OpenH264 cbr {cbr} whole {whole}"));
+            let idr = enc
+                .encode_host_argb(&busy_frame(320, height, 0), 320 * 4, 0, true, false)
+                .expect("encode");
+            assert_no_reorder(
+                &idr[VIDEO_HEADER_LEN..],
+                &format!("OpenH264 cbr {cbr} whole {whole}"),
+            );
         }
     }
 
@@ -644,8 +679,8 @@ mod tests {
     /// presentation path performs on every frame, here with no browser in the way.
     #[test]
     fn paints_the_chart_it_converts() {
-        use crate::encoders::chroma_siting::{chart_bgra, chart_error, BT709};
-        use crate::webcam::decode::{VideoDecoder, Decoder};
+        use crate::encoders::chroma_siting::{BT709, chart_bgra, chart_error};
+        use crate::webcam::decode::{Decoder, VideoDecoder};
         let (w, h) = (256usize, 128usize);
         let s = RustCaptureSettings {
             width: w as i32,
@@ -662,7 +697,10 @@ mod tests {
         assert!(dec.decode(&idr[VIDEO_HEADER_LEN..]).expect("decode"));
         let worst = chart_error(&dec.frame().expect("frame"), BT709);
         println!("[chart] OpenH264: worst |dRGB| {worst:.1}");
-        assert!(worst <= 12.0, "the OpenH264 path paints {worst:.1} off the chart");
+        assert!(
+            worst <= 12.0,
+            "the OpenH264 path paints {worst:.1} off the chart"
+        );
     }
 
     /// A forced first frame is emitted as a typed IDR with a valid wire header and Annex-B
@@ -679,19 +717,30 @@ mod tests {
         };
         let mut enc = Openh264Encoder::new(&s).expect("openh264 init");
         let stride = 128 * 4;
-        let idr = enc.encode_host_argb(&busy_frame(128, 96, 0), stride, 0, true, false).expect("encode idr");
+        let idr = enc
+            .encode_host_argb(&busy_frame(128, 96, 0), stride, 0, true, false)
+            .expect("encode idr");
         assert!(idr.len() > 10, "IDR frame should produce output");
         assert_eq!(idr[0], 0x04);
-        assert_eq!(idr[1], 0x11, "forced first frame must be typed an H.264 key frame");
+        assert_eq!(
+            idr[1], 0x11,
+            "forced first frame must be typed an H.264 key frame"
+        );
         assert_eq!(&idr[2..6], &[0, 0, 0, 0], "frame_id 0 and y_start 0");
         assert_eq!(&idr[6..10], &[0, 128, 0, 96], "width/height big-endian");
         assert!(
-            idr[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 0, 1]) || idr[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 1]),
+            idr[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 0, 1])
+                || idr[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 1]),
             "payload must be Annex-B (start code prefixed)"
         );
-        let p = enc.encode_host_argb(&busy_frame(128, 96, 0), stride, 7, false, false).expect("encode p");
+        let p = enc
+            .encode_host_argb(&busy_frame(128, 96, 0), stride, 7, false, false)
+            .expect("encode p");
         assert!(p.len() > 10, "second frame should produce output");
-        assert_eq!(p[1], 0x10, "unforced static second frame must be typed an H.264 delta");
+        assert_eq!(
+            p[1], 0x10,
+            "unforced static second frame must be typed an H.264 delta"
+        );
         assert_eq!(&p[2..4], &[0, 7], "frame_id must come from frame_number");
     }
 
@@ -708,7 +757,9 @@ mod tests {
             ..Default::default()
         };
         let mut enc = Openh264Encoder::new(&s).expect("openh264 init");
-        let out = enc.encode_host_argb(&busy_frame(128, 96, 0), 128 * 4, 0, true, false).expect("encode");
+        let out = enc
+            .encode_host_argb(&busy_frame(128, 96, 0), 128 * 4, 0, true, false)
+            .expect("encode");
         assert!(
             out.starts_with(&[0, 0, 0, 1]) || out.starts_with(&[0, 0, 1]),
             "omit_stripe_headers output must be bare Annex-B"
@@ -730,12 +781,23 @@ mod tests {
                 ..Default::default()
             };
             let mut e = Openh264Encoder::new(&s).unwrap();
-            let _ = e.encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false).unwrap();
-            (1..24).map(|t| e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false).unwrap().len()).sum()
+            let _ = e
+                .encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false)
+                .unwrap();
+            (1..24)
+                .map(|t| {
+                    e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false)
+                        .unwrap()
+                        .len()
+                })
+                .sum()
         };
         let high = encode_run(8000);
         let low = encode_run(200);
-        assert!(low < high, "lower target bitrate should compress harder (low={low}, high={high})");
+        assert!(
+            low < high,
+            "lower target bitrate should compress harder (low={low}, high={high})"
+        );
     }
 
     /// Dropping the CBR target live via `reconfigure_rate` (as the web UI slider does)
@@ -752,13 +814,28 @@ mod tests {
             ..Default::default()
         };
         let mut e = Openh264Encoder::new(&s).unwrap();
-        let _ = e.encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false).unwrap();
-        let high: usize =
-            (1..24).map(|t| e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false).unwrap().len()).sum();
+        let _ = e
+            .encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false)
+            .unwrap();
+        let high: usize = (1..24)
+            .map(|t| {
+                e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false)
+                    .unwrap()
+                    .len()
+            })
+            .sum();
         e.reconfigure_rate(200, 30.0);
-        let low: usize =
-            (24..48).map(|t| e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false).unwrap().len()).sum();
-        assert!(low < high, "live bitrate drop should shrink output (low={low}, high={high})");
+        let low: usize = (24..48)
+            .map(|t| {
+                e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false)
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert!(
+            low < high,
+            "live bitrate drop should shrink output (low={low}, high={high})"
+        );
     }
 
     /// Raising the CBR target live above the session's initial bitrate is accepted (not
@@ -776,14 +853,32 @@ mod tests {
             ..Default::default()
         };
         let mut e = Openh264Encoder::new(&s).unwrap();
-        let _ = e.encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false).unwrap();
-        let low: usize =
-            (1..24).map(|t| e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false).unwrap().len()).sum();
+        let _ = e
+            .encode_host_argb(&busy_frame(w, h, 0), stride, 0, true, false)
+            .unwrap();
+        let low: usize = (1..24)
+            .map(|t| {
+                e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false)
+                    .unwrap()
+                    .len()
+            })
+            .sum();
         e.reconfigure_rate(8000, 30.0);
-        assert_eq!(e.current_bitrate_bps, 8_000_000, "live raise must be accepted, not rejected");
-        let high: usize =
-            (24..48).map(|t| e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false).unwrap().len()).sum();
-        assert!(high > low * 3 / 2, "live bitrate raise should grow output (low={low}, high={high})");
+        assert_eq!(
+            e.current_bitrate_bps, 8_000_000,
+            "live raise must be accepted, not rejected"
+        );
+        let high: usize = (24..48)
+            .map(|t| {
+                e.encode_host_argb(&busy_frame(w, h, t), stride, t as u64, false, false)
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert!(
+            high > low * 3 / 2,
+            "live bitrate raise should grow output (low={low}, high={high})"
+        );
     }
 
     /// In CRF/CQP mode (bitrate-mode RC with a pinned `min == max` QP), a higher `video_crf`
@@ -803,9 +898,16 @@ mod tests {
                 ..Default::default()
             };
             let mut e = Openh264Encoder::new(&s).unwrap();
-            let mut total = e.encode_host_argb(&gradient_frame(w, h, 0), stride, 0, true, false).unwrap().len();
+            let mut total = e
+                .encode_host_argb(&gradient_frame(w, h, 0), stride, 0, true, false)
+                .unwrap()
+                .len();
             total += (1..24)
-                .map(|t| e.encode_host_argb(&gradient_frame(w, h, t), stride, t as u64, false, false).unwrap().len())
+                .map(|t| {
+                    e.encode_host_argb(&gradient_frame(w, h, t), stride, t as u64, false, false)
+                        .unwrap()
+                        .len()
+                })
                 .sum::<usize>();
             total
         };
@@ -856,7 +958,10 @@ mod tests {
             "a lower live QP should grow output well beyond the coarse run (qp18={fine}, qp40={coarse})"
         );
         e.update_qp(40);
-        assert_eq!(e.current_qp, 18, "a single QP increase must wait out the hysteresis");
+        assert_eq!(
+            e.current_qp, 18,
+            "a single QP increase must wait out the hysteresis"
+        );
     }
 
     /// Both input byte orders encode valid, wire-headered Annex-B: the Wayland GLES readback
@@ -875,11 +980,17 @@ mod tests {
         let frame = busy_frame(w, h, 0);
         for rgba in [false, true] {
             let mut e = Openh264Encoder::new(&s).unwrap();
-            let out = e.encode_host_argb(&frame, stride, 0, true, rgba).expect("encode");
+            let out = e
+                .encode_host_argb(&frame, stride, 0, true, rgba)
+                .expect("encode");
             assert!(out.len() > 10, "rgba_input={rgba} must produce output");
-            assert_eq!(out[0], 0x04, "rgba_input={rgba} output must carry the wire header");
+            assert_eq!(
+                out[0], 0x04,
+                "rgba_input={rgba} output must carry the wire header"
+            );
             assert!(
-                out[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 0, 1]) || out[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 1]),
+                out[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 0, 1])
+                    || out[VIDEO_HEADER_LEN..].starts_with(&[0, 0, 1]),
                 "rgba_input={rgba} payload must be Annex-B"
             );
         }
@@ -919,7 +1030,9 @@ mod slice_tests {
         };
         let mut enc = Openh264Encoder::new(&s).expect("encoder");
         let frame = vec![0x80u8; 640 * 480 * 4];
-        let out = enc.encode_host_argb(&frame, 640 * 4, 0, true, false).expect("encode");
+        let out = enc
+            .encode_host_argb(&frame, 640 * 4, 0, true, false)
+            .expect("encode");
         let nals = count_nals(&out);
         assert!(nals >= 6, "expected 4-slice IDR (>=6 NALs), got {nals}");
     }
@@ -944,19 +1057,29 @@ mod slice_tests {
             .expect("encode");
         let frame = vec![0x80u8; 640 * 64 * 4];
         let mut stripe = Openh264Encoder::new_stripe(&s, 640, 64, 25, 2000, false).expect("stripe");
-        let out = stripe.encode_stripe_argb(&frame, 640 * 4, 3, 320, true, false).expect("encode");
+        let out = stripe
+            .encode_stripe_argb(&frame, 640 * 4, 3, 320, true, false)
+            .expect("encode");
         assert_eq!(out[0], 0x04);
-        assert_eq!(out[1], 0x11, "forced first stripe frame is an H.264 key frame");
+        assert_eq!(
+            out[1], 0x11,
+            "forced first stripe frame is an H.264 key frame"
+        );
         assert_eq!(&out[2..4], &[0, 3], "frame number");
         assert_eq!(&out[4..6], &320u16.to_be_bytes(), "y-start");
         assert_eq!(&out[6..10], &[2, 128, 0, 64], "stripe geometry");
         let (stripe_nals, full_nals) = (count_nals(&out), count_nals(&full_out));
-        assert!(stripe_nals >= 3, "SPS + PPS + IDR slice expected, got {stripe_nals}");
+        assert!(
+            stripe_nals >= 3,
+            "SPS + PPS + IDR slice expected, got {stripe_nals}"
+        );
         assert!(
             stripe_nals + 3 <= full_nals,
             "a stripe must be single-slice ({stripe_nals} NALs) against the four-slice full frame ({full_nals})"
         );
-        let p = stripe.encode_stripe_argb(&frame, 640 * 4, 4, 320, false, false).expect("encode");
+        let p = stripe
+            .encode_stripe_argb(&frame, 640 * 4, 4, 320, false, false)
+            .expect("encode");
         assert_eq!(p[1], 0x10, "an unforced static frame is an H.264 delta");
         assert_eq!(&p[4..6], &320u16.to_be_bytes(), "y-start rides every frame");
     }
@@ -1017,7 +1140,8 @@ mod slice_tests {
                     .unwrap();
                 total += out.len();
                 for i in 0..out.len().saturating_sub(4) {
-                    if out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1 && (out[i + 3] & 0x1F) == 5 {
+                    if out[i] == 0 && out[i + 1] == 0 && out[i + 2] == 1 && (out[i + 3] & 0x1F) == 5
+                    {
                         idrs += 1;
                         break;
                     }
@@ -1038,7 +1162,10 @@ mod slice_tests {
             "CBR-on-noise no longer responds to its target: 500kbps={cbr500k} B/f vs 4Mbps={cbr4m} B/f \
              (QP51 floor {qp51}, QP25 {qp25})"
         );
-        assert!(qp51 * 4 < qp25, "QP pinning sanity: 51 must compress far harder than 25");
+        assert!(
+            qp51 * 4 < qp25,
+            "QP pinning sanity: 51 must compress far harder than 25"
+        );
     }
 
     /// The four-slice re-init in `enable_slices` preserves the CBR rate-control
@@ -1066,14 +1193,30 @@ mod slice_tests {
             println!(
                 "post-init params: iRCMode={} iTargetBitrate={} iMaxBitrate={} fMaxFrameRate={} \
                  iMaxQp={} iMinQp={} bEnableFrameSkip={} uiIntraPeriod={} layer0(target={} max={})",
-                p.iRCMode, p.iTargetBitrate, p.iMaxBitrate, p.fMaxFrameRate, p.iMaxQp, p.iMinQp,
-                p.bEnableFrameSkip, p.uiIntraPeriod,
-                p.sSpatialLayers[0].iSpatialBitrate, p.sSpatialLayers[0].iMaxSpatialBitrate,
+                p.iRCMode,
+                p.iTargetBitrate,
+                p.iMaxBitrate,
+                p.fMaxFrameRate,
+                p.iMaxQp,
+                p.iMinQp,
+                p.bEnableFrameSkip,
+                p.uiIntraPeriod,
+                p.sSpatialLayers[0].iSpatialBitrate,
+                p.sSpatialLayers[0].iMaxSpatialBitrate,
             );
-            assert_eq!(p.iTargetBitrate, 4_000_000, "target bitrate survives the 4-slice re-init");
-            assert!(p.fMaxFrameRate > 1.0, "frame rate survives the 4-slice re-init");
+            assert_eq!(
+                p.iTargetBitrate, 4_000_000,
+                "target bitrate survives the 4-slice re-init"
+            );
+            assert!(
+                p.fMaxFrameRate > 1.0,
+                "frame rate survives the 4-slice re-init"
+            );
             assert_eq!(p.iMaxQp, 51, "RC QP headroom survives the 4-slice re-init");
-            assert!(p.bEnableFrameSkip, "CBR enables frame skip so the bitrate is actually held");
+            assert!(
+                p.bEnableFrameSkip,
+                "CBR enables frame skip so the bitrate is actually held"
+            );
         }
     }
 }
@@ -1113,14 +1256,18 @@ mod rebuild_cost {
         let mut e = built.expect("init");
         let frame = vec![128u8; 1920 * 1080 * 4];
         let t = std::time::Instant::now();
-        let out = e.encode_host_argb(&frame, 1920 * 4, 0, true, false).expect("encode");
+        let out = e
+            .encode_host_argb(&frame, 1920 * 4, 0, true, false)
+            .expect("encode");
         let first_ms = t.elapsed().as_secs_f64() * 1000.0;
         assert!(!out.is_empty());
         println!("openh264 1080p init={init_ms:.1}ms first_frame={first_ms:.1}ms");
         // The bound is the one the check is for: a rebuild gone pathological takes seconds,
         // so a second is the line. A tighter one fails on host contention alone -- 260ms on a
         // loaded builder -- which reports nothing about the encoder and costs a red suite.
-        assert!(init_ms < 1000.0, "OpenH264 init unexpectedly slow: {init_ms}ms");
+        assert!(
+            init_ms < 1000.0,
+            "OpenH264 init unexpectedly slow: {init_ms}ms"
+        );
     }
 }
-

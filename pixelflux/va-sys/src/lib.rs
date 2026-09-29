@@ -29,19 +29,27 @@ include!("bindgen/va.rs");
 #[derive(Clone, Copy)]
 pub struct VaApi {
     pub vaErrorStr: unsafe extern "C" fn(VAStatus) -> *const c_char,
-    pub vaSetErrorCallback: unsafe extern "C" fn(VADisplay, VAMessageCallback, *mut c_void) -> VAMessageCallback,
-    pub vaSetInfoCallback: unsafe extern "C" fn(VADisplay, VAMessageCallback, *mut c_void) -> VAMessageCallback,
+    pub vaSetErrorCallback:
+        unsafe extern "C" fn(VADisplay, VAMessageCallback, *mut c_void) -> VAMessageCallback,
+    pub vaSetInfoCallback:
+        unsafe extern "C" fn(VADisplay, VAMessageCallback, *mut c_void) -> VAMessageCallback,
     pub vaInitialize: unsafe extern "C" fn(VADisplay, *mut c_int, *mut c_int) -> VAStatus,
     pub vaTerminate: unsafe extern "C" fn(VADisplay) -> VAStatus,
     pub vaQueryVendorString: unsafe extern "C" fn(VADisplay) -> *const c_char,
     pub vaMaxNumProfiles: unsafe extern "C" fn(VADisplay) -> c_int,
     pub vaMaxNumEntrypoints: unsafe extern "C" fn(VADisplay) -> c_int,
     pub vaMaxNumImageFormats: unsafe extern "C" fn(VADisplay) -> c_int,
-    pub vaQueryConfigProfiles: unsafe extern "C" fn(VADisplay, *mut VAProfile, *mut c_int) -> VAStatus,
+    pub vaQueryConfigProfiles:
+        unsafe extern "C" fn(VADisplay, *mut VAProfile, *mut c_int) -> VAStatus,
     pub vaQueryConfigEntrypoints:
         unsafe extern "C" fn(VADisplay, VAProfile, *mut VAEntrypoint, *mut c_int) -> VAStatus,
-    pub vaGetConfigAttributes:
-        unsafe extern "C" fn(VADisplay, VAProfile, VAEntrypoint, *mut VAConfigAttrib, c_int) -> VAStatus,
+    pub vaGetConfigAttributes: unsafe extern "C" fn(
+        VADisplay,
+        VAProfile,
+        VAEntrypoint,
+        *mut VAConfigAttrib,
+        c_int,
+    ) -> VAStatus,
     pub vaCreateConfig: unsafe extern "C" fn(
         VADisplay,
         VAProfile,
@@ -88,13 +96,16 @@ pub struct VaApi {
     pub vaUnmapBuffer: unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus,
     pub vaDestroyBuffer: unsafe extern "C" fn(VADisplay, VABufferID) -> VAStatus,
     pub vaBeginPicture: unsafe extern "C" fn(VADisplay, VAContextID, VASurfaceID) -> VAStatus,
-    pub vaRenderPicture: unsafe extern "C" fn(VADisplay, VAContextID, *mut VABufferID, c_int) -> VAStatus,
+    pub vaRenderPicture:
+        unsafe extern "C" fn(VADisplay, VAContextID, *mut VABufferID, c_int) -> VAStatus,
     pub vaEndPicture: unsafe extern "C" fn(VADisplay, VAContextID) -> VAStatus,
     pub vaSyncSurface: unsafe extern "C" fn(VADisplay, VASurfaceID) -> VAStatus,
     /// Absent before VA-API 1.9; a driver may also answer it unimplemented.
     pub vaSyncBuffer: Option<unsafe extern "C" fn(VADisplay, VABufferID, u64) -> VAStatus>,
-    pub vaQueryImageFormats: unsafe extern "C" fn(VADisplay, *mut VAImageFormat, *mut c_int) -> VAStatus,
-    pub vaCreateImage: unsafe extern "C" fn(VADisplay, *mut VAImageFormat, c_int, c_int, *mut VAImage) -> VAStatus,
+    pub vaQueryImageFormats:
+        unsafe extern "C" fn(VADisplay, *mut VAImageFormat, *mut c_int) -> VAStatus,
+    pub vaCreateImage:
+        unsafe extern "C" fn(VADisplay, *mut VAImageFormat, c_int, c_int, *mut VAImage) -> VAStatus,
     pub vaDestroyImage: unsafe extern "C" fn(VADisplay, VAImageID) -> VAStatus,
     pub vaPutImage: unsafe extern "C" fn(
         VADisplay,
@@ -110,8 +121,13 @@ pub struct VaApi {
         c_uint,
     ) -> VAStatus,
     pub vaDeriveImage: unsafe extern "C" fn(VADisplay, VASurfaceID, *mut VAImage) -> VAStatus,
-    pub vaQueryVideoProcPipelineCaps:
-        unsafe extern "C" fn(VADisplay, VAContextID, *mut VABufferID, c_uint, *mut VAProcPipelineCaps) -> VAStatus,
+    pub vaQueryVideoProcPipelineCaps: unsafe extern "C" fn(
+        VADisplay,
+        VAContextID,
+        *mut VABufferID,
+        c_uint,
+        *mut VAProcPipelineCaps,
+    ) -> VAStatus,
     /// `vaGetDisplayDRM` of `libva-drm.so.2`: the display of an open DRM render node.
     pub vaGetDisplayDRM: unsafe extern "C" fn(c_int) -> VADisplay,
 }
@@ -139,9 +155,11 @@ impl Libva {
         let drm = unsafe { Library::new(LIBVA_DRM) }.map_err(|e| format!("{LIBVA_DRM}: {e}"))?;
         macro_rules! sym {
             ($lib:expr, $name:ident) => {
-                unsafe { $lib.get::<unsafe extern "C" fn()>(concat!(stringify!($name), "\0").as_bytes()) }
-                    .map(|s| unsafe { std::mem::transmute(*s) })
-                    .map_err(|e| format!("{}: {e}", stringify!($name)))?
+                unsafe {
+                    $lib.get::<unsafe extern "C" fn()>(concat!(stringify!($name), "\0").as_bytes())
+                }
+                .map(|s| unsafe { std::mem::transmute(*s) })
+                .map_err(|e| format!("{}: {e}", stringify!($name)))?
             };
         }
         let api = VaApi {
@@ -172,9 +190,13 @@ impl Libva {
             vaRenderPicture: sym!(va, vaRenderPicture),
             vaEndPicture: sym!(va, vaEndPicture),
             vaSyncSurface: sym!(va, vaSyncSurface),
-            vaSyncBuffer: unsafe { va.get::<unsafe extern "C" fn(VADisplay, VABufferID, u64) -> VAStatus>(b"vaSyncBuffer\0") }
-                .ok()
-                .map(|s| *s),
+            vaSyncBuffer: unsafe {
+                va.get::<unsafe extern "C" fn(VADisplay, VABufferID, u64) -> VAStatus>(
+                    b"vaSyncBuffer\0",
+                )
+            }
+            .ok()
+            .map(|s| *s),
             vaQueryImageFormats: sym!(va, vaQueryImageFormats),
             vaCreateImage: sym!(va, vaCreateImage),
             vaDestroyImage: sym!(va, vaDestroyImage),
@@ -183,6 +205,10 @@ impl Libva {
             vaQueryVideoProcPipelineCaps: sym!(va, vaQueryVideoProcPipelineCaps),
             vaGetDisplayDRM: sym!(drm, vaGetDisplayDRM),
         };
-        Ok(Self { api, _va: va, _drm: drm })
+        Ok(Self {
+            api,
+            _va: va,
+            _drm: drm,
+        })
     }
 }

@@ -23,9 +23,12 @@ use std::sync::{Condvar, Mutex};
 
 use codec_sys::svtav1::*;
 
-use super::codec::{av1_is_key, frame_type_from_key, push_video_header, vpx_level, Codec, VIDEO_HEADER_LEN, VPX_QINDEX};
+use super::codec::{
+    Codec, VIDEO_HEADER_LEN, VPX_QINDEX, av1_is_key, frame_type_from_key, push_video_header,
+    vpx_level,
+};
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
-use super::session::{encode_threads, Pending, Planes, Quality, RateSettings};
+use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
 use crate::RustCaptureSettings;
 
 /// The lowest quantizer level the real-time mode runs at; below it the library faults.
@@ -44,7 +47,8 @@ const KEYFRAME_BY_REOPEN: bool = SVT_AV1_VERSION_MAJOR < 2;
 
 /// SVT-AV1 before 1.5 drains an encoder on release even when it took no frame, and waits for a
 /// packet that never comes; a session released before its first frame feeds it one.
-const FEED_BEFORE_RELEASE: bool = SVT_AV1_VERSION_MAJOR < 1 || (SVT_AV1_VERSION_MAJOR == 1 && SVT_AV1_VERSION_MINOR < 5);
+const FEED_BEFORE_RELEASE: bool =
+    SVT_AV1_VERSION_MAJOR < 1 || (SVT_AV1_VERSION_MAJOR == 1 && SVT_AV1_VERSION_MINOR < 5);
 
 /// The handles alive, held while one is created or released and while the probe forks: before
 /// 4.0 the library rebuilds a process-wide processor table in every handle it creates and frees
@@ -139,7 +143,8 @@ impl SvtAv1Encoder {
 
     fn set(&mut self, name: &str, value: &str) -> Result<(), String> {
         let (n, v) = (CString::new(name).unwrap(), CString::new(value).unwrap());
-        let code = unsafe { svt_av1_enc_parse_parameter(&mut *self.config, n.as_ptr(), v.as_ptr()) };
+        let code =
+            unsafe { svt_av1_enc_parse_parameter(&mut *self.config, n.as_ptr(), v.as_ptr()) };
         if code != EB_ErrorNone {
             return Err(error(&format!("SVT-AV1 refused {name}={value}"), code));
         }
@@ -173,7 +178,10 @@ impl SvtAv1Encoder {
             cfg.color_range = 0;
             cfg.intra_refresh_type = 2;
             if rate.cbr {
-                let (lo, hi) = (Codec::Av1.quantizer_bound(rate.min_qp), Codec::Av1.quantizer_bound(rate.max_qp));
+                let (lo, hi) = (
+                    Codec::Av1.quantizer_bound(rate.min_qp),
+                    Codec::Av1.quantizer_bound(rate.max_qp),
+                );
                 cfg.target_bit_rate = bps as u32;
                 cfg.rate_control_mode = 2;
                 cfg.max_qp_allowed = if hi > 0 { Self::level(hi) } else { 63 };
@@ -226,7 +234,8 @@ impl SvtAv1Encoder {
         io.y_stride = self.planes.width as u32;
         io.cb_stride = self.planes.chroma_width() as u32;
         io.cr_stride = self.planes.chroma_width() as u32;
-        header.n_alloc_len = (self.planes.y.len() + self.planes.u.len() + self.planes.v.len()) as u32;
+        header.n_alloc_len =
+            (self.planes.y.len() + self.planes.u.len() + self.planes.v.len()) as u32;
         self.fresh = true;
         self.events = Events::default();
         self.references = tracks.then(ReferenceSlots::new);
@@ -292,7 +301,11 @@ impl SvtAv1Encoder {
     }
 
     pub fn last_reference(&self) -> Reference {
-        if self.references.is_some() { self.last_reference } else { Reference::Untracked }
+        if self.references.is_some() {
+            self.last_reference
+        } else {
+            Reference::Untracked
+        }
     }
 
     /// Whether `hold_quantizer` holds a frame at its quantizer: at a constant rate where the
@@ -313,7 +326,9 @@ impl SvtAv1Encoder {
     /// Leave frame `frame_id` and every frame after it out of the predictions where the session
     /// names its references; refused otherwise, so the caller codes a key frame.
     pub fn invalidate_reference(&mut self, frame_id: u16) -> bool {
-        let Some(references) = self.references.as_mut() else { return false };
+        let Some(references) = self.references.as_mut() else {
+            return false;
+        };
         references.invalidate(frame_id);
         true
     }
@@ -330,7 +345,9 @@ impl SvtAv1Encoder {
     /// takes one live, since the VBV it holds spans the same time at any bitrate; anything else
     /// re-opens the encoder.
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
-        let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
+        let Some(rate) = self.rate.changed(settings) else {
+            return Ok(());
+        };
         let live = HAS_EVENTS
             && rate.fps == self.rate.fps
             && rate.vbv_multiplier == self.rate.vbv_multiplier
@@ -353,23 +370,50 @@ impl SvtAv1Encoder {
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
-        let quality_changed = !self.rate.cbr && self.quality.update(Codec::Av1.quantizer(crf as i32)).is_some();
+        let quality_changed = !self.rate.cbr
+            && self
+                .quality
+                .update(Codec::Av1.quantizer(crf as i32))
+                .is_some();
         if quality_changed || (force_idr && !self.fresh && KEYFRAME_BY_REOPEN) {
             self.open()?;
         }
-        self.planes.convert(pixels, stride, rgba, false, false, self.threads as usize)?;
+        self.planes
+            .convert(pixels, stride, rgba, false, false, self.threads as usize)?;
         let pts = self.next_pts;
         let mut key = force_idr || self.fresh;
         let mut plan = SlotPlan::KEY;
         if let Some(references) = &self.references {
             plan = references.plan(key);
             key = plan.predict_from == 0;
-            let anchor = |slot: u8| references.slot(slot).map_or(0, |(_, held, _)| anchor_id(held));
+            let anchor = |slot: u8| {
+                references
+                    .slot(slot)
+                    .map_or(0, |(_, held, _)| anchor_id(held))
+            };
             let refreshed = |slot: u8| plan.refresh.refreshes(slot);
-            let stored = if refreshed(SlotRefresh::GOLDEN | SlotRefresh::ALTREF) { anchor_id(references.next_pts()) } else { 0 };
-            let kept = [SlotRefresh::GOLDEN, SlotRefresh::ALTREF].map(|slot| if refreshed(slot) { stored } else { anchor(slot) });
-            let from = if key || plan.predict_from == SlotRefresh::LAST { 0 } else { anchor(plan.predict_from) };
-            let released = self.anchors.iter().copied().find(|a| !kept.contains(a) && *a != from);
+            let stored = if refreshed(SlotRefresh::GOLDEN | SlotRefresh::ALTREF) {
+                anchor_id(references.next_pts())
+            } else {
+                0
+            };
+            let kept = [SlotRefresh::GOLDEN, SlotRefresh::ALTREF].map(|slot| {
+                if refreshed(slot) {
+                    stored
+                } else {
+                    anchor(slot)
+                }
+            });
+            let from = if key || plan.predict_from == SlotRefresh::LAST {
+                0
+            } else {
+                anchor(plan.predict_from)
+            };
+            let released = self
+                .anchors
+                .iter()
+                .copied()
+                .find(|a| !kept.contains(a) && *a != from);
             self.events.store = stored;
             self.events.predict_from = from;
             self.events.clear = if key { 0 } else { released.unwrap_or(0) };
@@ -379,15 +423,24 @@ impl SvtAv1Encoder {
             header.n_filled_len = header.n_alloc_len;
             header.pts = pts as i64;
             header.flags = 0;
-            header.pic_type = if key { EB_AV1_KEY_PICTURE } else { EB_AV1_INVALID_PICTURE };
+            header.pic_type = if key {
+                EB_AV1_KEY_PICTURE
+            } else {
+                EB_AV1_INVALID_PICTURE
+            };
         }
         if self.rate.cbr && HAS_EVENTS {
             let held_key = key && self.held.is_some();
             if held_key || self.restate_target {
                 // The rate control takes no quantizer: a held key frame's picture is planned
                 // with a target that gives it `HELD_KEY_BUDGET_S` of the session's.
-                let factor = if held_key { super::HELD_KEY_BUDGET_S * self.rate.fps.fps() } else { 1.0 };
-                self.events.target_bit_rate = (self.rate.bps() as f64 * factor.max(1.0)).min(MAX_BITRATE_BPS as f64) as u32;
+                let factor = if held_key {
+                    super::HELD_KEY_BUDGET_S * self.rate.fps.fps()
+                } else {
+                    1.0
+                };
+                self.events.target_bit_rate =
+                    (self.rate.bps() as f64 * factor.max(1.0)).min(MAX_BITRATE_BPS as f64) as u32;
             }
             self.restate_target = held_key;
         }
@@ -412,17 +465,22 @@ impl SvtAv1Encoder {
             if code != EB_ErrorNone {
                 return Err(error("SVT-AV1 handed out no packet", code));
             }
-            let Some(p) = (unsafe { packet.as_ref() }) else { break };
-            let bytes = unsafe { std::slice::from_raw_parts(p.p_buffer, p.n_filled_len as usize) }.to_vec();
+            let Some(p) = (unsafe { packet.as_ref() }) else {
+                break;
+            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(p.p_buffer, p.n_filled_len as usize) }.to_vec();
             let packet_pts = p.pts.max(0) as u64;
             if !held {
-                self.last_quality = Some(Codec::Av1.quality_index(VPX_QINDEX[(p.qp as usize).min(63)] as u32));
+                self.last_quality =
+                    Some(Codec::Av1.quality_index(VPX_QINDEX[(p.qp as usize).min(63)] as u32));
             }
             unsafe { svt_av1_enc_release_out_buffer(&mut packet) };
             let id = self.pending.take(packet_pts).unwrap_or(frame_number as u16);
             let is_key = av1_is_key(&bytes);
             if let Some(references) = self.references.as_mut() {
-                self.last_reference = references.record(id, if is_key { SlotPlan::KEY } else { plan });
+                self.last_reference =
+                    references.record(id, if is_key { SlotPlan::KEY } else { plan });
                 if is_key {
                     self.anchors.clear();
                 }
@@ -462,11 +520,22 @@ mod tests {
     fn a_session_let_go_before_its_first_frame_closes() {
         let (done, closed) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let settings = RustCaptureSettings { width: 64, height: 64, target_fps: 30.0, codec: Codec::Av1, ..Default::default() };
+            let settings = RustCaptureSettings {
+                width: 64,
+                height: 64,
+                target_fps: 30.0,
+                codec: Codec::Av1,
+                ..Default::default()
+            };
             drop(SvtAv1Encoder::new(&settings, false).expect("session"));
             let _ = done.send(());
         });
-        assert!(closed.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "the release never returned");
+        assert!(
+            closed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_ok(),
+            "the release never returned"
+        );
     }
 
     /// The library is configured at the capture's rate as the fraction it names, a live change
@@ -476,28 +545,56 @@ mod tests {
         for (num, den) in [(60000u32, 1001u32), (120000, 1001), (144000, 1001), (60, 1)] {
             let fps = num as f64 / den as f64;
             let settings = RustCaptureSettings {
-                width: 64, height: 64, target_fps: fps, codec: Codec::Av1, video_cbr_mode: true, video_bitrate_kbps: 2000,
+                width: 64,
+                height: 64,
+                target_fps: fps,
+                codec: Codec::Av1,
+                video_cbr_mode: true,
+                video_bitrate_kbps: 2000,
                 ..Default::default()
             };
             let mut enc = SvtAv1Encoder::new(&settings, false).expect("session");
-            assert_eq!((enc.config.frame_rate_numerator, enc.config.frame_rate_denominator), (num, den));
-            enc.reconfigure_rate(&RustCaptureSettings { target_fps: 30.0, ..settings.clone() }).expect("30 fps");
+            assert_eq!(
+                (
+                    enc.config.frame_rate_numerator,
+                    enc.config.frame_rate_denominator
+                ),
+                (num, den)
+            );
+            enc.reconfigure_rate(&RustCaptureSettings {
+                target_fps: 30.0,
+                ..settings.clone()
+            })
+            .expect("30 fps");
             enc.reconfigure_rate(&settings).expect("back");
-            assert_eq!((enc.config.frame_rate_numerator, enc.config.frame_rate_denominator), (num, den));
+            assert_eq!(
+                (
+                    enc.config.frame_rate_numerator,
+                    enc.config.frame_rate_denominator
+                ),
+                (num, den)
+            );
         }
     }
 
     /// Sessions opened and closed on many threads at once each encode their frame.
     #[test]
     fn sessions_open_and_close_on_many_threads_at_once() {
-        let settings = RustCaptureSettings { width: 64, height: 64, target_fps: 30.0, codec: Codec::Av1, ..Default::default() };
+        let settings = RustCaptureSettings {
+            width: 64,
+            height: 64,
+            target_fps: 30.0,
+            codec: Codec::Av1,
+            ..Default::default()
+        };
         let frame = vec![0u8; 64 * 64 * 4];
         std::thread::scope(|s| {
             for _ in 0..4 {
                 s.spawn(|| {
                     for n in 0..4 {
                         let mut enc = SvtAv1Encoder::new(&settings, false).expect("session");
-                        enc.encode_host(&frame, 64 * 4, false, n, 30, true).expect("frame");
+                        enc.encode_host(&frame, 64 * 4, false, n, 30, true)
+                            .expect("frame");
                     }
                 });
             }

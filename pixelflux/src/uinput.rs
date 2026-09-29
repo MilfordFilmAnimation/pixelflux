@@ -108,7 +108,10 @@ pub fn available() -> bool {
 
 unsafe fn set(fd: i32, request: c_ulong, value: c_ulong) -> Result<(), String> {
     if unsafe { libc::ioctl(fd, request as _, value) } < 0 {
-        return Err(format!("uinput ioctl {request:#x}: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "uinput ioctl {request:#x}: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -119,7 +122,11 @@ pub struct Device {
 }
 
 impl Device {
-    fn open(name: &str, product: u16, build: impl Fn(i32) -> Result<(), String>) -> Result<Self, String> {
+    fn open(
+        name: &str,
+        product: u16,
+        build: impl Fn(i32) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let file = OpenOptions::new()
             .write(true)
             .open("/dev/uinput")
@@ -129,7 +136,12 @@ impl Device {
         unsafe { set(raw, UI_SET_EVBIT, EV_SYN as c_ulong)? };
         build(raw)?;
         let mut setup = UinputSetup {
-            id: InputId { bustype: BUS_VIRTUAL, vendor: 0x1d6b, product, version: 1 },
+            id: InputId {
+                bustype: BUS_VIRTUAL,
+                vendor: 0x1d6b,
+                product,
+                version: 1,
+            },
             name: [0; UINPUT_NAME_LEN],
             ff_effects_max: 0,
         };
@@ -140,7 +152,10 @@ impl Device {
             return Err(format!("UI_DEV_SETUP: {}", std::io::Error::last_os_error()));
         }
         if unsafe { libc::ioctl(raw, UI_DEV_CREATE as _) } < 0 {
-            return Err(format!("UI_DEV_CREATE: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "UI_DEV_CREATE: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Ok(Self { fd })
     }
@@ -174,10 +189,16 @@ impl Device {
                 set(fd, UI_SET_ABSBIT, code as c_ulong)?;
                 let abs = UinputAbsSetup {
                     code,
-                    absinfo: AbsInfo { maximum: ABS_RANGE, ..AbsInfo::default() },
+                    absinfo: AbsInfo {
+                        maximum: ABS_RANGE,
+                        ..AbsInfo::default()
+                    },
                 };
                 if libc::ioctl(fd, UI_ABS_SETUP as _, &abs as *const _) < 0 {
-                    return Err(format!("UI_ABS_SETUP {code}: {}", std::io::Error::last_os_error()));
+                    return Err(format!(
+                        "UI_ABS_SETUP {code}: {}",
+                        std::io::Error::last_os_error()
+                    ));
                 }
             }
             Ok(())
@@ -187,14 +208,30 @@ impl Device {
     /// Write one event and the `SYN_REPORT` that closes its report.
     pub fn emit(&self, kind: u16, code: u16, value: i32) -> Result<(), String> {
         let events = [
-            InputEvent { sec: 0, usec: 0, kind, code, value },
-            InputEvent { sec: 0, usec: 0, kind: EV_SYN, code: SYN_REPORT, value: 0 },
+            InputEvent {
+                sec: 0,
+                usec: 0,
+                kind,
+                code,
+                value,
+            },
+            InputEvent {
+                sec: 0,
+                usec: 0,
+                kind: EV_SYN,
+                code: SYN_REPORT,
+                value: 0,
+            },
         ];
         let bytes = unsafe {
             std::slice::from_raw_parts(events.as_ptr() as *const u8, std::mem::size_of_val(&events))
         };
         let written = unsafe {
-            libc::write(self.fd.as_raw_fd(), bytes.as_ptr() as *const libc::c_void, bytes.len())
+            libc::write(
+                self.fd.as_raw_fd(),
+                bytes.as_ptr() as *const libc::c_void,
+                bytes.len(),
+            )
         };
         if written < 0 {
             return Err(format!("uinput write: {}", std::io::Error::last_os_error()));
@@ -271,8 +308,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                (EV_KEY, 30, 1), (EV_SYN, SYN_REPORT, 0),
-                (EV_KEY, 30, 0), (EV_SYN, SYN_REPORT, 0),
+                (EV_KEY, 30, 1),
+                (EV_SYN, SYN_REPORT, 0),
+                (EV_KEY, 30, 0),
+                (EV_SYN, SYN_REPORT, 0),
             ],
             "stream was {events:?}"
         );

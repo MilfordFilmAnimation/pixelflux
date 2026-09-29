@@ -22,14 +22,17 @@
 //! constant-rate control otherwise refreshes GOLDEN on a schedule of its own, whatever a frame's
 //! flags say.
 
-use std::ffi::{c_int, c_long, c_void, CStr};
+use std::ffi::{CStr, c_int, c_long, c_void};
 use std::ptr;
 
 use codec_sys::vpx::*;
 
-use super::codec::{frame_type_from_key, push_video_header, vp8_is_key, vp9_is_key, vpx_level, Codec, VIDEO_HEADER_LEN};
+use super::codec::{
+    Codec, VIDEO_HEADER_LEN, frame_type_from_key, push_video_header, vp8_is_key, vp9_is_key,
+    vpx_level,
+};
 use super::reference::{Reference, ReferenceSlots, SlotPlan, SlotRefresh};
-use super::session::{encode_threads, Pending, Planes, Quality, RateSettings};
+use super::session::{Pending, Planes, Quality, RateSettings, encode_threads};
 use crate::RustCaptureSettings;
 
 /// The rate target, in kbit/s, a pinned-quantizer session names and never reaches.
@@ -90,7 +93,10 @@ fn error(ctx: &vpx_codec_ctx_t, what: &str) -> String {
         if detail.is_null() {
             format!("{what}: {text}")
         } else {
-            format!("{what}: {text} ({})", CStr::from_ptr(detail).to_string_lossy())
+            format!(
+                "{what}: {text} ({})",
+                CStr::from_ptr(detail).to_string_lossy()
+            )
         }
     }
 }
@@ -106,14 +112,23 @@ impl VpxEncoder {
         let threads = encode_threads() as u32;
         let rate = RateSettings::new(settings);
         let quality = Quality::new(codec.quantizer(settings.video_crf));
-        let iface = unsafe { if codec == Codec::Vp8 { vpx_codec_vp8_cx() } else { vpx_codec_vp9_cx() } };
+        let iface = unsafe {
+            if codec == Codec::Vp8 {
+                vpx_codec_vp8_cx()
+            } else {
+                vpx_codec_vp9_cx()
+            }
+        };
         let mut cfg: vpx_codec_enc_cfg_t = unsafe { std::mem::zeroed() };
         if unsafe { vpx_codec_enc_config_default(iface, &mut cfg, 0) } != VPX_CODEC_OK {
             return Err("libvpx refused its default configuration".into());
         }
         cfg.g_w = settings.width.max(1) as u32;
         cfg.g_h = settings.height.max(1) as u32;
-        cfg.g_timebase = vpx_rational { num: rate.fps.den as i32, den: rate.fps.num as i32 };
+        cfg.g_timebase = vpx_rational {
+            num: rate.fps.den as i32,
+            den: rate.fps.num as i32,
+        };
         cfg.g_threads = threads.min(64);
         cfg.g_lag_in_frames = 0;
         cfg.g_pass = VPX_RC_ONE_PASS;
@@ -137,12 +152,20 @@ impl VpxEncoder {
             codec,
             ctx: unsafe { std::mem::zeroed() },
             cfg,
-            planes: Planes::new(settings.width.max(1) as usize, settings.height.max(1) as usize, fullcolor),
+            planes: Planes::new(
+                settings.width.max(1) as usize,
+                settings.height.max(1) as usize,
+                fullcolor,
+            ),
             threads,
             quality,
             rate,
             omit_headers: settings.omit_stripe_headers,
-            references: if codec == Codec::Vp9 { ReferenceSlots::vp9() } else { ReferenceSlots::new() },
+            references: if codec == Codec::Vp9 {
+                ReferenceSlots::vp9()
+            } else {
+                ReferenceSlots::new()
+            },
             last_reference: Reference::Untracked,
             pending: Pending::default(),
             plan: SlotPlan::KEY,
@@ -152,7 +175,15 @@ impl VpxEncoder {
         };
         let q = me.quality.current;
         me.program_rate(rate, q);
-        let res = unsafe { vpx_codec_enc_init_ver(&mut me.ctx, iface, &me.cfg, 0, VPX_ENCODER_ABI_VERSION as c_int) };
+        let res = unsafe {
+            vpx_codec_enc_init_ver(
+                &mut me.ctx,
+                iface,
+                &me.cfg,
+                0,
+                VPX_ENCODER_ABI_VERSION as c_int,
+            )
+        };
         if res != VPX_CODEC_OK {
             return Err(error(&me.ctx, "libvpx refused the session"));
         }
@@ -200,7 +231,11 @@ impl VpxEncoder {
         layer.scaling_factor_den[0] = 1;
         layer.temporal_layering_mode = VP9E_TEMPORAL_LAYERING_MODE_BYPASS as c_int;
         let res = unsafe {
-            vpx_codec_control_(&mut self.ctx, VP9E_SET_SVC_PARAMETERS as c_int, &mut layer as *mut vpx_svc_parameters as *mut c_void)
+            vpx_codec_control_(
+                &mut self.ctx,
+                VP9E_SET_SVC_PARAMETERS as c_int,
+                &mut layer as *mut vpx_svc_parameters as *mut c_void,
+            )
         };
         if res != VPX_CODEC_OK {
             return Err(error(&self.ctx, "libvpx refused the layer parameters"));
@@ -213,14 +248,30 @@ impl VpxEncoder {
     /// a pinned quantizer names a rate it never reaches with both bounds at the quantizer.
     fn program_rate(&mut self, rate: RateSettings, q: u32) {
         let cfg = &mut self.cfg;
-        cfg.g_timebase = vpx_rational { num: rate.fps.den as i32, den: rate.fps.num as i32 };
+        cfg.g_timebase = vpx_rational {
+            num: rate.fps.den as i32,
+            den: rate.fps.num as i32,
+        };
         cfg.rc_end_usage = VPX_CBR;
         if rate.cbr {
             let kbps = (rate.bps() / 1000).clamp(1, u32::MAX as u64) as u32;
             cfg.rc_target_bitrate = kbps;
-            let (lo, hi) = (self.codec.quantizer_bound(rate.min_qp), self.codec.quantizer_bound(rate.max_qp));
-            cfg.rc_min_quantizer = if lo > 0 { vpx_level(self.codec, lo) } else if self.codec == Codec::Vp8 { VP8_DEFAULT_MIN_LEVEL } else { 0 };
-            cfg.rc_max_quantizer = if hi > 0 { vpx_level(self.codec, hi) } else { 63 };
+            let (lo, hi) = (
+                self.codec.quantizer_bound(rate.min_qp),
+                self.codec.quantizer_bound(rate.max_qp),
+            );
+            cfg.rc_min_quantizer = if lo > 0 {
+                vpx_level(self.codec, lo)
+            } else if self.codec == Codec::Vp8 {
+                VP8_DEFAULT_MIN_LEVEL
+            } else {
+                0
+            };
+            cfg.rc_max_quantizer = if hi > 0 {
+                vpx_level(self.codec, hi)
+            } else {
+                63
+            };
             let ms = (rate.vbv() as u64 * 1000 / rate.bps().max(1)) as u32;
             cfg.rc_buf_sz = ms;
             cfg.rc_buf_initial_sz = ms;
@@ -303,7 +354,9 @@ impl VpxEncoder {
 
     /// Re-program the rate control when a rate or frame-rate setting changed, live.
     pub fn reconfigure_rate(&mut self, settings: &RustCaptureSettings) -> Result<(), String> {
-        let Some(rate) = self.rate.changed(settings) else { return Ok(()) };
+        let Some(rate) = self.rate.changed(settings) else {
+            return Ok(());
+        };
         self.rate = rate;
         self.program_rate(rate, self.quality.current);
         self.reconfigure()
@@ -320,13 +373,21 @@ impl VpxEncoder {
         crf: u32,
         force_idr: bool,
     ) -> Result<Vec<u8>, String> {
-        if !self.rate.cbr && let Some(q) = self.quality.update(self.codec.quantizer(crf as i32)) {
+        if !self.rate.cbr
+            && let Some(q) = self.quality.update(self.codec.quantizer(crf as i32))
+        {
             self.program_rate(self.rate, q);
             self.reconfigure()?;
         }
         let capped = force_idr && self.rate.cbr;
         let cap = (self.rate.bps() as f64 / 8.0 * super::HELD_KEY_BUDGET_S) as usize;
-        let held = self.held.take().map(|crf| if capped { super::held_key_start(crf, self.held_key, cap) } else { crf });
+        let held = self.held.take().map(|crf| {
+            if capped {
+                super::held_key_start(crf, self.held_key, cap)
+            } else {
+                crf
+            }
+        });
         if let Some(crf) = held {
             self.pin_quantizer(crf)?;
         }
@@ -354,9 +415,17 @@ impl VpxEncoder {
     }
 
     /// Encode one packed host frame at the quantizer the configuration holds.
-    fn encode_frame(&mut self, pixels: &[u8], stride: usize, rgba: bool, frame_number: u64, force_idr: bool) -> Result<Vec<u8>, String> {
+    fn encode_frame(
+        &mut self,
+        pixels: &[u8],
+        stride: usize,
+        rgba: bool,
+        frame_number: u64,
+        force_idr: bool,
+    ) -> Result<Vec<u8>, String> {
         let bt601 = self.codec == Codec::Vp8;
-        self.planes.convert(pixels, stride, rgba, false, bt601, self.threads as usize)?;
+        self.planes
+            .convert(pixels, stride, rgba, false, bt601, self.threads as usize)?;
 
         let key = force_idr || !self.references.has_reference();
         let pts = self.references.next_pts();
@@ -381,16 +450,34 @@ impl VpxEncoder {
                     )
                 };
                 if res != VPX_CODEC_OK {
-                    return Err(error(&self.ctx, "libvpx refused the reference configuration"));
+                    return Err(error(
+                        &self.ctx,
+                        "libvpx refused the reference configuration",
+                    ));
                 }
             }
             _ => {
                 flags |= VP8_EFLAG_NO_UPD_ENTROPY as c_long;
                 if !key {
                     for (buffer, no_ref, no_upd, force) in [
-                        (SlotRefresh::LAST, VP8_EFLAG_NO_REF_LAST, VP8_EFLAG_NO_UPD_LAST, 0),
-                        (SlotRefresh::GOLDEN, VP8_EFLAG_NO_REF_GF, VP8_EFLAG_NO_UPD_GF, VP8_EFLAG_FORCE_GF),
-                        (SlotRefresh::ALTREF, VP8_EFLAG_NO_REF_ARF, VP8_EFLAG_NO_UPD_ARF, VP8_EFLAG_FORCE_ARF),
+                        (
+                            SlotRefresh::LAST,
+                            VP8_EFLAG_NO_REF_LAST,
+                            VP8_EFLAG_NO_UPD_LAST,
+                            0,
+                        ),
+                        (
+                            SlotRefresh::GOLDEN,
+                            VP8_EFLAG_NO_REF_GF,
+                            VP8_EFLAG_NO_UPD_GF,
+                            VP8_EFLAG_FORCE_GF,
+                        ),
+                        (
+                            SlotRefresh::ALTREF,
+                            VP8_EFLAG_NO_REF_ARF,
+                            VP8_EFLAG_NO_UPD_ARF,
+                            VP8_EFLAG_FORCE_ARF,
+                        ),
                     ] {
                         if self.plan.predict_from != buffer {
                             flags |= no_ref as c_long;
@@ -406,9 +493,20 @@ impl VpxEncoder {
         }
 
         let mut img: vpx_image = unsafe { std::mem::zeroed() };
-        let fmt = if self.planes.i444 { VPX_IMG_FMT_I444 } else { VPX_IMG_FMT_I420 };
+        let fmt = if self.planes.i444 {
+            VPX_IMG_FMT_I444
+        } else {
+            VPX_IMG_FMT_I420
+        };
         unsafe {
-            vpx_img_wrap(&mut img, fmt, self.planes.width as u32, self.planes.height as u32, 1, self.planes.y.as_mut_ptr());
+            vpx_img_wrap(
+                &mut img,
+                fmt,
+                self.planes.width as u32,
+                self.planes.height as u32,
+                1,
+                self.planes.y.as_mut_ptr(),
+            );
         }
         img.planes[0] = self.planes.y.as_mut_ptr();
         img.planes[1] = self.planes.u.as_mut_ptr();
@@ -418,7 +516,16 @@ impl VpxEncoder {
         img.stride[2] = self.planes.chroma_width() as c_int;
         img.range = VPX_CR_STUDIO_RANGE;
         self.pending.push(pts, frame_number as u16);
-        let res = unsafe { vpx_codec_encode(&mut self.ctx, &img, pts as i64, 1, flags, VPX_DL_REALTIME as u64) };
+        let res = unsafe {
+            vpx_codec_encode(
+                &mut self.ctx,
+                &img,
+                pts as i64,
+                1,
+                flags,
+                VPX_DL_REALTIME as u64,
+            )
+        };
         if res != VPX_CODEC_OK {
             self.pending.undo();
             return Err(error(&self.ctx, "libvpx refused the frame"));
@@ -437,9 +544,20 @@ impl VpxEncoder {
             }
             let frame = unsafe { pkt.data.frame };
             let bytes = unsafe { std::slice::from_raw_parts(frame.buf as *const u8, frame.sz) };
-            let is_key = if self.codec == Codec::Vp8 { vp8_is_key(bytes) } else { vp9_is_key(bytes) };
-            let id = self.pending.take(frame.pts as u64).unwrap_or(frame_number as u16);
-            let plan = if is_key { self.references.plan(true) } else { self.plan };
+            let is_key = if self.codec == Codec::Vp8 {
+                vp8_is_key(bytes)
+            } else {
+                vp9_is_key(bytes)
+            };
+            let id = self
+                .pending
+                .take(frame.pts as u64)
+                .unwrap_or(frame_number as u16);
+            let plan = if is_key {
+                self.references.plan(true)
+            } else {
+                self.plan
+            };
             self.last_reference = self.references.record(id, plan);
             if !self.omit_headers {
                 output.reserve(VIDEO_HEADER_LEN + bytes.len());
@@ -458,8 +576,15 @@ impl VpxEncoder {
         }
         if !output.is_empty() {
             let mut q: c_int = 0;
-            let res = unsafe { vpx_codec_control_(&mut self.ctx, VP8E_GET_LAST_QUANTIZER as c_int, &mut q as *mut c_int) };
-            self.last_quality = (res == VPX_CODEC_OK).then(|| self.codec.quality_index(q.max(0) as u32));
+            let res = unsafe {
+                vpx_codec_control_(
+                    &mut self.ctx,
+                    VP8E_GET_LAST_QUANTIZER as c_int,
+                    &mut q as *mut c_int,
+                )
+            };
+            self.last_quality =
+                (res == VPX_CODEC_OK).then(|| self.codec.quality_index(q.max(0) as u32));
         }
         Ok(output)
     }
@@ -468,14 +593,22 @@ impl VpxEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoders::codec::{parse_video_type, FRAME_DELTA, FRAME_KEY};
+    use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, parse_video_type};
     use crate::webcam::decode::{Decoder as _, VideoDecoder};
 
     const W: usize = 320;
     const H: usize = 240;
 
     fn settings(codec: Codec) -> RustCaptureSettings {
-        RustCaptureSettings { width: W as i32, height: H as i32, target_fps: 30.0, codec, video_crf: 25, use_cpu: true, ..Default::default() }
+        RustCaptureSettings {
+            width: W as i32,
+            height: H as i32,
+            target_fps: 30.0,
+            codec,
+            video_crf: 25,
+            use_cpu: true,
+            ..Default::default()
+        }
     }
 
     /// A frame whose luma spells its index in blocks, so a decoded picture names the frame it is.
@@ -500,11 +633,19 @@ mod tests {
         f
     }
 
-    fn luma_distance(a: &crate::webcam::convert::I420View<'_>, b: &crate::webcam::convert::I420View<'_>) -> f64 {
+    fn luma_distance(
+        a: &crate::webcam::convert::I420View<'_>,
+        b: &crate::webcam::convert::I420View<'_>,
+    ) -> f64 {
         a.y.chunks(a.y_stride)
             .zip(b.y.chunks(b.y_stride))
             .take(a.height)
-            .flat_map(|(ra, rb)| ra[..a.width].iter().zip(&rb[..a.width]).map(|(&x, &y)| (x as f64 - y as f64).abs()))
+            .flat_map(|(ra, rb)| {
+                ra[..a.width]
+                    .iter()
+                    .zip(&rb[..a.width])
+                    .map(|(&x, &y)| (x as f64 - y as f64).abs())
+            })
             .sum::<f64>()
             / (a.width * a.height) as f64
     }
@@ -519,10 +660,30 @@ mod tests {
         for codec in [Codec::Vp8, Codec::Vp9] {
             for (num, den) in [(60000i32, 1001i32), (120000, 1001), (144000, 1001), (60, 1)] {
                 let fps = num as f64 / den as f64;
-                let mut enc = VpxEncoder::new(&RustCaptureSettings { target_fps: fps, ..settings(codec) }, codec, false).expect("session");
-                assert_eq!((enc.cfg.g_timebase.num, enc.cfg.g_timebase.den), (den, num), "{codec:?}");
-                enc.reconfigure_rate(&RustCaptureSettings { target_fps: 30.0, ..settings(codec) }).expect("30 fps");
-                assert_eq!((enc.cfg.g_timebase.num, enc.cfg.g_timebase.den), (1, 30), "{codec:?}");
+                let mut enc = VpxEncoder::new(
+                    &RustCaptureSettings {
+                        target_fps: fps,
+                        ..settings(codec)
+                    },
+                    codec,
+                    false,
+                )
+                .expect("session");
+                assert_eq!(
+                    (enc.cfg.g_timebase.num, enc.cfg.g_timebase.den),
+                    (den, num),
+                    "{codec:?}"
+                );
+                enc.reconfigure_rate(&RustCaptureSettings {
+                    target_fps: 30.0,
+                    ..settings(codec)
+                })
+                .expect("30 fps");
+                assert_eq!(
+                    (enc.cfg.g_timebase.num, enc.cfg.g_timebase.den),
+                    (1, 30),
+                    "{codec:?}"
+                );
             }
         }
     }
@@ -534,30 +695,67 @@ mod tests {
             let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
             let mut frames = Vec::new();
             for t in 0..8u64 {
-                let out = enc.encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0).expect("encode");
-                assert_eq!(parse_video_type(out[1]).map(|(_, k)| k), Some(if t == 0 { FRAME_KEY } else { FRAME_DELTA }), "{codec:?} {t}");
-                assert_eq!(enc.last_reference(), if t == 0 { Reference::None } else { Reference::Frame(t as u16 - 1) }, "{codec:?} {t}");
+                let out = enc
+                    .encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0)
+                    .expect("encode");
+                assert_eq!(
+                    parse_video_type(out[1]).map(|(_, k)| k),
+                    Some(if t == 0 { FRAME_KEY } else { FRAME_DELTA }),
+                    "{codec:?} {t}"
+                );
+                assert_eq!(
+                    enc.last_reference(),
+                    if t == 0 {
+                        Reference::None
+                    } else {
+                        Reference::Frame(t as u16 - 1)
+                    },
+                    "{codec:?} {t}"
+                );
                 frames.push(out);
             }
             // Frame 5 is reported lost once 6 and 7 have gone out: VP9 predicts from 4 through
             // its slots, VP8 from its golden anchor, which still holds the key frame.
             assert!(enc.invalidate_reference(5));
-            let out = enc.encode_host(&frame(8), W * 4, false, 8, 25, false).expect("encode");
+            let out = enc
+                .encode_host(&frame(8), W * 4, false, 8, 25, false)
+                .expect("encode");
             let anchor = if codec == Codec::Vp9 { 4 } else { 0 };
             assert_eq!(enc.last_reference(), Reference::Frame(anchor), "{codec:?}");
-            assert_eq!(parse_video_type(out[1]).map(|(_, k)| k), Some(FRAME_DELTA), "{codec:?}");
+            assert_eq!(
+                parse_video_type(out[1]).map(|(_, k)| k),
+                Some(FRAME_DELTA),
+                "{codec:?}"
+            );
             frames.push(out);
-            frames.push(enc.encode_host(&frame(9), W * 4, false, 9, 25, false).expect("encode"));
+            frames.push(
+                enc.encode_host(&frame(9), W * 4, false, 9, 25, false)
+                    .expect("encode"),
+            );
             assert_eq!(enc.last_reference(), Reference::Frame(8), "{codec:?}");
-            let (mut whole, mut lossy) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
+            let (mut whole, mut lossy) = (
+                VideoDecoder::new(codec).unwrap(),
+                VideoDecoder::new(codec).unwrap(),
+            );
             for (i, f) in frames.iter().enumerate() {
-                assert!(whole.decode(&f[VIDEO_HEADER_LEN..]).expect("decode"), "{codec:?} frame {i}");
+                assert!(
+                    whole.decode(&f[VIDEO_HEADER_LEN..]).expect("decode"),
+                    "{codec:?} frame {i}"
+                );
                 if !(5..8).contains(&i) {
-                    assert!(lossy.decode(&f[VIDEO_HEADER_LEN..]).expect("decode without 5-7"), "{codec:?} frame {i}");
+                    assert!(
+                        lossy
+                            .decode(&f[VIDEO_HEADER_LEN..])
+                            .expect("decode without 5-7"),
+                        "{codec:?} frame {i}"
+                    );
                 }
             }
             let apart = luma_distance(&whole.frame().unwrap(), &lossy.frame().unwrap());
-            assert!(apart == 0.0, "{codec:?}: the decoder that lost frames 5-7 shows frame 9 {apart:.2} off the one that saw them");
+            assert!(
+                apart == 0.0,
+                "{codec:?}: the decoder that lost frames 5-7 shows frame 9 {apart:.2} off the one that saw them"
+            );
         }
     }
 
@@ -570,25 +768,51 @@ mod tests {
             let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
             let mut frames = Vec::new();
             for t in 0..30u64 {
-                frames.push(enc.encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0).expect("encode"));
+                frames.push(
+                    enc.encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0)
+                        .expect("encode"),
+                );
             }
             assert!(enc.invalidate_reference(20));
-            let out = enc.encode_host(&frame(30), W * 4, false, 30, 25, false).expect("encode");
-            assert_eq!(parse_video_type(out[1]).map(|(_, k)| k), Some(FRAME_DELTA), "{codec:?}");
+            let out = enc
+                .encode_host(&frame(30), W * 4, false, 30, 25, false)
+                .expect("encode");
+            assert_eq!(
+                parse_video_type(out[1]).map(|(_, k)| k),
+                Some(FRAME_DELTA),
+                "{codec:?}"
+            );
             let anchor = if codec == Codec::Vp9 { 16 } else { 12 };
             assert_eq!(enc.last_reference(), Reference::Frame(anchor), "{codec:?}");
             frames.push(out);
-            frames.push(enc.encode_host(&frame(31), W * 4, false, 31, 25, false).expect("encode"));
+            frames.push(
+                enc.encode_host(&frame(31), W * 4, false, 31, 25, false)
+                    .expect("encode"),
+            );
             assert_eq!(enc.last_reference(), Reference::Frame(30), "{codec:?}");
-            let (mut whole, mut lossy) = (VideoDecoder::new(codec).unwrap(), VideoDecoder::new(codec).unwrap());
+            let (mut whole, mut lossy) = (
+                VideoDecoder::new(codec).unwrap(),
+                VideoDecoder::new(codec).unwrap(),
+            );
             for (i, f) in frames.iter().enumerate() {
-                assert!(whole.decode(&f[VIDEO_HEADER_LEN..]).expect("decode"), "{codec:?} frame {i}");
+                assert!(
+                    whole.decode(&f[VIDEO_HEADER_LEN..]).expect("decode"),
+                    "{codec:?} frame {i}"
+                );
                 if !(20..30).contains(&i) {
-                    assert!(lossy.decode(&f[VIDEO_HEADER_LEN..]).expect("decode without 20-29"), "{codec:?} frame {i}");
+                    assert!(
+                        lossy
+                            .decode(&f[VIDEO_HEADER_LEN..])
+                            .expect("decode without 20-29"),
+                        "{codec:?} frame {i}"
+                    );
                 }
             }
             let apart = luma_distance(&whole.frame().unwrap(), &lossy.frame().unwrap());
-            assert!(apart == 0.0, "{codec:?}: the decoder that lost frames 20-29 shows frame 31 {apart:.2} off the one that saw them");
+            assert!(
+                apart == 0.0,
+                "{codec:?}: the decoder that lost frames 20-29 shows frame 31 {apart:.2} off the one that saw them"
+            );
         }
     }
 
@@ -599,13 +823,21 @@ mod tests {
             let s = settings(codec);
             let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
             for t in 0..40u64 {
-                enc.encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0).expect("encode");
+                enc.encode_host(&frame(t as usize), W * 4, false, t, 25, t == 0)
+                    .expect("encode");
             }
             assert!(enc.invalidate_reference(1));
-            let out = enc.encode_host(&frame(40), W * 4, false, 40, 25, false).expect("encode");
-            assert_eq!(parse_video_type(out[1]).map(|(_, k)| k), Some(FRAME_KEY), "{codec:?}");
+            let out = enc
+                .encode_host(&frame(40), W * 4, false, 40, 25, false)
+                .expect("encode");
+            assert_eq!(
+                parse_video_type(out[1]).map(|(_, k)| k),
+                Some(FRAME_KEY),
+                "{codec:?}"
+            );
             assert_eq!(enc.last_reference(), Reference::None);
-            enc.encode_host(&frame(41), W * 4, false, 41, 25, false).expect("encode");
+            enc.encode_host(&frame(41), W * 4, false, 41, 25, false)
+                .expect("encode");
             assert_eq!(enc.last_reference(), Reference::Frame(40), "{codec:?}");
         }
     }
@@ -617,16 +849,35 @@ mod tests {
             let mut s = settings(codec);
             s.video_crf = 40;
             let mut enc = VpxEncoder::new(&s, codec, false).expect("session");
-            let coarse = enc.encode_host(&frame(0), W * 4, false, 0, 40, true).unwrap();
-            let fine = enc.encode_host(&frame(1), W * 4, false, 1, 15, false).unwrap();
+            let coarse = enc
+                .encode_host(&frame(0), W * 4, false, 0, 40, true)
+                .unwrap();
+            let fine = enc
+                .encode_host(&frame(1), W * 4, false, 1, 15, false)
+                .unwrap();
             assert_eq!(enc.quality.current, codec.quantizer(15));
-            assert_eq!(parse_video_type(fine[1]).map(|(_, k)| k), Some(FRAME_DELTA), "{codec:?}");
-            let again = enc.encode_host(&frame(2), W * 4, false, 2, 15, false).unwrap();
-            assert!(again.len() + fine.len() > coarse.len() / 2, "{codec:?}: the finer quantizer spends more");
+            assert_eq!(
+                parse_video_type(fine[1]).map(|(_, k)| k),
+                Some(FRAME_DELTA),
+                "{codec:?}"
+            );
+            let again = enc
+                .encode_host(&frame(2), W * 4, false, 2, 15, false)
+                .unwrap();
+            assert!(
+                again.len() + fine.len() > coarse.len() / 2,
+                "{codec:?}: the finer quantizer spends more"
+            );
             s.target_fps = 15.0;
             enc.reconfigure_rate(&s).expect("rate");
-            let after = enc.encode_host(&frame(3), W * 4, false, 3, 15, false).unwrap();
-            assert_eq!(parse_video_type(after[1]).map(|(_, k)| k), Some(FRAME_DELTA), "{codec:?}");
+            let after = enc
+                .encode_host(&frame(3), W * 4, false, 3, 15, false)
+                .unwrap();
+            assert_eq!(
+                parse_video_type(after[1]).map(|(_, k)| k),
+                Some(FRAME_DELTA),
+                "{codec:?}"
+            );
             let mut dec = VideoDecoder::new(codec).unwrap();
             for f in [&coarse, &fine, &again, &after] {
                 assert!(dec.decode(&f[VIDEO_HEADER_LEN..]).unwrap(), "{codec:?}");

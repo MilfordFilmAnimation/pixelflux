@@ -35,12 +35,20 @@ pub struct ColorSignal {
 impl ColorSignal {
     /// BT.601 at full range, which is what a VideoCore firmware older than August 2024 converts
     /// RGB with, both by measurement against a decoded chart and by the driver author's account.
-    pub const BT601_FULL: Self =
-        Self { full_range: true, primaries: 6, transfer: 6, matrix: 6 };
+    pub const BT601_FULL: Self = Self {
+        full_range: true,
+        primaries: 6,
+        transfer: 6,
+        matrix: 6,
+    };
 
     /// BT.709 at limited range, the crate's own convention for 4:2:0.
-    pub const BT709_LIMITED: Self =
-        Self { full_range: false, primaries: 1, transfer: 1, matrix: 1 };
+    pub const BT709_LIMITED: Self = Self {
+        full_range: false,
+        primaries: 1,
+        transfer: 1,
+        matrix: 1,
+    };
 }
 
 struct Reader<'a> {
@@ -54,7 +62,10 @@ impl<'a> Reader<'a> {
     }
 
     fn bit(&mut self) -> Result<u32, String> {
-        let byte = self.bits.get(self.pos >> 3).ok_or("the SPS ends mid-field")?;
+        let byte = self
+            .bits
+            .get(self.pos >> 3)
+            .ok_or("the SPS ends mid-field")?;
         let value = (byte >> (7 - (self.pos & 7))) & 1;
         self.pos += 1;
         Ok(value as u32)
@@ -85,7 +96,11 @@ impl<'a> Reader<'a> {
 
     fn se(&mut self) -> Result<i32, String> {
         let value = self.ue()?;
-        Ok(if value.is_multiple_of(2) { -((value / 2) as i32) } else { value.div_ceil(2) as i32 })
+        Ok(if value.is_multiple_of(2) {
+            -((value / 2) as i32)
+        } else {
+            value.div_ceil(2) as i32
+        })
     }
 }
 
@@ -96,7 +111,10 @@ struct Writer {
 
 impl Writer {
     fn new() -> Self {
-        Self { bytes: Vec::new(), pos: 0 }
+        Self {
+            bytes: Vec::new(),
+            pos: 0,
+        }
     }
 
     fn bit(&mut self, value: u32) {
@@ -207,7 +225,10 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
     r.bits(8)?;
     r.bits(8)?;
     r.ue()?;
-    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+    if matches!(
+        profile,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
         let chroma = r.ue()?;
         if chroma == 3 {
             r.bit()?;
@@ -313,12 +334,18 @@ fn restriction(rbsp: &[u8], at: &Located) -> Result<Restriction, String> {
     let last = stop_bit(rbsp)?;
     if !at.vui_present {
         return if at.vui_flag + 1 == last {
-            Ok(Restriction { flag: at.vui_flag, declared: None })
+            Ok(Restriction {
+                flag: at.vui_flag,
+                declared: None,
+            })
         } else {
             Err("the SPS does not end after its VUI flag".into())
         };
     }
-    let mut r = Reader { bits: rbsp, pos: at.end };
+    let mut r = Reader {
+        bits: rbsp,
+        pos: at.end,
+    };
     if r.bit()? == 1 {
         r.ue()?;
         r.ue()?;
@@ -441,7 +468,10 @@ pub fn bound_reorder(nal: &[u8], in_order: bool) -> Result<Option<Vec<u8>>, Stri
         return Ok(None);
     }
     if !in_order && at.pic_order_cnt_type != 2 {
-        return Err(format!("picture order count type {} may reorder", at.pic_order_cnt_type));
+        return Err(format!(
+            "picture order count type {} may reorder",
+            at.pic_order_cnt_type
+        ));
     }
     let last = stop_bit(&rbsp)?;
     let mut w = Writer::new();
@@ -521,7 +551,12 @@ pub struct NoReorder {
 
 impl NoReorder {
     pub fn new(source: &'static str, in_order: bool) -> Self {
-        Self { source, in_order, last: None, logged: None }
+        Self {
+            source,
+            in_order,
+            last: None,
+            logged: None,
+        }
     }
 
     /// The set that replaces `sps`, or None where it goes out as it came.
@@ -535,14 +570,20 @@ impl NoReorder {
             Ok(bounded) => {
                 if bounded.is_some() && self.logged != Some(true) {
                     self.logged = Some(true);
-                    println!("[pixelflux] {} declares no bound on reordering; its sequence parameter sets are written a bound of zero.", self.source);
+                    println!(
+                        "[pixelflux] {} declares no bound on reordering; its sequence parameter sets are written a bound of zero.",
+                        self.source
+                    );
                 }
                 bounded
             }
             Err(e) => {
                 if self.logged != Some(false) {
                     self.logged = Some(false);
-                    eprintln!("[pixelflux] {}'s sequence parameter set was left as it came, without a reorder bound of zero: {e}", self.source);
+                    eprintln!(
+                        "[pixelflux] {}'s sequence parameter set was left as it came, without a reorder bound of zero: {e}",
+                        self.source
+                    );
                 }
                 None
             }
@@ -580,7 +621,10 @@ mod dpb {
     impl Bits<'_> {
         fn bits(&mut self, n: u32) -> u32 {
             (0..n).fold(0, |acc, _| {
-                let bit = self.rbsp.get(self.pos / 8).map_or(0, |b| (b >> (7 - self.pos % 8)) & 1);
+                let bit = self
+                    .rbsp
+                    .get(self.pos / 8)
+                    .map_or(0, |b| (b >> (7 - self.pos % 8)) & 1);
                 self.pos += 1;
                 (acc << 1) | bit as u32
             })
@@ -614,12 +658,18 @@ mod dpb {
             zeros = if b == 0 { zeros + 1 } else { 0 };
             rbsp.push(b);
         }
-        let mut r = Bits { rbsp: &rbsp, pos: 0 };
+        let mut r = Bits {
+            rbsp: &rbsp,
+            pos: 0,
+        };
         let profile = r.bits(8);
         r.bits(16);
         r.ue();
         let mut chroma = 1;
-        if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        if matches!(
+            profile,
+            100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+        ) {
             chroma = r.ue();
             if chroma == 3 {
                 r.bits(1);
@@ -691,7 +741,9 @@ pub fn h264_reorder(stream: &[u8]) -> Option<(u32, u32)> {
     let nal = crate::encoders::codec::annexb_nals(stream).find(|n| n[0] & 0x1f == 7)?;
     let rbsp = unescape(&nal[1..]);
     let bound = restriction(&rbsp, &locate(&rbsp).ok()?).ok()?;
-    bound.declared.map(|((reorder, ..), (buffering, ..))| (reorder, buffering))
+    bound
+        .declared
+        .map(|((reorder, ..), (buffering, ..))| (reorder, buffering))
 }
 
 /// The timing the first SPS of an Annex B H.264 stream declares, as `(num_units_in_tick,
@@ -704,7 +756,10 @@ pub fn h264_timing(stream: &[u8]) -> Option<(u32, u32)> {
     if !at.vui_present {
         return None;
     }
-    let mut r = Reader { bits: &rbsp, pos: at.end };
+    let mut r = Reader {
+        bits: &rbsp,
+        pos: at.end,
+    };
     if r.bit().ok()? == 1 {
         r.ue().ok()?;
         r.ue().ok()?;
@@ -738,8 +793,11 @@ pub(crate) mod fixtures {
     /// The restriction an SPS declares, or None where it declares none.
     pub fn reorder_of(nal: &[u8]) -> Option<(u32, u32)> {
         let rbsp = unescape(&nal[1..]);
-        let bound = restriction(&rbsp, &locate(&rbsp).expect("located")).expect("read to the stop bit");
-        bound.declared.map(|((reorder, ..), (buffering, ..))| (reorder, buffering))
+        let bound =
+            restriction(&rbsp, &locate(&rbsp).expect("located")).expect("read to the stop bit");
+        bound
+            .declared
+            .map(|((reorder, ..), (buffering, ..))| (reorder, buffering))
     }
 
     /// `nal` rebuilt with its bitstream restriction taken out, or its whole VUI.
@@ -763,7 +821,10 @@ pub(crate) mod fixtures {
         let refs = h264_max_num_ref_frames(stream).unwrap_or_else(|| panic!("{what}: no SPS"));
         match h264_reorder(stream) {
             Some((0, buffering)) => {
-                assert!(buffering >= refs, "{what}: a buffer of {buffering} below its {refs} references")
+                assert!(
+                    buffering >= refs,
+                    "{what}: a buffer of {buffering} below its {refs} references"
+                )
             }
             other => panic!("{what}: the SPS bounds reordering at {other:?}, not zero"),
         }
@@ -800,7 +861,11 @@ mod tests {
     fn what_is_written_reads_back() {
         for signal in [ColorSignal::BT601_FULL, ColorSignal::BT709_LIMITED] {
             let patched = write_color(PI4_SPS, signal).expect("the SPS takes a color");
-            assert_eq!(read_color(&patched), Some(signal), "what was written did not read back");
+            assert_eq!(
+                read_color(&patched),
+                Some(signal),
+                "what was written did not read back"
+            );
         }
     }
 
@@ -830,8 +895,16 @@ mod tests {
         let patched = write_color(PI4_SPS, ColorSignal::BT709_LIMITED).expect("patched");
         assert_eq!(read_color(&patched), Some(ColorSignal::BT709_LIMITED));
         let again = write_color(&patched, ColorSignal::BT601_FULL).expect("rewritten");
-        assert_eq!(read_color(&again), Some(ColorSignal::BT601_FULL), "a rewrite did not replace");
-        assert_eq!(again.len(), patched.len(), "replacing a color changed the length");
+        assert_eq!(
+            read_color(&again),
+            Some(ColorSignal::BT601_FULL),
+            "a rewrite did not replace"
+        );
+        assert_eq!(
+            again.len(),
+            patched.len(),
+            "replacing a color changed the length"
+        );
     }
 
     /// Emulation prevention is not decoration: a byte pair of zeros followed by a small byte is
@@ -867,13 +940,35 @@ mod tests {
     /// everything before it, the color and the timing included, is copied as it came.
     #[test]
     fn a_set_without_a_restriction_is_bounded_at_zero() {
-        assert_eq!(reorder_of(VCE_SPS), None, "the fixture declares no restriction");
-        let bounded = bound_reorder(VCE_SPS, true).expect("writable").expect("a change");
-        assert_eq!(reorder_of(&bounded), Some((0, 2)), "zero, in a buffer of the set's two references");
+        assert_eq!(
+            reorder_of(VCE_SPS),
+            None,
+            "the fixture declares no restriction"
+        );
+        let bounded = bound_reorder(VCE_SPS, true)
+            .expect("writable")
+            .expect("a change");
+        assert_eq!(
+            reorder_of(&bounded),
+            Some((0, 2)),
+            "zero, in a buffer of the set's two references"
+        );
         assert_eq!(read_color(&bounded), read_color(VCE_SPS), "the color moved");
-        let flag = restriction(&unescape(&VCE_SPS[1..]), &locate(&unescape(&VCE_SPS[1..])).unwrap()).unwrap().flag;
-        assert!(same_prefix(VCE_SPS, &bounded, flag), "a bit before the restriction changed");
-        assert_eq!(bound_reorder(&bounded, true), Ok(None), "a bounded set is left as it came");
+        let flag = restriction(
+            &unescape(&VCE_SPS[1..]),
+            &locate(&unescape(&VCE_SPS[1..])).unwrap(),
+        )
+        .unwrap()
+        .flag;
+        assert!(
+            same_prefix(VCE_SPS, &bounded, flag),
+            "a bit before the restriction changed"
+        );
+        assert_eq!(
+            bound_reorder(&bounded, true),
+            Ok(None),
+            "a bounded set is left as it came"
+        );
     }
 
     /// A stream whose session cannot vouch for its order is bounded only where the set itself
@@ -883,7 +978,9 @@ mod tests {
         assert!(bound_reorder(VCE_SPS, false).is_err(), "type 0 may reorder");
         let pi4 = without(PI4_SPS, false);
         assert_eq!(locate(&unescape(&pi4[1..])).unwrap().pic_order_cnt_type, 2);
-        let bounded = bound_reorder(&pi4, false).expect("type 2 cannot reorder").expect("a change");
+        let bounded = bound_reorder(&pi4, false)
+            .expect("type 2 cannot reorder")
+            .expect("a change");
         assert_eq!(reorder_of(&bounded), Some((0, 1)));
     }
 
@@ -893,7 +990,11 @@ mod tests {
         assert_eq!(reorder_of(PI4_SPS), Some((0, 1)));
         assert_eq!(bound_reorder(PI4_SPS, true), Ok(None));
         let colored = write_color(PI4_SPS, ColorSignal::BT601_FULL).expect("colored");
-        assert_eq!(reorder_of(&colored), Some((0, 1)), "the color write lost the restriction");
+        assert_eq!(
+            reorder_of(&colored),
+            Some((0, 1)),
+            "the color write lost the restriction"
+        );
         assert_eq!(bound_reorder(&colored, false), Ok(None));
     }
 
@@ -903,10 +1004,20 @@ mod tests {
     fn hrd_parameters_are_read_through_and_kept() {
         let bare = without(PI4_SPS, false);
         assert_eq!(reorder_of(&bare), None);
-        let bounded = bound_reorder(&bare, true).expect("writable").expect("a change");
+        let bounded = bound_reorder(&bare, true)
+            .expect("writable")
+            .expect("a change");
         assert_eq!(reorder_of(&bounded), Some((0, 1)));
-        let flag = restriction(&unescape(&bare[1..]), &locate(&unescape(&bare[1..])).unwrap()).unwrap().flag;
-        assert!(same_prefix(&bare, &bounded, flag), "the HRD parameters changed");
+        let flag = restriction(
+            &unescape(&bare[1..]),
+            &locate(&unescape(&bare[1..])).unwrap(),
+        )
+        .unwrap()
+        .flag;
+        assert!(
+            same_prefix(&bare, &bounded, flag),
+            "the HRD parameters changed"
+        );
     }
 
     /// A set without a VUI gets one carrying the restriction alone: no color is claimed.
@@ -914,11 +1025,17 @@ mod tests {
     fn a_set_without_a_vui_takes_one_with_the_restriction_alone() {
         let bare = without(VCE_SPS, true);
         assert!(!locate(&unescape(&bare[1..])).unwrap().vui_present);
-        let bounded = bound_reorder(&bare, true).expect("writable").expect("a change");
+        let bounded = bound_reorder(&bare, true)
+            .expect("writable")
+            .expect("a change");
         assert_eq!(reorder_of(&bounded), Some((0, 2)));
         assert_eq!(read_color(&bounded), None, "a color nobody declared");
         let colored = write_color(&bounded, ColorSignal::BT709_LIMITED).expect("colored after");
-        assert_eq!(reorder_of(&colored), Some((0, 2)), "a color written later keeps the bound");
+        assert_eq!(
+            reorder_of(&colored),
+            Some((0, 2)),
+            "a color written later keeps the bound"
+        );
     }
 
     /// A set declaring a depth above zero is rewritten to zero, and a buffer below the
@@ -927,12 +1044,24 @@ mod tests {
     fn a_declared_depth_is_rewritten() {
         let deep = with_depth(PI4_SPS, 3, 3);
         assert_eq!(reorder_of(&deep), Some((3, 3)));
-        let bounded = bound_reorder(&deep, true).expect("writable").expect("a change");
-        assert_eq!(reorder_of(&bounded), Some((0, 3)), "the declared buffer is kept");
+        let bounded = bound_reorder(&deep, true)
+            .expect("writable")
+            .expect("a change");
+        assert_eq!(
+            reorder_of(&bounded),
+            Some((0, 3)),
+            "the declared buffer is kept"
+        );
         let short = with_depth(&bound_reorder(VCE_SPS, true).unwrap().unwrap(), 0, 1);
         assert_eq!(reorder_of(&short), Some((0, 1)));
-        let raised = bound_reorder(&short, true).expect("writable").expect("a change");
-        assert_eq!(reorder_of(&raised), Some((0, 2)), "a buffer below the two references");
+        let raised = bound_reorder(&short, true)
+            .expect("writable")
+            .expect("a change");
+        assert_eq!(
+            reorder_of(&raised),
+            Some((0, 2)),
+            "a buffer below the two references"
+        );
     }
 
     /// Anything the reader cannot account for bit by bit leaves the set as it came.
@@ -946,13 +1075,22 @@ mod tests {
         w.trailing_bits();
         let mut trailing = vec![VCE_SPS[0]];
         trailing.extend_from_slice(&escape(&w.bytes));
-        assert!(bound_reorder(&trailing, true).is_err(), "a bit after the VUI went unnoticed");
+        assert!(
+            bound_reorder(&trailing, true).is_err(),
+            "a bit after the VUI went unnoticed"
+        );
         let mut scaled = unescape(&PI4_SPS[1..]);
         scaled[3] |= 0x01;
         let mut scaled_nal = vec![PI4_SPS[0]];
         scaled_nal.extend_from_slice(&escape(&scaled));
-        assert!(bound_reorder(&scaled_nal, true).is_err(), "scaling lists are refused");
-        assert!(bound_reorder(&PI4_SPS[..10], true).is_err(), "a truncated set");
+        assert!(
+            bound_reorder(&scaled_nal, true).is_err(),
+            "scaling lists are refused"
+        );
+        assert!(
+            bound_reorder(&PI4_SPS[..10], true).is_err(),
+            "a truncated set"
+        );
     }
 
     /// The sets of a real stream, stripped of their bound three ways and bounded again,
@@ -979,14 +1117,17 @@ mod tests {
                         [v, v.wrapping_mul(3), v.wrapping_add(t as u8), 255]
                     })
                     .collect();
-                enc.encode_host_argb(&pixels, w * 4, t as u64, t == 0, false).expect("encode")
+                enc.encode_host_argb(&pixels, w * 4, t as u64, t == 0, false)
+                    .expect("encode")
             })
             .collect();
         let sets = sequence_parameter_sets(&frames[0]);
         assert_eq!(sets.len(), 1, "the key frame carries one set");
         let (start, end) = sets[0];
         let original = &frames[0][start..end];
-        let refs = locate(&unescape(&original[1..])).unwrap().max_num_ref_frames;
+        let refs = locate(&unescape(&original[1..]))
+            .unwrap()
+            .max_num_ref_frames;
         let decode = |stream: &[Vec<u8>]| -> Vec<Vec<u8>> {
             let mut dec = VideoDecoder::new(crate::encoders::codec::Codec::H264).expect("decoder");
             stream
@@ -994,18 +1135,34 @@ mod tests {
                 .map(|f| {
                     assert!(dec.decode(f).expect("decodes"), "no picture");
                     let p = dec.frame().expect("frame");
-                    let rows = |plane: &[u8], stride: usize, width: usize, height: usize| -> Vec<u8> {
-                        (0..height).flat_map(|y| plane[y * stride..y * stride + width].to_vec()).collect()
-                    };
+                    let rows =
+                        |plane: &[u8], stride: usize, width: usize, height: usize| -> Vec<u8> {
+                            (0..height)
+                                .flat_map(|y| plane[y * stride..y * stride + width].to_vec())
+                                .collect()
+                        };
                     let mut out = rows(p.y, p.y_stride, p.width, p.height);
-                    out.extend(rows(p.u, p.uv_stride, p.width.div_ceil(2), p.height.div_ceil(2)));
-                    out.extend(rows(p.v, p.uv_stride, p.width.div_ceil(2), p.height.div_ceil(2)));
+                    out.extend(rows(
+                        p.u,
+                        p.uv_stride,
+                        p.width.div_ceil(2),
+                        p.height.div_ceil(2),
+                    ));
+                    out.extend(rows(
+                        p.v,
+                        p.uv_stride,
+                        p.width.div_ceil(2),
+                        p.height.div_ceil(2),
+                    ));
                     out
                 })
                 .collect()
         };
         let expected = decode(&frames);
-        let mut variants = vec![(without(original, true), refs), (without(original, false), refs)];
+        let mut variants = vec![
+            (without(original, true), refs),
+            (without(original, false), refs),
+        ];
         if reorder_of(original).is_some() {
             variants.push((with_depth(original, 2, refs.max(2)), refs.max(2)));
         }
@@ -1015,13 +1172,31 @@ mod tests {
             let mut holder = NoReorder::new("The test encoder", true);
             let bounded = holder.apply(&stripped[0]).expect("a set to bound");
             assert_eq!(h264_reorder(&bounded), Some((0, buffering)));
-            assert_eq!(holder.apply(&stripped[0]).as_ref(), Some(&bounded), "the second key frame differs");
-            assert_eq!(holder.apply(&frames[1]), None, "a unit without a set was touched");
-            assert!(bounded.starts_with(&frames[0][..start]), "what precedes the set changed");
-            assert!(bounded.ends_with(&frames[0][end..]), "the slices after the set changed");
+            assert_eq!(
+                holder.apply(&stripped[0]).as_ref(),
+                Some(&bounded),
+                "the second key frame differs"
+            );
+            assert_eq!(
+                holder.apply(&frames[1]),
+                None,
+                "a unit without a set was touched"
+            );
+            assert!(
+                bounded.starts_with(&frames[0][..start]),
+                "what precedes the set changed"
+            );
+            assert!(
+                bounded.ends_with(&frames[0][end..]),
+                "the slices after the set changed"
+            );
             let mut stream = stripped;
             stream[0] = bounded;
-            assert_eq!(decode(&stream), expected, "the bounded stream decodes to other pictures");
+            assert_eq!(
+                decode(&stream),
+                expected,
+                "the bounded stream decodes to other pictures"
+            );
         }
     }
 }

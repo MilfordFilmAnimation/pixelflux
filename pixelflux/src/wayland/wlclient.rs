@@ -55,7 +55,11 @@ pub(crate) use impl_sync_callback;
 /// Block until `fd` is readable or `timeout` passes (false = timed out).
 pub(crate) fn wait_readable(fd: RawFd, timeout: Duration) -> Result<bool, String> {
     loop {
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let n = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis().max(1) as libc::c_int) };
         if n < 0 {
             let err = std::io::Error::last_os_error();
@@ -78,10 +82,20 @@ pub(crate) fn wait_readable2(
 ) -> Result<(bool, bool), String> {
     loop {
         let mut pfds = [
-            libc::pollfd { fd: a, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: b, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: a,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: b,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        let ms = timeout.map(|t| t.as_millis().max(1) as libc::c_int).unwrap_or(-1);
+        let ms = timeout
+            .map(|t| t.as_millis().max(1) as libc::c_int)
+            .unwrap_or(-1);
         let n = unsafe { libc::poll(pfds.as_mut_ptr(), 2, ms) };
         if n < 0 {
             let err = std::io::Error::last_os_error();
@@ -149,8 +163,7 @@ where
 /// Anonymous CLOEXEC memfd holding `data` (keymap uploads, shm-style payloads).
 pub(crate) fn memfd_with(data: &[u8]) -> Result<OwnedFd, String> {
     let name = b"pixelflux-wl\0";
-    let fd =
-        unsafe { libc::memfd_create(name.as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC) };
+    let fd = unsafe { libc::memfd_create(name.as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
     }
@@ -218,7 +231,11 @@ pub(crate) fn read_fd_to_end_capped(
             return Err("clipboard source stalled".into());
         }
         let n = unsafe {
-            libc::read(fd.as_raw_fd(), chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            libc::read(
+                fd.as_raw_fd(),
+                chunk.as_mut_ptr() as *mut libc::c_void,
+                chunk.len(),
+            )
         };
         if n < 0 {
             let err = std::io::Error::last_os_error();
@@ -249,10 +266,16 @@ pub(crate) fn write_fd_all(fd: &OwnedFd, data: &[u8], idle: Duration) -> Result<
     let raw = fd.as_raw_fd();
     let old_flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
     if old_flags < 0 {
-        return Err(format!("fcntl F_GETFL: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "fcntl F_GETFL: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     if unsafe { libc::fcntl(raw, libc::F_SETFL, old_flags | libc::O_NONBLOCK) } < 0 {
-        return Err(format!("fcntl F_SETFL: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "fcntl F_SETFL: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let result = write_fd_all_nb(raw, data, idle);
     unsafe { libc::fcntl(raw, libc::F_SETFL, old_flags) };
@@ -262,7 +285,11 @@ pub(crate) fn write_fd_all(fd: &OwnedFd, data: &[u8], idle: Duration) -> Result<
 fn write_fd_all_nb(raw: i32, data: &[u8], idle: Duration) -> Result<(), String> {
     let mut written = 0;
     while written < data.len() {
-        let mut pfd = libc::pollfd { fd: raw, events: libc::POLLOUT, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: raw,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
         let n = unsafe { libc::poll(&mut pfd, 1, idle.as_millis().max(1) as libc::c_int) };
         if n < 0 {
             let err = std::io::Error::last_os_error();

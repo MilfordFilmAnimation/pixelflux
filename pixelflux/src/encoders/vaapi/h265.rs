@@ -13,7 +13,7 @@
 
 use va_sys::*;
 
-use super::super::bits::{nal_unit, BitWriter};
+use super::super::bits::{BitWriter, nal_unit};
 use super::super::codec::{h265_level, h265_tier};
 use super::{Buffers, Frame, Negotiated};
 
@@ -91,7 +91,8 @@ impl Arm {
                 tools.ctu_size = 1 << (b.bits.log2_max_coding_tree_block_size_minus3() + 3);
                 tools.min_cb_size = 1 << (b.bits.log2_min_luma_coding_block_size_minus3() + 3);
                 tools.log2_min_tb_minus2 = b.bits.log2_min_luma_transform_block_size_minus2();
-                tools.log2_diff_max_min_tb = b.bits.log2_max_luma_transform_block_size_minus2() - b.bits.log2_min_luma_transform_block_size_minus2();
+                tools.log2_diff_max_min_tb = b.bits.log2_max_luma_transform_block_size_minus2()
+                    - b.bits.log2_min_luma_transform_block_size_minus2();
                 tools.max_th_depth_inter = b.bits.max_max_transform_hierarchy_depth_inter();
                 tools.max_th_depth_intra = b.bits.max_max_transform_hierarchy_depth_intra();
             }
@@ -167,15 +168,32 @@ impl Arm {
     /// The stream's sequence: level and tier from the ladder, the level never below the one
     /// the decoded picture buffer was sized for, the picture in coding tree blocks, and the
     /// VPS, SPS, and PPS the key frames carry.
-    pub(super) fn configure(&mut self, n: &Negotiated, surface_width: u32, surface_height: u32, slices: (u32, u32)) {
+    pub(super) fn configure(
+        &mut self,
+        n: &Negotiated,
+        surface_width: u32,
+        surface_height: u32,
+        slices: (u32, u32),
+    ) {
         let t = self.tools;
         self.ctb_width = surface_width.div_ceil(t.ctu_size);
         self.ctb_height = surface_height.div_ceil(t.ctu_size);
         self.slices = slices;
         self.dpb = n.dpb;
-        self.level_idc = h265_level(n.width, n.height, n.fps.ceil(), n.bits_per_second as u64, true).max(n.dpb_level);
+        self.level_idc = h265_level(
+            n.width,
+            n.height,
+            n.fps.ceil(),
+            n.bits_per_second as u64,
+            true,
+        )
+        .max(n.dpb_level);
         self.tier = h265_tier(self.level_idc);
-        self.pic_init_qp = if n.rc_mode == VA_RC_CQP { PIC_INIT_QP_CQP } else { PIC_INIT_QP_CBR };
+        self.pic_init_qp = if n.rc_mode == VA_RC_CQP {
+            PIC_INIT_QP_CQP
+        } else {
+            PIC_INIT_QP_CBR
+        };
         self.cu_qp_delta = n.rc_mode != VA_RC_CQP && t.cu_qp_delta;
         let log2_min_cb = t.min_cb_size.trailing_zeros();
         let log2_diff_cb = t.ctu_size.trailing_zeros() - log2_min_cb;
@@ -363,7 +381,12 @@ impl Arm {
     /// The picture: its order count since the key frame, the frames the client still has,
     /// newest first, as the driver's reference list and the slice header's reference picture
     /// set, and every slice.
-    pub(super) fn picture(&mut self, n: &Negotiated, frame: &Frame, out: &mut Buffers) -> Result<(), String> {
+    pub(super) fn picture(
+        &mut self,
+        n: &Negotiated,
+        frame: &Frame,
+        out: &mut Buffers,
+    ) -> Result<(), String> {
         let t = self.tools;
         let poc_of = |pts: u64| (pts - frame.key_pts) as i32;
         let poc = poc_of(frame.pts);
@@ -371,19 +394,38 @@ impl Arm {
         if !frame.key && reference_pts.is_none() {
             return Err("a predicted HEVC picture without a reference".into());
         }
-        let mut kept: Vec<(u64, VASurfaceID)> = frame.held.iter().filter(|h| !frame.key && !h.2 && h.0 >= frame.key_pts).map(|h| (h.0, h.1)).collect();
+        let mut kept: Vec<(u64, VASurfaceID)> = frame
+            .held
+            .iter()
+            .filter(|h| !frame.key && !h.2 && h.0 >= frame.key_pts)
+            .map(|h| (h.0, h.1))
+            .collect();
         kept.sort_by_key(|k| std::cmp::Reverse(k.0));
         kept.truncate(15);
-        let invalid = VAPictureHEVC { picture_id: VA_INVALID_ID, pic_order_cnt: 0, flags: VA_PICTURE_HEVC_INVALID, va_reserved: [0; 4] };
+        let invalid = VAPictureHEVC {
+            picture_id: VA_INVALID_ID,
+            pic_order_cnt: 0,
+            flags: VA_PICTURE_HEVC_INVALID,
+            va_reserved: [0; 4],
+        };
         let picture = |pts: u64, surface: VASurfaceID| VAPictureHEVC {
             picture_id: surface,
             pic_order_cnt: poc_of(pts),
-            flags: if Some(pts) == reference_pts { VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE } else { 0 },
+            flags: if Some(pts) == reference_pts {
+                VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE
+            } else {
+                0
+            },
             va_reserved: [0; 4],
         };
 
         let mut pic: VAEncPictureParameterBufferHEVC = unsafe { std::mem::zeroed() };
-        pic.decoded_curr_pic = VAPictureHEVC { picture_id: frame.recon, pic_order_cnt: poc, flags: 0, va_reserved: [0; 4] };
+        pic.decoded_curr_pic = VAPictureHEVC {
+            picture_id: frame.recon,
+            pic_order_cnt: poc,
+            flags: 0,
+            va_reserved: [0; 4],
+        };
         pic.reference_frames = [invalid; 15];
         for (i, &(pts, surface)) in kept.iter().enumerate() {
             pic.reference_frames[i] = picture(pts, surface);
@@ -391,7 +433,11 @@ impl Arm {
         pic.coded_buf = frame.coded;
         pic.collocated_ref_pic_index = if t.temporal_mvp { 0 } else { 0xff };
         pic.pic_init_qp = self.pic_init_qp as u8;
-        pic.diff_cu_qp_delta_depth = if self.cu_qp_delta { (t.ctu_size.trailing_zeros() - t.min_cb_size.trailing_zeros()) as u8 } else { 0 };
+        pic.diff_cu_qp_delta_depth = if self.cu_qp_delta {
+            (t.ctu_size.trailing_zeros() - t.min_cb_size.trailing_zeros()) as u8
+        } else {
+            0
+        };
         pic.nal_unit_type = if frame.key { 19 } else { 1 };
         unsafe {
             let f = &mut pic.pic_fields.bits;
@@ -404,14 +450,22 @@ impl Arm {
         }
         out.push(VAEncPictureParameterBufferType, &pic);
 
-        let slice_qp = if n.rc_mode == VA_RC_CQP { frame.qp.clamp(1, 51) } else { self.pic_init_qp };
+        let slice_qp = if n.rc_mode == VA_RC_CQP {
+            frame.qp.clamp(1, 51)
+        } else {
+            self.pic_init_qp
+        };
         let slice_qp_delta = slice_qp as i32 - self.pic_init_qp as i32;
         let ctbs = self.ctb_width * self.ctb_height;
         let address_bits = 32 - (ctbs - 1).leading_zeros();
         let (slice_count, slice_rows) = self.slices;
         for i in 0..slice_count {
             let first_row = i * slice_rows;
-            let rows = if i + 1 == slice_count { self.ctb_height - first_row } else { slice_rows };
+            let rows = if i + 1 == slice_count {
+                self.ctb_height - first_row
+            } else {
+                slice_rows
+            };
             let address = first_row * self.ctb_width;
             let count = rows * self.ctb_width;
             let last = i + 1 == slice_count;
@@ -429,7 +483,10 @@ impl Arm {
                 }
                 w.ue(slice_type);
                 if !frame.key {
-                    w.u(4 + LOG2_MAX_POC_LSB_MINUS4, (poc & ((1 << (4 + LOG2_MAX_POC_LSB_MINUS4)) - 1)) as u64);
+                    w.u(
+                        4 + LOG2_MAX_POC_LSB_MINUS4,
+                        (poc & ((1 << (4 + LOG2_MAX_POC_LSB_MINUS4)) - 1)) as u64,
+                    );
                     w.flag(false);
                     w.ue(kept.len() as u32);
                     w.ue(0);

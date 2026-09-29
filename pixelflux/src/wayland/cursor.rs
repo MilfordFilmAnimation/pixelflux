@@ -16,8 +16,8 @@ use std::io::Cursor as IoCursor;
 use std::io::Read;
 use std::time::Duration;
 use xcursor::{
-    parser::{parse_xcursor, Image},
     CursorTheme,
+    parser::{Image, parse_xcursor},
 };
 
 /// One unit of cursor-callback work handed from the calloop thread to the `wl-cursor`
@@ -33,7 +33,9 @@ pub enum CursorJob {
     /// Cap the longest delivered cursor edge in pixels; larger sprites are downscaled with
     /// the hotspot. `<= 0` delivers them uncapped.
     SetSizeCap(i32),
-    Named { name: &'static str },
+    Named {
+        name: &'static str,
+    },
     Hide,
     /// wl_shm cursor sprite: raw pool bytes plus the sub-image descriptor.
     Shm {
@@ -63,83 +65,82 @@ pub enum CursorJob {
 /// (like the compositor thread itself); `PY_SHUTDOWN` gates every Python call.
 pub fn spawn_cursor_worker(cursor_size: i32, size_cap: i32) -> std::sync::mpsc::Sender<CursorJob> {
     let (tx, rx) = std::sync::mpsc::channel::<CursorJob>();
-    let _ = std::thread::Builder::new().name("wl-cursor".into()).spawn(move || {
-        let mut helper = Cursor::load(cursor_size);
-        let mut cap = size_cap;
-        let mut cache: HashMap<(u64, i32), CappedSprite> = HashMap::new();
-        let mut callback: Option<Py<PyAny>> = None;
-        while let Ok(job) = rx.recv() {
-            let (msg_type, data, hot_x, hot_y): (&str, Vec<u8>, i32, i32) = match job {
-                CursorJob::SetCallback(cb) => {
-                    // Attached for the swap: dropping the old callback without the
-                    // GIL defers its decref to this thread's next attach, which a
-                    // withdrawal means may never come.
-                    Python::attach(|_| callback = cb);
-                    continue;
-                }
-                CursorJob::SetSize(size) => {
-                    helper = Cursor::load(size);
-                    continue;
-                }
-                CursorJob::SetSizeCap(c) => {
-                    cap = c;
-                    continue;
-                }
-                CursorJob::Named { name } => match helper.get_sprite(name) {
-                    Some((img, x, y)) => match cap_and_encode(img, cap) {
-                        Some(sprite) => {
-                            let (sx, sy) = scaled_hotspot(&sprite, x as i32, y as i32);
-                            ("png", sprite.png, sx, sy)
-                        }
+    let _ = std::thread::Builder::new()
+        .name("wl-cursor".into())
+        .spawn(move || {
+            let mut helper = Cursor::load(cursor_size);
+            let mut cap = size_cap;
+            let mut cache: HashMap<(u64, i32), CappedSprite> = HashMap::new();
+            let mut callback: Option<Py<PyAny>> = None;
+            while let Ok(job) = rx.recv() {
+                let (msg_type, data, hot_x, hot_y): (&str, Vec<u8>, i32, i32) = match job {
+                    CursorJob::SetCallback(cb) => {
+                        // Attached for the swap: dropping the old callback without the
+                        // GIL defers its decref to this thread's next attach, which a
+                        // withdrawal means may never come.
+                        Python::attach(|_| callback = cb);
+                        continue;
+                    }
+                    CursorJob::SetSize(size) => {
+                        helper = Cursor::load(size);
+                        continue;
+                    }
+                    CursorJob::SetSizeCap(c) => {
+                        cap = c;
+                        continue;
+                    }
+                    CursorJob::Named { name } => match helper.get_sprite(name) {
+                        Some((img, x, y)) => match cap_and_encode(img, cap) {
+                            Some(sprite) => {
+                                let (sx, sy) = scaled_hotspot(&sprite, x as i32, y as i32);
+                                ("png", sprite.png, sx, sy)
+                            }
+                            None => ("error", Vec::new(), 0, 0),
+                        },
                         None => ("error", Vec::new(), 0, 0),
                     },
-                    None => ("error", Vec::new(), 0, 0),
-                },
-                CursorJob::Hide => ("hide", Vec::new(), 0, 0),
-                CursorJob::Shm {
-                    hash,
-                    width,
-                    height,
-                    stride,
-                    offset,
-                    opaque,
-                    bytes,
-                    hot_x,
-                    hot_y,
-                } => capped_job(
-                    &mut cache,
-                    hash,
-                    cap,
-                    hot_x,
-                    hot_y,
-                    || decode_shm_cursor(width, height, stride, offset, opaque, &bytes),
-                ),
-                CursorJob::Gles { hash, width, height, bytes, hot_x, hot_y } => capped_job(
-                    &mut cache,
-                    hash,
-                    cap,
-                    hot_x,
-                    hot_y,
-                    || decode_gles_cursor(width, height, &bytes),
-                ),
-            };
-            // A sprite whose pixels could not be read yields empty data; suppressing it
-            // preserves the consumer's last cursor instead of blanking it (only an
-            // intentional hide passes with no payload).
-            if data.is_empty() && msg_type != "hide" {
-                continue;
+                    CursorJob::Hide => ("hide", Vec::new(), 0, 0),
+                    CursorJob::Shm {
+                        hash,
+                        width,
+                        height,
+                        stride,
+                        offset,
+                        opaque,
+                        bytes,
+                        hot_x,
+                        hot_y,
+                    } => capped_job(&mut cache, hash, cap, hot_x, hot_y, || {
+                        decode_shm_cursor(width, height, stride, offset, opaque, &bytes)
+                    }),
+                    CursorJob::Gles {
+                        hash,
+                        width,
+                        height,
+                        bytes,
+                        hot_x,
+                        hot_y,
+                    } => capped_job(&mut cache, hash, cap, hot_x, hot_y, || {
+                        decode_gles_cursor(width, height, &bytes)
+                    }),
+                };
+                // A sprite whose pixels could not be read yields empty data; suppressing it
+                // preserves the consumer's last cursor instead of blanking it (only an
+                // intentional hide passes with no payload).
+                if data.is_empty() && msg_type != "hide" {
+                    continue;
+                }
+                if crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                if let Some(ref cb) = callback {
+                    Python::attach(|py| {
+                        let py_bytes = PyBytes::new(py, &data);
+                        let _ = cb.call1(py, (msg_type, py_bytes, hot_x, hot_y));
+                    });
+                }
             }
-            if crate::PY_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-                continue;
-            }
-            if let Some(ref cb) = callback {
-                Python::attach(|py| {
-                    let py_bytes = PyBytes::new(py, &data);
-                    let _ = cb.call1(py, (msg_type, py_bytes, hot_x, hot_y));
-                });
-            }
-        }
-    });
+        });
     tx
 }
 
@@ -179,7 +180,12 @@ fn cap_and_encode(mut img: RgbaImage, cap: i32) -> Option<CappedSprite> {
     let mut png = Vec::new();
     img.write_to(&mut IoCursor::new(&mut png), image::ImageFormat::Png)
         .ok()?;
-    Some(CappedSprite { png, scale, width: img.width(), height: img.height() })
+    Some(CappedSprite {
+        png,
+        scale,
+        width: img.width(),
+        height: img.height(),
+    })
 }
 
 /// Scale a source hotspot onto a delivered sprite. Consumers treat the hotspot as an offset
@@ -205,10 +211,12 @@ fn capped_job(
 ) -> (&'static str, Vec<u8>, i32, i32) {
     use std::collections::hash_map::Entry;
     let key = (hash, cap);
-    if cache.len() >= SPRITE_CACHE_MAX && !cache.contains_key(&key)
-        && let Some(&evict) = cache.keys().next() {
-            cache.remove(&evict);
-        }
+    if cache.len() >= SPRITE_CACHE_MAX
+        && !cache.contains_key(&key)
+        && let Some(&evict) = cache.keys().next()
+    {
+        cache.remove(&evict);
+    }
     let sprite = match cache.entry(key) {
         Entry::Occupied(e) => e.into_mut(),
         // An unreadable sprite yields an empty payload, which the worker suppresses so the
@@ -239,7 +247,12 @@ fn decode_shm_cursor(
     opaque: bool,
     raw_bytes: &[u8],
 ) -> Option<RgbaImage> {
-    if width <= 0 || height <= 0 || width > MAX_SPRITE_SIDE || height > MAX_SPRITE_SIDE || raw_bytes.is_empty() {
+    if width <= 0
+        || height <= 0
+        || width > MAX_SPRITE_SIDE
+        || height > MAX_SPRITE_SIDE
+        || raw_bytes.is_empty()
+    {
         return None;
     }
     let mut img_buf = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(width as u32, height as u32);
@@ -255,12 +268,20 @@ fn decode_shm_cursor(
                 Some(o) => o,
                 None => continue,
             };
-            if offset.checked_add(4).is_some_and(|end| end <= raw_bytes.len()) {
+            if offset
+                .checked_add(4)
+                .is_some_and(|end| end <= raw_bytes.len())
+            {
                 let alpha = if opaque { 255 } else { raw_bytes[offset + 3] };
                 img_buf.put_pixel(
                     x,
                     y,
-                    Rgba([raw_bytes[offset + 2], raw_bytes[offset + 1], raw_bytes[offset], alpha]),
+                    Rgba([
+                        raw_bytes[offset + 2],
+                        raw_bytes[offset + 1],
+                        raw_bytes[offset],
+                        alpha,
+                    ]),
                 );
             }
         }
@@ -271,14 +292,16 @@ fn decode_shm_cursor(
 /// Read a dmabuf sprite's RGBA readback (stride recovered from the mapping length) into a
 /// premultiplied RGBA image.
 fn decode_gles_cursor(width: i32, height: i32, raw_bytes: &[u8]) -> Option<RgbaImage> {
-    if width <= 0 || height <= 0 || width > MAX_SPRITE_SIDE || height > MAX_SPRITE_SIDE || raw_bytes.is_empty() {
+    if width <= 0
+        || height <= 0
+        || width > MAX_SPRITE_SIDE
+        || height > MAX_SPRITE_SIDE
+        || raw_bytes.is_empty()
+    {
         return None;
     }
-    let stride = super::frontend::rgba_readback_stride(
-        raw_bytes.len(),
-        height as usize,
-        width as usize,
-    );
+    let stride =
+        super::frontend::rgba_readback_stride(raw_bytes.len(), height as usize, width as usize);
     let mut img_buf = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(width as u32, height as u32);
     for y in 0..(height as u32) {
         for x in 0..(width as u32) {
@@ -319,7 +342,11 @@ impl Cursor {
     /// loaded, a 16×16 solid-red placeholder stands in so the caller always has a valid image.
     pub fn load(size_override: i32) -> Cursor {
         let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
-        let size: u32 = if size_override > 0 { size_override as u32 } else { 24 };
+        let size: u32 = if size_override > 0 {
+            size_override as u32
+        } else {
+            24
+        };
 
         let theme = CursorTheme::load(&name);
         let icons = load_icon(&theme, "default").unwrap_or_else(|_| {
@@ -383,9 +410,9 @@ fn nearest_images(size: u32, images: &[Image]) -> impl Iterator<Item = &Image> {
         .iter()
         .min_by_key(|image| (size as i32 - image.size as i32).abs())
         .unwrap();
-    images
-        .iter()
-        .filter(move |image| image.width == nearest_image.width && image.height == nearest_image.height)
+    images.iter().filter(move |image| {
+        image.width == nearest_image.width && image.height == nearest_image.height
+    })
 }
 
 /// Pick which animation frame to show for the elapsed time, so animated cursors (a spinner,

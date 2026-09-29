@@ -95,7 +95,9 @@ pub struct FramePace {
 impl FramePace {
     /// Whether a capture rendering every `period` is due a frame at `now`, given what asks.
     pub fn due(&self, trigger: TickTrigger, period: Duration, now: Instant) -> bool {
-        let Some(last) = self.last_tick else { return true };
+        let Some(last) = self.last_tick else {
+            return true;
+        };
         let elapsed = now.saturating_duration_since(last);
         if !trigger.pulls_forward() {
             return elapsed >= self.timer_wait(period);
@@ -108,7 +110,8 @@ impl FramePace {
     /// Whether input spaced `interval` apart paces itself at the cadence of `period`.
     pub fn input_paced(interval: Option<Duration>, period: Duration) -> bool {
         interval.is_some_and(|i| {
-            i >= period.mul_f64(PACED_INPUT_MIN_FRACTION) && i <= period.mul_f64(PACED_INPUT_MAX_FRACTION)
+            i >= period.mul_f64(PACED_INPUT_MIN_FRACTION)
+                && i <= period.mul_f64(PACED_INPUT_MAX_FRACTION)
         })
     }
 
@@ -116,7 +119,13 @@ impl FramePace {
     /// what it came early; one behind the period pays back what it came late. `input_paced`
     /// says whether the input driving the capture paces itself at the cadence
     /// (`Self::input_paced`), which is what lets the timer stand back after an input frame.
-    pub fn ticked(&mut self, trigger: TickTrigger, period: Duration, now: Instant, input_paced: bool) {
+    pub fn ticked(
+        &mut self,
+        trigger: TickTrigger,
+        period: Duration,
+        now: Instant,
+        input_paced: bool,
+    ) {
         if trigger.pulls_forward()
             && let Some(last) = self.last_tick
         {
@@ -140,8 +149,10 @@ impl FramePace {
     fn damage_paced(&mut self, period: Duration, now: Instant) -> bool {
         if let Some(prev) = self.last_damage {
             let dt = now.saturating_duration_since(prev).min(period * 4);
-            self.damage_spacing =
-                Some(self.damage_spacing.map_or(dt, |avg| avg.mul_f64(0.875) + dt.mul_f64(0.125)));
+            self.damage_spacing = Some(
+                self.damage_spacing
+                    .map_or(dt, |avg| avg.mul_f64(0.875) + dt.mul_f64(0.125)),
+            );
         }
         self.last_damage = Some(now);
         Self::input_paced(self.damage_spacing, period)
@@ -165,7 +176,8 @@ impl FramePace {
 
     /// Time since this capture last rendered, if it has.
     pub fn since_last_tick(&self, now: Instant) -> Option<Duration> {
-        self.last_tick.map(|last| now.saturating_duration_since(last))
+        self.last_tick
+            .map(|last| now.saturating_duration_since(last))
     }
 
     /// How far a pull may bring the next frame forward at `now`.
@@ -173,9 +185,11 @@ impl FramePace {
         let cap = period.mul_f64(INPUT_TICK_MIN_FRACTION);
         match self.borrow_budget {
             None => cap,
-            Some((left, at)) => {
-                (left + now.saturating_duration_since(at).mul_f64(INPUT_BORROW_REFILL)).min(cap)
-            }
+            Some((left, at)) => (left
+                + now
+                    .saturating_duration_since(at)
+                    .mul_f64(INPUT_BORROW_REFILL))
+            .min(cap),
         }
     }
 
@@ -183,15 +197,20 @@ impl FramePace {
     /// frame, less what the budget still allows it to borrow. A caller that waits until then
     /// need not test `due` again, since the budget only grows with time.
     pub fn pull_at(&self, period: Duration, now: Instant) -> Instant {
-        self.last_tick
-            .map_or(now, |last| last + period.saturating_sub(self.budget(period, now)))
+        self.last_tick.map_or(now, |last| {
+            last + period.saturating_sub(self.budget(period, now))
+        })
     }
 
     /// When the timer is next due for this capture: a period after the last frame, and the
     /// grace beyond that after an input frame the input paced.
     pub fn next_due(&self, period: Duration, now: Instant) -> Instant {
         let due = self.last_tick.map_or(now, |last| {
-            last + if self.last_paced { period.mul_f64(1.0 + TIMER_GRACE_AFTER_PULL) } else { period }
+            last + if self.last_paced {
+                period.mul_f64(1.0 + TIMER_GRACE_AFTER_PULL)
+            } else {
+                period
+            }
         });
         self.deferred_until.map_or(due, |held| held.max(due))
     }
@@ -214,14 +233,26 @@ mod pacing_tests {
     fn the_earliest_pull_is_the_instant_the_gate_opens() {
         let base = Instant::now();
         let mut pace = FramePace::default();
-        assert_eq!(pace.pull_at(PERIOD, base), base, "a fresh capture waits for nothing");
+        assert_eq!(
+            pace.pull_at(PERIOD, base),
+            base,
+            "a fresh capture waits for nothing"
+        );
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
         let earliest = pace.pull_at(PERIOD, base);
         assert_eq!(earliest, at(base, 10), "a whole budget buys half a period");
         assert!(pace.due(TickTrigger::Damage, PERIOD, earliest));
-        assert!(!pace.due(TickTrigger::Damage, PERIOD, earliest - Duration::from_millis(1)));
+        assert!(!pace.due(
+            TickTrigger::Damage,
+            PERIOD,
+            earliest - Duration::from_millis(1)
+        ));
         pace.ticked(TickTrigger::Damage, PERIOD, earliest, false);
-        assert_eq!(pace.pull_at(PERIOD, earliest), at(base, 30), "a spent budget waits the period out");
+        assert_eq!(
+            pace.pull_at(PERIOD, earliest),
+            at(base, 30),
+            "a spent budget waits the period out"
+        );
     }
 
     #[test]
@@ -248,21 +279,43 @@ mod pacing_tests {
         let base = Instant::now();
         let mut pace = FramePace::default();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
-        assert!(!pace.due(TickTrigger::Input, PERIOD, at(base, 9)), "under half a period waits for the timer");
+        assert!(
+            !pace.due(TickTrigger::Input, PERIOD, at(base, 9)),
+            "under half a period waits for the timer"
+        );
         assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 10)));
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 10), false);
-        assert_eq!(pace.next_due(PERIOD, at(base, 10)), at(base, 30), "a pull off the cadence leaves the timer its period");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 10)),
+            at(base, 30),
+            "a pull off the cadence leaves the timer its period"
+        );
         assert!(pace.due(TickTrigger::Timer, PERIOD, at(base, 30)));
-        assert!(!pace.due(TickTrigger::Input, PERIOD, at(base, 25)), "the budget is spent for a second pull");
-        assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 30)), "a whole period on, input takes the due frame");
+        assert!(
+            !pace.due(TickTrigger::Input, PERIOD, at(base, 25)),
+            "the budget is spent for a second pull"
+        );
+        assert!(
+            pace.due(TickTrigger::Input, PERIOD, at(base, 30)),
+            "a whole period on, input takes the due frame"
+        );
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 30), false);
         // About 4 ms refilled by now: a pull of 10 ms does not fit, one of 3 ms does.
         pace.ticked(TickTrigger::Timer, PERIOD, at(base, 120), false);
-        assert!(!pace.due(TickTrigger::Input, PERIOD, at(base, 130)), "a whole pull needs the whole budget back");
-        assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 137)), "a small pull fits what refilled");
+        assert!(
+            !pace.due(TickTrigger::Input, PERIOD, at(base, 130)),
+            "a whole pull needs the whole budget back"
+        );
+        assert!(
+            pace.due(TickTrigger::Input, PERIOD, at(base, 137)),
+            "a small pull fits what refilled"
+        );
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 137), false);
         pace.ticked(TickTrigger::Timer, PERIOD, at(base, 500), false);
-        assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 510)), "the budget is whole again");
+        assert!(
+            pace.due(TickTrigger::Input, PERIOD, at(base, 510)),
+            "the budget is whole again"
+        );
     }
 
     #[test]
@@ -280,13 +333,22 @@ mod pacing_tests {
         for _ in 0..50 {
             t += 20.4;
             let now = base + Duration::from_micros((t * 1000.0) as u64);
-            assert!(pace.next_due(PERIOD, now) > now, "no timer frame slipped in ahead of the move");
-            assert!(pace.due(TickTrigger::Input, PERIOD, now), "the move renders its own frame");
+            assert!(
+                pace.next_due(PERIOD, now) > now,
+                "no timer frame slipped in ahead of the move"
+            );
+            assert!(
+                pace.due(TickTrigger::Input, PERIOD, now),
+                "the move renders its own frame"
+            );
             pace.ticked(TickTrigger::Input, PERIOD, now, true);
         }
         let stopped = base + Duration::from_micros((t * 1000.0) as u64);
-        assert_eq!(pace.next_due(PERIOD, stopped), stopped + Duration::from_millis(25),
-                   "once the moves stop, the timer resumes after the grace");
+        assert_eq!(
+            pace.next_due(PERIOD, stopped),
+            stopped + Duration::from_millis(25),
+            "once the moves stop, the timer resumes after the grace"
+        );
     }
 
     #[test]
@@ -295,9 +357,15 @@ mod pacing_tests {
         let mut pace = FramePace::default();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 10), true);
-        assert!(!pace.due(TickTrigger::Input, PERIOD, at(base, 25)), "the budget is spent");
+        assert!(
+            !pace.due(TickTrigger::Input, PERIOD, at(base, 25)),
+            "the budget is spent"
+        );
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 40), true);
-        assert!(pace.due(TickTrigger::Input, PERIOD, at(base, 50)), "a pull 10 ms late earned a 10 ms pull back");
+        assert!(
+            pace.due(TickTrigger::Input, PERIOD, at(base, 50)),
+            "a pull 10 ms late earned a 10 ms pull back"
+        );
     }
 
     #[test]
@@ -305,15 +373,33 @@ mod pacing_tests {
         let base = Instant::now();
         let mut pace = FramePace::default();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
-        assert!(!FramePace::input_paced(Some(Duration::from_millis(7)), PERIOD), "a 143 Hz client is not paced at 50 Hz");
-        assert!(!FramePace::input_paced(Some(Duration::from_millis(40)), PERIOD), "nor is one at half the rate");
+        assert!(
+            !FramePace::input_paced(Some(Duration::from_millis(7)), PERIOD),
+            "a 143 Hz client is not paced at 50 Hz"
+        );
+        assert!(
+            !FramePace::input_paced(Some(Duration::from_millis(40)), PERIOD),
+            "nor is one at half the rate"
+        );
         assert!(!FramePace::input_paced(None, PERIOD), "nor no input at all");
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 12), false);
-        assert_eq!(pace.next_due(PERIOD, at(base, 12)), at(base, 32), "an unpaced pull leaves the timer its period");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 12)),
+            at(base, 32),
+            "an unpaced pull leaves the timer its period"
+        );
         pace.ticked(TickTrigger::Input, PERIOD, at(base, 32), true);
-        assert_eq!(pace.next_due(PERIOD, at(base, 32)), at(base, 57), "a paced one adds the grace");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 32)),
+            at(base, 57),
+            "a paced one adds the grace"
+        );
         pace.ticked(TickTrigger::HostFrame, PERIOD, at(base, 57), true);
-        assert_eq!(pace.next_due(PERIOD, at(base, 57)), at(base, 77), "a host frame never does");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 57)),
+            at(base, 77),
+            "a host frame never does"
+        );
     }
 
     #[test]
@@ -330,12 +416,22 @@ mod pacing_tests {
             t += step;
             let now = at(base, t);
             if i >= 2 {
-                assert!(pace.next_due(PERIOD, now) > now, "no timer frame slipped in ahead of frame {i}");
+                assert!(
+                    pace.next_due(PERIOD, now) > now,
+                    "no timer frame slipped in ahead of frame {i}"
+                );
             }
-            assert!(pace.due(TickTrigger::Damage, PERIOD, now), "frame {i} renders as it lands");
+            assert!(
+                pace.due(TickTrigger::Damage, PERIOD, now),
+                "frame {i} renders as it lands"
+            );
             pace.ticked(TickTrigger::Damage, PERIOD, now, false);
         }
-        assert_eq!(pace.next_due(PERIOD, at(base, t)), at(base, t + 25), "once it stops, the timer resumes after the grace");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, t)),
+            at(base, t + 25),
+            "once it stops, the timer resumes after the grace"
+        );
     }
 
     #[test]
@@ -354,13 +450,29 @@ mod pacing_tests {
         let base = Instant::now();
         let mut pace = FramePace::default();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
-        assert!(!pace.due(TickTrigger::HostFrame, PERIOD, at(base, 9)), "under half a period waits for the timer");
+        assert!(
+            !pace.due(TickTrigger::HostFrame, PERIOD, at(base, 9)),
+            "under half a period waits for the timer"
+        );
         assert!(pace.due(TickTrigger::HostFrame, PERIOD, at(base, 10)));
         pace.ticked(TickTrigger::HostFrame, PERIOD, at(base, 10), false);
-        assert_eq!(pace.next_due(PERIOD, at(base, 10)), at(base, 30), "the cadence follows the host's frames");
-        assert!(!pace.due(TickTrigger::Timer, PERIOD, at(base, 20)), "the old phase's tick is skipped");
-        assert!(!pace.due(TickTrigger::HostFrame, PERIOD, at(base, 25)), "the budget is spent for a second pull");
-        assert!(pace.due(TickTrigger::HostFrame, PERIOD, at(base, 30)), "a whole period on, the frame is due");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 10)),
+            at(base, 30),
+            "the cadence follows the host's frames"
+        );
+        assert!(
+            !pace.due(TickTrigger::Timer, PERIOD, at(base, 20)),
+            "the old phase's tick is skipped"
+        );
+        assert!(
+            !pace.due(TickTrigger::HostFrame, PERIOD, at(base, 25)),
+            "the budget is spent for a second pull"
+        );
+        assert!(
+            pace.due(TickTrigger::HostFrame, PERIOD, at(base, 30)),
+            "a whole period on, the frame is due"
+        );
     }
 
     #[test]
@@ -369,10 +481,21 @@ mod pacing_tests {
         let mut pace = FramePace::default();
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
         pace.defer(at(base, 30));
-        assert_eq!(pace.next_due(PERIOD, at(base, 20)), at(base, 30), "the timer waits where it was held to");
-        assert!(pace.due(TickTrigger::HostFrame, PERIOD, at(base, 21)), "a frame a period on is still due at once");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 20)),
+            at(base, 30),
+            "the timer waits where it was held to"
+        );
+        assert!(
+            pace.due(TickTrigger::HostFrame, PERIOD, at(base, 21)),
+            "a frame a period on is still due at once"
+        );
         pace.ticked(TickTrigger::HostFrame, PERIOD, at(base, 21), false);
-        assert_eq!(pace.next_due(PERIOD, at(base, 21)), at(base, 41), "a rendered frame lifts the hold");
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 21)),
+            at(base, 41),
+            "a rendered frame lifts the hold"
+        );
     }
 
     #[test]
@@ -402,6 +525,9 @@ mod pacing_tests {
                 next_input = t + Duration::from_millis(7);
             }
         }
-        assert!((100..=104).contains(&frames), "{frames} frames in two seconds at 50 fps");
+        assert!(
+            (100..=104).contains(&frames),
+            "{frames} frames in two seconds at 50 fps"
+        );
     }
 }

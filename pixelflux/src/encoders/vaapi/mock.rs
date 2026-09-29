@@ -83,12 +83,24 @@ impl Driver {
         let mut hevc_features = VAConfigAttribValEncHEVCFeatures { value: 0 };
         let mut av1_ext2 = VAConfigAttribValEncAV1Ext2 { value: 0 };
         unsafe {
-            hevc_block.bits.set_log2_max_coding_tree_block_size_minus3(2);
-            hevc_block.bits.set_log2_min_luma_coding_block_size_minus3(0);
-            hevc_block.bits.set_log2_max_luma_transform_block_size_minus2(3);
-            hevc_block.bits.set_log2_min_luma_transform_block_size_minus2(0);
-            hevc_block.bits.set_max_max_transform_hierarchy_depth_inter(2);
-            hevc_block.bits.set_max_max_transform_hierarchy_depth_intra(2);
+            hevc_block
+                .bits
+                .set_log2_max_coding_tree_block_size_minus3(2);
+            hevc_block
+                .bits
+                .set_log2_min_luma_coding_block_size_minus3(0);
+            hevc_block
+                .bits
+                .set_log2_max_luma_transform_block_size_minus2(3);
+            hevc_block
+                .bits
+                .set_log2_min_luma_transform_block_size_minus2(0);
+            hevc_block
+                .bits
+                .set_max_max_transform_hierarchy_depth_inter(2);
+            hevc_block
+                .bits
+                .set_max_max_transform_hierarchy_depth_intra(2);
             hevc_features.bits.set_amp(1);
             hevc_features.bits.set_sao(1);
             hevc_features.bits.set_cu_qp_delta(1);
@@ -110,20 +122,44 @@ impl Driver {
             ],
             entrypoints: vec![VAEntrypointEncSliceLP],
             attributes: vec![
-                (VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV444),
+                (
+                    VAConfigAttribRTFormat,
+                    VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV444,
+                ),
                 (VAConfigAttribRateControl, VA_RC_CBR | VA_RC_CQP),
-                (VAConfigAttribEncPackedHeaders, VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE | VA_ENC_PACKED_HEADER_SLICE | VA_ENC_PACKED_HEADER_MISC),
+                (
+                    VAConfigAttribEncPackedHeaders,
+                    VA_ENC_PACKED_HEADER_SEQUENCE
+                        | VA_ENC_PACKED_HEADER_PICTURE
+                        | VA_ENC_PACKED_HEADER_SLICE
+                        | VA_ENC_PACKED_HEADER_MISC,
+                ),
                 (VAConfigAttribEncMaxRefFrames, 8 | (1 << 16)),
                 (VAConfigAttribEncMaxSlices, 32),
-                (VAConfigAttribEncSliceStructure, VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS),
+                (
+                    VAConfigAttribEncSliceStructure,
+                    VA_ENC_SLICE_STRUCTURE_ARBITRARY_ROWS,
+                ),
                 (VAConfigAttribEncQualityRange, 7),
-                (VAConfigAttribEncHEVCFeatures, unsafe { hevc_features.value }),
+                (VAConfigAttribEncHEVCFeatures, unsafe {
+                    hevc_features.value
+                }),
                 (VAConfigAttribEncHEVCBlockSizes, unsafe { hevc_block.value }),
                 (VAConfigAttribEncAV1Ext2, unsafe { av1_ext2.value }),
             ],
-            surface_fourccs: vec![VA_FOURCC_NV12, VA_FOURCC_444P, VA_FOURCC_XYUV, VA_FOURCC_BGRA, VA_FOURCC_RGBA],
+            surface_fourccs: vec![
+                VA_FOURCC_NV12,
+                VA_FOURCC_444P,
+                VA_FOURCC_XYUV,
+                VA_FOURCC_BGRA,
+                VA_FOURCC_RGBA,
+            ],
             derive: true,
-            color_standards: vec![VAProcColorStandardBT601, VAProcColorStandardBT709, VAProcColorStandardExplicit],
+            color_standards: vec![
+                VAProcColorStandardBT601,
+                VAProcColorStandardBT709,
+                VAProcColorStandardExplicit,
+            ],
             ..Default::default()
         }
     }
@@ -135,13 +171,22 @@ impl Driver {
 
     /// The buffers of the last picture rendered, of `kind`.
     pub(crate) fn last_buffers(&self, kind: VABufferType) -> Vec<&[u8]> {
-        let Some((_, _, indices)) = self.pictures.last() else { return Vec::new() };
-        indices.iter().map(|&i| &self.buffers[i]).filter(|b| b.1 == kind).map(|b| b.2.as_slice()).collect()
+        let Some((_, _, indices)) = self.pictures.last() else {
+            return Vec::new();
+        };
+        indices
+            .iter()
+            .map(|&i| &self.buffers[i])
+            .filter(|b| b.1 == kind)
+            .map(|b| b.2.as_slice())
+            .collect()
     }
 
     /// The packed headers of the last picture, as `(type, bytes)`.
     pub(crate) fn last_packed(&self) -> Vec<(u32, Vec<u8>)> {
-        let Some((_, _, indices)) = self.pictures.last() else { return Vec::new() };
+        let Some((_, _, indices)) = self.pictures.last() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         let mut pending = None;
         for &i in indices {
@@ -178,27 +223,65 @@ impl Driver {
     /// The bytes a driver writing its own headers codes a picture with, as far as the
     /// session's frame labeling reads them.
     fn frame_tag(&self) -> Vec<u8> {
-        let Some((_, _, indices)) = self.pictures.last() else { return Vec::new() };
+        let Some((_, _, indices)) = self.pictures.last() else {
+            return Vec::new();
+        };
         for &i in indices {
             let (_, kind, bytes) = &self.buffers[i];
             if *kind != VAEncPictureParameterBufferType {
                 continue;
             }
             if bytes.len() == std::mem::size_of::<VAEncPictureParameterBufferVP9>() {
-                let pic: VAEncPictureParameterBufferVP9 = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                return vec![if unsafe { pic.pic_flags.bits.frame_type() } == 0 { 0x82 } else { 0x86 }, 0x49, 0x83];
+                let pic: VAEncPictureParameterBufferVP9 =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                return vec![
+                    if unsafe { pic.pic_flags.bits.frame_type() } == 0 {
+                        0x82
+                    } else {
+                        0x86
+                    },
+                    0x49,
+                    0x83,
+                ];
             }
             if bytes.len() == std::mem::size_of::<VAEncPictureParameterBufferVP8>() {
-                let pic: VAEncPictureParameterBufferVP8 = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                return vec![if unsafe { pic.pic_flags.bits.frame_type() } == 0 { 0x10 } else { 0x11 }, 0, 0];
+                let pic: VAEncPictureParameterBufferVP8 =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                return vec![
+                    if unsafe { pic.pic_flags.bits.frame_type() } == 0 {
+                        0x10
+                    } else {
+                        0x11
+                    },
+                    0,
+                    0,
+                ];
             }
             if bytes.len() == std::mem::size_of::<VAEncPictureParameterBufferH264>() {
-                let pic: VAEncPictureParameterBufferH264 = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                return if unsafe { pic.pic_fields.bits.idr_pic_flag() } == 1 { vec![0, 0, 0, 1, 0x65, 0x88] } else { vec![0, 0, 0, 1, 0x41, 0x9a] };
+                let pic: VAEncPictureParameterBufferH264 =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                return if unsafe { pic.pic_fields.bits.idr_pic_flag() } == 1 {
+                    vec![0, 0, 0, 1, 0x65, 0x88]
+                } else {
+                    vec![0, 0, 0, 1, 0x41, 0x9a]
+                };
             }
             if bytes.len() == std::mem::size_of::<VAEncPictureParameterBufferHEVC>() {
-                let pic: VAEncPictureParameterBufferHEVC = unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
-                return vec![0, 0, 0, 1, if unsafe { pic.pic_fields.bits.idr_pic_flag() } == 1 { 19 << 1 } else { 1 << 1 }, 1, 0x80];
+                let pic: VAEncPictureParameterBufferHEVC =
+                    unsafe { ptr::read_unaligned(bytes.as_ptr() as *const _) };
+                return vec![
+                    0,
+                    0,
+                    0,
+                    1,
+                    if unsafe { pic.pic_fields.bits.idr_pic_flag() } == 1 {
+                        19 << 1
+                    } else {
+                        1 << 1
+                    },
+                    1,
+                    0x80,
+                ];
             }
         }
         Vec::new()
@@ -208,7 +291,12 @@ impl Driver {
     pub(crate) fn last_misc(&self) -> Vec<(VAEncMiscParameterType, Vec<u8>)> {
         self.last_buffers(VAEncMiscParameterBufferType)
             .into_iter()
-            .map(|b| (u32::from_ne_bytes(b[..4].try_into().unwrap()), b[4..].to_vec()))
+            .map(|b| {
+                (
+                    u32::from_ne_bytes(b[..4].try_into().unwrap()),
+                    b[4..].to_vec(),
+                )
+            })
             .collect()
     }
 }
@@ -217,7 +305,11 @@ unsafe extern "C" fn error_str(_status: VAStatus) -> *const c_char {
     c"stood-in driver".as_ptr()
 }
 
-unsafe extern "C" fn set_callback(_dpy: VADisplay, _callback: VAMessageCallback, _user: *mut c_void) -> VAMessageCallback {
+unsafe extern "C" fn set_callback(
+    _dpy: VADisplay,
+    _callback: VAMessageCallback,
+    _user: *mut c_void,
+) -> VAMessageCallback {
     None
 }
 
@@ -250,7 +342,11 @@ unsafe extern "C" fn max_image_formats(_dpy: VADisplay) -> c_int {
     8
 }
 
-unsafe extern "C" fn query_profiles(_dpy: VADisplay, list: *mut VAProfile, count: *mut c_int) -> VAStatus {
+unsafe extern "C" fn query_profiles(
+    _dpy: VADisplay,
+    list: *mut VAProfile,
+    count: *mut c_int,
+) -> VAStatus {
     with(|d| unsafe {
         for (i, &p) in d.profiles.iter().enumerate() {
             *list.add(i) = p;
@@ -260,9 +356,18 @@ unsafe extern "C" fn query_profiles(_dpy: VADisplay, list: *mut VAProfile, count
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn query_entrypoints(_dpy: VADisplay, profile: VAProfile, list: *mut VAEntrypoint, count: *mut c_int) -> VAStatus {
+unsafe extern "C" fn query_entrypoints(
+    _dpy: VADisplay,
+    profile: VAProfile,
+    list: *mut VAEntrypoint,
+    count: *mut c_int,
+) -> VAStatus {
     with(|d| unsafe {
-        let offered: Vec<VAEntrypoint> = if d.profiles.contains(&profile) { d.entrypoints.clone() } else { Vec::new() };
+        let offered: Vec<VAEntrypoint> = if d.profiles.contains(&profile) {
+            d.entrypoints.clone()
+        } else {
+            Vec::new()
+        };
         for (i, &e) in offered.iter().enumerate() {
             *list.add(i) = e;
         }
@@ -271,7 +376,13 @@ unsafe extern "C" fn query_entrypoints(_dpy: VADisplay, profile: VAProfile, list
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn get_attributes(_dpy: VADisplay, _profile: VAProfile, entrypoint: VAEntrypoint, list: *mut VAConfigAttrib, count: c_int) -> VAStatus {
+unsafe extern "C" fn get_attributes(
+    _dpy: VADisplay,
+    _profile: VAProfile,
+    entrypoint: VAEntrypoint,
+    list: *mut VAConfigAttrib,
+    count: c_int,
+) -> VAStatus {
     with(|d| unsafe {
         for i in 0..count as usize {
             let attrib = &mut *list.add(i);
@@ -280,14 +391,26 @@ unsafe extern "C" fn get_attributes(_dpy: VADisplay, _profile: VAProfile, entryp
                 .iter()
                 .find(|a| a.0 == entrypoint && a.1 == attrib.type_)
                 .map(|a| a.2)
-                .or_else(|| d.attributes.iter().find(|a| a.0 == attrib.type_).map(|a| a.1))
+                .or_else(|| {
+                    d.attributes
+                        .iter()
+                        .find(|a| a.0 == attrib.type_)
+                        .map(|a| a.1)
+                })
                 .unwrap_or(VA_ATTRIB_NOT_SUPPORTED);
         }
     });
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn create_config(_dpy: VADisplay, profile: VAProfile, entrypoint: VAEntrypoint, list: *mut VAConfigAttrib, count: c_int, out: *mut VAConfigID) -> VAStatus {
+unsafe extern "C" fn create_config(
+    _dpy: VADisplay,
+    profile: VAProfile,
+    entrypoint: VAEntrypoint,
+    list: *mut VAConfigAttrib,
+    count: c_int,
+    out: *mut VAConfigID,
+) -> VAStatus {
     with(|d| unsafe {
         let attribs = (0..count as usize).map(|i| *list.add(i)).collect();
         d.configs.push((profile, entrypoint, attribs));
@@ -300,7 +423,12 @@ unsafe extern "C" fn destroy_id(_dpy: VADisplay, _id: u32) -> VAStatus {
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn query_surface_attributes(_dpy: VADisplay, _config: VAConfigID, list: *mut VASurfaceAttrib, count: *mut c_uint) -> VAStatus {
+unsafe extern "C" fn query_surface_attributes(
+    _dpy: VADisplay,
+    _config: VAConfigID,
+    list: *mut VASurfaceAttrib,
+    count: *mut c_uint,
+) -> VAStatus {
     with(|d| unsafe {
         if list.is_null() {
             *count = d.surface_fourccs.len() as c_uint;
@@ -317,7 +445,16 @@ unsafe extern "C" fn query_surface_attributes(_dpy: VADisplay, _config: VAConfig
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn create_surfaces(_dpy: VADisplay, rt_format: c_uint, width: c_uint, height: c_uint, out: *mut VASurfaceID, count: c_uint, list: *mut VASurfaceAttrib, attribs: c_uint) -> VAStatus {
+unsafe extern "C" fn create_surfaces(
+    _dpy: VADisplay,
+    rt_format: c_uint,
+    width: c_uint,
+    height: c_uint,
+    out: *mut VASurfaceID,
+    count: c_uint,
+    list: *mut VASurfaceAttrib,
+    attribs: c_uint,
+) -> VAStatus {
     with(|d| unsafe {
         let mut fourcc = 0;
         for i in 0..attribs as usize {
@@ -325,7 +462,9 @@ unsafe extern "C" fn create_surfaces(_dpy: VADisplay, rt_format: c_uint, width: 
             if attrib.type_ == VASurfaceAttribPixelFormat {
                 fourcc = attrib.value.value.i as u32;
             }
-            if attrib.type_ == VASurfaceAttribExternalBufferDescriptor && attrib.value.value.p.is_null() {
+            if attrib.type_ == VASurfaceAttribExternalBufferDescriptor
+                && attrib.value.value.p.is_null()
+            {
                 return VA_STATUS_ERROR_INVALID_PARAMETER as VAStatus;
             }
         }
@@ -339,12 +478,28 @@ unsafe extern "C" fn create_surfaces(_dpy: VADisplay, rt_format: c_uint, width: 
     })
 }
 
-unsafe extern "C" fn destroy_surfaces(_dpy: VADisplay, list: *mut VASurfaceID, count: c_int) -> VAStatus {
-    with(|d| d.destroyed.extend((0..count as usize).map(|i| unsafe { *list.add(i) })));
+unsafe extern "C" fn destroy_surfaces(
+    _dpy: VADisplay,
+    list: *mut VASurfaceID,
+    count: c_int,
+) -> VAStatus {
+    with(|d| {
+        d.destroyed
+            .extend((0..count as usize).map(|i| unsafe { *list.add(i) }))
+    });
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn create_context(_dpy: VADisplay, config: VAConfigID, _w: c_int, _h: c_int, _flag: c_int, targets: *mut VASurfaceID, count: c_int, out: *mut VAContextID) -> VAStatus {
+unsafe extern "C" fn create_context(
+    _dpy: VADisplay,
+    config: VAConfigID,
+    _w: c_int,
+    _h: c_int,
+    _flag: c_int,
+    targets: *mut VASurfaceID,
+    count: c_int,
+    out: *mut VAContextID,
+) -> VAStatus {
     with(|d| unsafe {
         let list = (0..count as usize).map(|i| *targets.add(i)).collect();
         d.contexts.push((config, list));
@@ -353,7 +508,15 @@ unsafe extern "C" fn create_context(_dpy: VADisplay, config: VAConfigID, _w: c_i
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn create_buffer(_dpy: VADisplay, context: VAContextID, kind: VABufferType, size: c_uint, num: c_uint, data: *mut c_void, out: *mut VABufferID) -> VAStatus {
+unsafe extern "C" fn create_buffer(
+    _dpy: VADisplay,
+    context: VAContextID,
+    kind: VABufferType,
+    size: c_uint,
+    num: c_uint,
+    data: *mut c_void,
+    out: *mut VABufferID,
+) -> VAStatus {
     if kind == VAEncCodedBufferType && !data.is_null() {
         return VA_STATUS_ERROR_INVALID_PARAMETER as VAStatus;
     }
@@ -361,22 +524,39 @@ unsafe extern "C" fn create_buffer(_dpy: VADisplay, context: VAContextID, kind: 
         if kind == VAProcPipelineParameterBufferType && !data.is_null() {
             let p: VAProcPipelineParameterBuffer = ptr::read_unaligned(data as *const _);
             let rect = |r: *const VARectangle| r.as_ref().map(|r| (r.x, r.y, r.width, r.height));
-            d.regions.push((rect(p.surface_region), rect(p.output_region)));
+            d.regions
+                .push((rect(p.surface_region), rect(p.output_region)));
         }
-        let bytes = if data.is_null() { vec![0u8; (size * num) as usize] } else { std::slice::from_raw_parts(data as *const u8, (size * num) as usize).to_vec() };
+        let bytes = if data.is_null() {
+            vec![0u8; (size * num) as usize]
+        } else {
+            std::slice::from_raw_parts(data as *const u8, (size * num) as usize).to_vec()
+        };
         d.buffers.push((context, kind, bytes));
         *out = d.buffers.len() as u32 - 1 + 0x1000;
     });
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn map_buffer(_dpy: VADisplay, id: VABufferID, out: *mut *mut c_void) -> VAStatus {
+unsafe extern "C" fn map_buffer(
+    _dpy: VADisplay,
+    id: VABufferID,
+    out: *mut *mut c_void,
+) -> VAStatus {
     with(|d| unsafe {
         let index = (id - 0x1000) as usize;
         let kind = d.buffers[index].1;
         if kind == VAEncCodedBufferType {
             d.coded_out = d.coded.clone().unwrap_or_else(|| d.coded_picture());
-            d.segment = VACodedBufferSegment { size: d.coded_out.len() as u32, bit_offset: 0, status: 0, reserved: 0, buf: d.coded_out.as_mut_ptr() as *mut c_void, next: ptr::null_mut(), va_reserved: [0; 4] };
+            d.segment = VACodedBufferSegment {
+                size: d.coded_out.len() as u32,
+                bit_offset: 0,
+                status: 0,
+                reserved: 0,
+                buf: d.coded_out.as_mut_ptr() as *mut c_void,
+                next: ptr::null_mut(),
+                va_reserved: [0; 4],
+            };
             *out = &mut d.segment as *mut VACodedBufferSegment as *mut c_void;
         } else {
             *out = d.buffers[index].2.as_mut_ptr() as *mut c_void;
@@ -389,14 +569,25 @@ unsafe extern "C" fn unmap_buffer(_dpy: VADisplay, _id: VABufferID) -> VAStatus 
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn begin_picture(_dpy: VADisplay, context: VAContextID, target: VASurfaceID) -> VAStatus {
+unsafe extern "C" fn begin_picture(
+    _dpy: VADisplay,
+    context: VAContextID,
+    target: VASurfaceID,
+) -> VAStatus {
     with(|d| d.in_picture = Some((context, target, Vec::new())));
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn render_picture(_dpy: VADisplay, _context: VAContextID, list: *mut VABufferID, count: c_int) -> VAStatus {
+unsafe extern "C" fn render_picture(
+    _dpy: VADisplay,
+    _context: VAContextID,
+    list: *mut VABufferID,
+    count: c_int,
+) -> VAStatus {
     with(|d| unsafe {
-        let indices: Vec<usize> = (0..count as usize).map(|i| (*list.add(i) - 0x1000) as usize).collect();
+        let indices: Vec<usize> = (0..count as usize)
+            .map(|i| (*list.add(i) - 0x1000) as usize)
+            .collect();
         if let Some(p) = &mut d.in_picture {
             p.2.extend(indices);
         }
@@ -417,9 +608,16 @@ unsafe extern "C" fn sync_surface(_dpy: VADisplay, _surface: VASurfaceID) -> VAS
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn query_image_formats(_dpy: VADisplay, list: *mut VAImageFormat, count: *mut c_int) -> VAStatus {
+unsafe extern "C" fn query_image_formats(
+    _dpy: VADisplay,
+    list: *mut VAImageFormat,
+    count: *mut c_int,
+) -> VAStatus {
     unsafe {
-        for (i, fourcc) in [VA_FOURCC_BGRA, VA_FOURCC_RGBA, VA_FOURCC_NV12].into_iter().enumerate() {
+        for (i, fourcc) in [VA_FOURCC_BGRA, VA_FOURCC_RGBA, VA_FOURCC_NV12]
+            .into_iter()
+            .enumerate()
+        {
             let f = &mut *list.add(i);
             *f = std::mem::zeroed();
             f.fourcc = fourcc;
@@ -450,7 +648,13 @@ fn image(width: c_int, height: c_int, fourcc: u32) -> VAImage {
     image
 }
 
-unsafe extern "C" fn create_image(_dpy: VADisplay, format: *mut VAImageFormat, width: c_int, height: c_int, out: *mut VAImage) -> VAStatus {
+unsafe extern "C" fn create_image(
+    _dpy: VADisplay,
+    format: *mut VAImageFormat,
+    width: c_int,
+    height: c_int,
+    out: *mut VAImage,
+) -> VAStatus {
     if with(|d| d.image_fails) {
         return VA_STATUS_ERROR_OPERATION_FAILED as VAStatus;
     }
@@ -458,9 +662,23 @@ unsafe extern "C" fn create_image(_dpy: VADisplay, format: *mut VAImageFormat, w
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn derive_image(_dpy: VADisplay, surface: VASurfaceID, out: *mut VAImage) -> VAStatus {
-    let (derive, size) = with(|d| (d.derive, d.surfaces.iter().find(|s| s.0 == surface).map(|s| (s.2, s.3))));
-    let Some((w, h)) = size else { return VA_STATUS_ERROR_INVALID_PARAMETER as VAStatus };
+unsafe extern "C" fn derive_image(
+    _dpy: VADisplay,
+    surface: VASurfaceID,
+    out: *mut VAImage,
+) -> VAStatus {
+    let (derive, size) = with(|d| {
+        (
+            d.derive,
+            d.surfaces
+                .iter()
+                .find(|s| s.0 == surface)
+                .map(|s| (s.2, s.3)),
+        )
+    });
+    let Some((w, h)) = size else {
+        return VA_STATUS_ERROR_INVALID_PARAMETER as VAStatus;
+    };
     if !derive {
         return VA_STATUS_ERROR_OPERATION_FAILED as VAStatus;
     }
@@ -469,12 +687,30 @@ unsafe extern "C" fn derive_image(_dpy: VADisplay, surface: VASurfaceID, out: *m
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn put_image(_dpy: VADisplay, _surface: VASurfaceID, _image: VAImageID, _sx: c_int, _sy: c_int, _sw: c_uint, _sh: c_uint, _dx: c_int, _dy: c_int, _dw: c_uint, _dh: c_uint) -> VAStatus {
+unsafe extern "C" fn put_image(
+    _dpy: VADisplay,
+    _surface: VASurfaceID,
+    _image: VAImageID,
+    _sx: c_int,
+    _sy: c_int,
+    _sw: c_uint,
+    _sh: c_uint,
+    _dx: c_int,
+    _dy: c_int,
+    _dw: c_uint,
+    _dh: c_uint,
+) -> VAStatus {
     with(|d| d.puts += 1);
     VA_STATUS_SUCCESS as VAStatus
 }
 
-unsafe extern "C" fn pipeline_caps(_dpy: VADisplay, _context: VAContextID, _filters: *mut VABufferID, _count: c_uint, out: *mut VAProcPipelineCaps) -> VAStatus {
+unsafe extern "C" fn pipeline_caps(
+    _dpy: VADisplay,
+    _context: VAContextID,
+    _filters: *mut VABufferID,
+    _count: c_uint,
+    out: *mut VAProcPipelineCaps,
+) -> VAStatus {
     thread_local! {
         static STANDARDS: RefCell<Vec<VAProcColorStandardType>> = const { RefCell::new(Vec::new()) };
     }

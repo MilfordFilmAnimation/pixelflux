@@ -232,9 +232,10 @@ impl KeymapPolicy {
             return (0, 0);
         }
         if let Some(&(kc, level)) = self.base_map.get(&sym)
-            && (!plain_only || level == 0) {
-                return (kc, level);
-            }
+            && (!plain_only || level == 0)
+        {
+            return (kc, level);
+        }
         if let Some(&slot) = self.by_sym.get(&sym) {
             if let Some(at) = self.lru.iter().position(|&s| s == slot) {
                 self.lru.remove(at);
@@ -408,7 +409,9 @@ mod tests {
     #[test]
     fn pressed_keycode_is_never_recycled() {
         let mut p = policy();
-        let syms: Vec<u32> = (0..OVERLAY_CAPACITY as u32).map(|i| 0x1005000 + i).collect();
+        let syms: Vec<u32> = (0..OVERLAY_CAPACITY as u32)
+            .map(|i| 0x1005000 + i)
+            .collect();
         let (out, _) = p.bind_many(&syms, &HashSet::new());
         let held_kc = out[0].0;
         let held_sym = syms[0];
