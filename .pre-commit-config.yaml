@@ -1,0 +1,18 @@
+# The formatting check CI runs, moved ahead of the commit. One-time setup:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# Run over the whole tree at any time with `pre-commit run --all-files`. rustfmt
+# comes with the Rust toolchain (`rustup component add rustfmt`) and reads
+# rustfmt.toml.
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: rustfmt
+        language: system
+        types: [rust]
+        # bindgen's output stays as generated
+        exclude: ^pixelflux/(nvcodec-sys|va-sys)/src/bindgen/
