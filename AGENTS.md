@@ -28,11 +28,11 @@ up for one (Miniforge serves a host with a closed package manager; keep the syst
 other GPUs) and take the operator's directives on how it is constructed and constrained. Say which checks could not
 run where the hardware for them was not available.
 
-Priority: end-to-end processing latency > resource usage or an unrestricted frame rate >= quality >> overall bandwidth
-efficiency. Latency may be given up only within noise (a fluctuation that is imperceptible or statistically
-insignificant, and at most 5 %), and only to gain quality or bandwidth consistency; somewhat more GPU or CPU is
-acceptable when it costs no latency and buys a substantial quality improvement. Bandwidth efficiency comes last
-because an encoded frame is shown once and discarded, unlike a stored .mp4 or .mkv.
+Priority: End-to-End Processing Latency > Resource Usage or Unrestricted Frame Rate >= Quality (non-perceptible or
+statistically insignificant latency fluctuations of up to 5% are acceptable in exchange for quality or bandwidth
+consistency, and slightly more GPU or CPU usage is also acceptable if it has no latency impact and brings a
+substantial quality improvement) >> Overall Bandwidth Efficiency (since encoded frames are only used once, unlike
+.mp4/.mkv)
 
 Note that parity between X11 and Wayland, as well as between WebSockets and WebRTC, or between the default dashboard
 and the wish dashboard, is considered a key focus (things that were not wired up correctly on either side, and similar
