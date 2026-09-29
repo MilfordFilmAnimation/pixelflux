@@ -157,7 +157,9 @@ fn source_luma(bgra: &[u8], codec: Codec) -> Vec<u8> {
         _ => (0.2126, 0.0722, true),
     };
     let kg = 1.0 - kr - kb;
-    bgra.chunks_exact(4)
+    bgra.as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| {
             let y = kr * p[2] as f64 + kg * p[1] as f64 + kb * p[0] as f64;
             let v = if limited { 16.0 + y * 219.0 / 255.0 } else { y };
@@ -487,10 +489,10 @@ fn cleanup_bench() {
 enum Session {
     #[cfg(feature = "gpl")]
     X264(
-        crate::encoders::software::H264EncoderWrapper,
+        Box<crate::encoders::software::H264EncoderWrapper>,
         crate::encoders::session::Planes,
     ),
-    Frame(crate::encoders::FrameEncoder),
+    Frame(Box<crate::encoders::FrameEncoder>),
 }
 
 impl Session {
@@ -523,7 +525,7 @@ impl Session {
                 settings.height as usize,
                 false,
             );
-            return (Session::X264(enc, planes), "x264".into());
+            return (Session::X264(Box::new(enc), planes), "x264".into());
         }
         let mut s = settings.clone();
         let enc = crate::encoders::select_frame_encoder(
@@ -534,7 +536,7 @@ impl Session {
         )
         .expect("a full-frame session");
         let name = format!("{} {}", enc.backend_name(), s.codec.display());
-        (Session::Frame(enc), name)
+        (Session::Frame(Box::new(enc)), name)
     }
 
     /// Encode `bgra`, holding the quantizer `held` (a quality index) when asked; the bytes past

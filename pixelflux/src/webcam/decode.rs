@@ -1029,7 +1029,7 @@ mod tests {
         impl Bits {
             fn u(&mut self, value: u32, count: usize) {
                 for shift in (0..count).rev() {
-                    if self.1 % 8 == 0 {
+                    if self.1.is_multiple_of(8) {
                         self.0.push(0);
                     }
                     if (value >> shift) & 1 != 0 {
@@ -1045,7 +1045,7 @@ mod tests {
                 self.u(coded, length);
             }
             fn align(&mut self) {
-                while self.1 % 8 != 0 {
+                while !self.1.is_multiple_of(8) {
                     self.u(0, 1);
                 }
             }

@@ -318,6 +318,9 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
     })
 }
 
+/// A field's value, with the first bit its code spans and the bit after it.
+type Coded = (u32, usize, usize);
+
 /// Where a VUI's bitstream restriction sits, and the reordering it declares.
 struct Restriction {
     /// The bit the `bitstream_restriction_flag` sits at, or the VUI's own flag where the SPS
@@ -325,7 +328,7 @@ struct Restriction {
     flag: usize,
     /// `max_num_reorder_frames` and `max_dec_frame_buffering` with the bits each code spans, or
     /// None where the stream declares no restriction.
-    declared: Option<((u32, usize, usize), (u32, usize, usize))>,
+    declared: Option<(Coded, Coded)>,
 }
 
 /// The restriction of the VUI `at` located, read through what follows its video signal type.

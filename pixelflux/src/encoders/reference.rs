@@ -495,7 +495,7 @@ impl ReferenceSlots {
         let since_key = self.next_pts - self.key_pts;
         let refresh = if self.count > 3 {
             1 << (since_key % RING)
-                | if since_key % RING == 0 {
+                | if since_key.is_multiple_of(RING) {
                     1 << (RING + since_key / RING % RING)
                 } else {
                     0
@@ -504,7 +504,7 @@ impl ReferenceSlots {
             SlotRefresh::ALL
         } else {
             SlotRefresh::LAST
-                | if since_key % ANCHOR_PERIOD == 0 {
+                | if since_key.is_multiple_of(ANCHOR_PERIOD) {
                     SlotRefresh::GOLDEN
                 } else {
                     0
@@ -777,7 +777,12 @@ mod tests {
         for id in 1..=19u16 {
             let plan = s.plan(false);
             let n = id as u8;
-            let want = 1 << (n % 4) | if n % 4 == 0 { 1 << (4 + n / 4 % 4) } else { 0 };
+            let want = 1 << (n % 4)
+                | if n.is_multiple_of(4) {
+                    1 << (4 + n / 4 % 4)
+                } else {
+                    0
+                };
             assert_eq!(plan.refresh.0, want, "frame {id}");
             assert_eq!(s.record(id, plan), Reference::Frame(id - 1));
         }
