@@ -212,10 +212,12 @@ socket write to the compositor runs about 4 us, a uinput write reaching its evde
 and a `Notify*` D-Bus call about 2 ms. A successful `ConnectToEIS` makes the session refuse `Notify*`, so
 libei is committed to only once its handshake binds a device, and the compositor's own keymap
 (delivered over EIS, read-only) resolves each key's base keysym with a raw-keycode fallback. A portal
-that refuses those devices is asked again for capture alone. The KDE 5.27 session the sandbox can run (`kwin_wayland --virtual` with
-`xdg-desktop-portal-kde` on a private bus) is the real non-wlroots target for the portal rung; it shows
-no consent dialog to an unsandboxed app and offers memfd frames only, so the dmabuf import of a portal
-stream is verified against GNOME or KDE 6 on a GPU host.
+that refuses those devices is asked again for capture alone. The Plasma 6.6 session the sandbox can run (`kwin_wayland --virtual` with
+`xdg-desktop-portal-kde` on a private bus, as selkies' `test_wayland_host_portal` brings it up) is the real
+non-wlroots target for the portal rung: KWin runs there with `KWIN_WAYLAND_NO_PERMISSION_CHECKS`, as the
+KDE image sets it, the backend starts a remote-desktop session without asking only for an app the
+permission store's `kde-authorized` table grants `remote-desktop`, and the stream's frames arrive as GPU
+dmabufs, so the portal stream's dmabuf import is exercised there too.
 
 X11 capture has three backends and picks between them itself (`x11::run_capture`): NvFBC
 (`x11/nvfbc.rs`) where the NVIDIA driver composites the screen into video memory and the buffer is
