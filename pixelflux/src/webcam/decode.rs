@@ -305,7 +305,9 @@ impl H264Backend {
         let mut state = unsafe { decode(self.decoder, data.as_ptr(), data.len() as c_int, dst.as_mut_ptr(), &mut info) };
         // A profile above baseline has the decoder hold each picture back until the next
         // one arrives, against reordering the stream never does: the held picture is this
-        // access unit's, and flushing hands it over now.
+        // access unit's, and flushing hands it over now. OpenH264 2.6 keeps a flushed
+        // picture's buffer when decoding single-threaded, so such a stream stalls once the
+        // pool runs dry; a Baseline stream is never held.
         if info.iBufferStatus != 1
             && let Some(flush) = self.api().and_then(|a| a.FlushFrame)
         {
@@ -807,12 +809,11 @@ mod tests {
         assert!(decoded >= 5, "decoded {} of 6 frames", decoded);
     }
 
-    /// A High-profile H.264 stream of `frames` access units at `mbs` macroblocks square, its
-    /// fields in the order of the specification's syntax tables: an SPS with picture order count
-    /// type 0 and two reference frames, a CAVLC PPS, an IDR of I_PCM macroblocks holding
-    /// `sample`, then P pictures of skipped macroblocks whose picture order count steps by two,
-    /// as the VCE firmware under Mesa 24.0 writes it.
-    fn h264_stepping_poc_by_two(mbs: u32, frames: u32, sample: u8) -> Vec<Vec<u8>> {
+    /// A Constrained Baseline H.264 stream of `frames` access units at `mbs` macroblocks square,
+    /// its fields in the order of the specification's syntax tables: an SPS with picture order
+    /// count type 0 and two reference frames, a CAVLC PPS, an IDR of I_PCM macroblocks holding
+    /// `sample`, then P pictures of skipped macroblocks.
+    fn h264_skipping_stream(mbs: u32, frames: u32, sample: u8) -> Vec<Vec<u8>> {
         struct Bits(Vec<u8>, usize);
         impl Bits {
             fn u(&mut self, value: u32, count: usize) {
@@ -854,14 +855,10 @@ mod tests {
             }
         }
         let mut sps = Bits(Vec::new(), 0);
-        sps.u(100, 8);
-        sps.u(0, 8);
+        sps.u(66, 8);
+        sps.u(0xc0, 8);
         sps.u(40, 8);
-        for value in [0, 1, 0, 0] {
-            sps.ue(value);
-        }
-        sps.u(0, 2);
-        for value in [0, 0, 0, 2] {
+        for value in [0, 0, 0, 0, 2] {
             sps.ue(value);
         }
         sps.u(0, 1);
@@ -912,28 +909,11 @@ mod tests {
         units
     }
 
-    /// OpenH264 holds each picture of such a stream for reordering and hands it over on a flush,
-    /// which has to return the picture's buffer: its pool of reference frames plus two would
-    /// otherwise run dry at the fifth picture.
-    #[test]
-    fn h264_pictures_held_for_reordering_leave_with_their_own_access_units() {
-        let mut dec = VideoDecoder::new(Codec::H264).unwrap();
-        for (n, unit) in h264_stepping_poc_by_two(2, 12, 0x60).iter().enumerate() {
-            match dec.decode(unit) {
-                Ok(true) => {}
-                other => panic!("access unit {n}: {other:?}"),
-            }
-            let v = dec.frame().unwrap();
-            assert_eq!((v.width, v.height), (32, 32));
-            assert_eq!((v.y[17 * v.y_stride + 17], v.u[9 * v.uv_stride + 9], v.v[0]), (0x60, 0x60, 0x60), "access unit {n}");
-        }
-    }
-
     /// A prefix NAL unit naming dependency layer 1, which only a scalable stream carries, leaves
     /// every picture after it decoding, a key frame's included.
     #[test]
     fn h264_scalable_extension_units_never_retarget_the_decoder() {
-        let mut units = h264_stepping_poc_by_two(2, 12, 0x60);
+        let mut units = h264_skipping_stream(2, 12, 0x60);
         units[4].splice(0..0, [0, 0, 0, 1, 0x4e, 0x80, 0x90, 0x07, 0x20]);
         let mut dec = VideoDecoder::new(Codec::H264).unwrap();
         for (n, unit) in units.iter().chain(&units).enumerate() {

@@ -39,7 +39,7 @@ contains it.
 | Component | License | Category | Build | How used | Notes |
 | --- | --- | --- | --- | --- | --- |
 | libx264 (via `x264-sys`) | GPL-2.0-or-later | copyleft | GPL only | linked shared library (`NEEDED libx264.so.*`); auditwheel bundles it into the GPL wheels | Striped software H.264; the `x264-sys` crate is MIT but has no purpose without libx264. |
-| Cisco OpenH264 2.6 (via `openh264-sys2`, vendored and patched) | BSD-2-Clause | permissive | both | compiled from the source vendored in the crate (needs a C++ toolchain and nasm) and linked statically; no binary download. The crate is the crates.io `openh264-sys2` 0.9.8 package vendored under `pixelflux/openh264-sys2/`, which takes the registry copy's place through `[patch.crates-io]`, with `flush-frame.patch` applied to the decoder's `welsDecoderExt.cpp` and nothing else changed | Its decoder is the virtual camera's H.264 decoder in every build; its encoder is the software H.264 of the non-GPL build. The patch makes the single-threaded decoder's `FlushFrame` return the flushed picture's buffer to its pool. Cisco's royalty-covered binary module is irrelevant to a source build; the AVC patent pool applies to any H.264 codec and is the deployer's concern. Pulls `libstdc++` in as the only C++ code. |
+| Cisco OpenH264 2.6 (via `openh264-sys2`) | BSD-2-Clause | permissive | both | compiled from the source vendored in the crate (needs a C++ toolchain and nasm) and linked statically; no binary download | Its decoder is the virtual camera's H.264 decoder in every build; its encoder is the software H.264 of the non-GPL build. Cisco's royalty-covered binary module is irrelevant to a source build; the AVC patent pool applies to any H.264 codec and is the deployer's concern. Pulls `libstdc++` in as the only C++ code. |
 | x265 (via `codec-sys`, feature `x265`) | GPL-2.0-or-later | copyleft | GPL only | linked shared library (`NEEDED libx265.so.*`), bound at build time from its headers; bundled into the GPL wheels | software H.265 (incl. 4:4:4) |
 | kvazaar (via `codec-sys`, feature `kvazaar`) | BSD-3-Clause | permissive | non-GPL only | linked shared library, bound at build time from its headers; bundled into the non-GPL wheels | software H.265 of a GPL-free build (4:2:0) |
 | libvpx (via `codec-sys`) | BSD-3-Clause | permissive | both | linked shared library, bound at build time from its headers; bundled into the wheels | software VP8 and VP9 encoders, and the virtual camera's VP8 and VP9 decoders |
@@ -69,7 +69,7 @@ contains it.
 | CPython (`libpython`) | PSF-2.0 | permissive | both | extension module: symbols come from the hosting interpreter, nothing is linked | `pyo3` with `extension-module` |
 | glibc (`libc`, `libm`, `libpthread`, `libdl`) | LGPL-2.1-or-later | weak copyleft | both | linked shared libraries, as for every program; musllinux wheels use musl (MIT) | C runtime |
 | libgcc_s, libstdc++ | GPL-3.0-or-later WITH GCC-exception-3.1 | permissive in effect (the runtime library exception covers linked programs) | libgcc_s: both; libstdc++: whenever OpenH264 is compiled in, the only C++ code | linked shared libraries; excluded from the wheel | GCC runtime |
-| smithay (git dependency, rev `928d4a9b`) | MIT | permissive | both | Rust source, compiled in | the only git dependency; `deny.toml` allows exactly that repository |
+| smithay (git dependency, rev `928d4a9b`) | MIT | permissive | both | Rust source, compiled in | the only non-crates.io crate; `deny.toml` allows exactly that repository |
 
 ## Rust crates
 
@@ -214,7 +214,7 @@ table below.
 | nvcodec-sys | 0.1.0 | MIT OR Apache-2.0 | permissive | both | NVIDIA NVENC (libnvidia-encode.so.1), framebuffer capture (libnvidia-fbc.so.1), and CUDA driver (libcuda.so.1) (proprietary driver libraries; nvEncodeAPI.h is MIT, the CUDA bindings are declarations generated from the CUDA toolkit headers, permissive) |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | permissive | both |  |
 | openh264 | 0.9.8 | BSD-2-Clause | permissive | both |  |
-| openh264-sys2 | 0.9.8 | BSD-2-Clause | permissive | both | Cisco OpenH264 2.6 (vendored source, decoder patched) (BSD-2-Clause, permissive) |
+| openh264-sys2 | 0.9.8 | BSD-2-Clause | permissive | both | Cisco OpenH264 2.6 (vendored source) (BSD-2-Clause, permissive) |
 | ordered-stream | 0.2.0 | MIT OR Apache-2.0 | permissive | both |  |
 | parking | 2.2.1 | Apache-2.0 OR MIT | permissive | both |  |
 | paste | 1.0.15 | MIT OR Apache-2.0 | permissive | both |  |
@@ -391,10 +391,8 @@ The default build (`gpl` feature, what the published wheels and
   above), and fails when a copyleft component appears in a configuration not
   listed for it in `ALLOWED_COPYLEFT` (`x264-sys`, and `codec-sys` where its
   `x265` feature is on, → `gpl` only), when a crate has no usable license
-  metadata, when a crate named like a native binding
-  (`-sys`, `_sys`, `-ffi`) is not described in `NATIVE`, or when a crate
-  `NATIVE` names as vendored (`openh264-sys2`) resolves to the registry
-  instead of its patched copy. Run it from the
+  metadata, or when a crate named like a native binding
+  (`-sys`, `_sys`, `-ffi`) is not described in `NATIVE`. Run it from the
   repository root: `python3 scripts/check-licenses.py` (`--set non-gpl`,
   `--markdown`, `--metadata FILE` for a saved `cargo metadata` JSON). It
   reports `PASS`/`FAIL` per configuration and exits non-zero on a failure.
