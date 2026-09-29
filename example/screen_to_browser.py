@@ -118,8 +118,8 @@ def build_capture_settings():
     cs.video_cbr_mode = False
     # Target bitrate in kbps for CBR mode. Required when video_cbr_mode is enabled.
     cs.video_bitrate_kbps = 4000
-    # Optional VBV buffer size in kilobits for custom buffer size.
-    cs.video_vbv_multiplier = 1.5     # VBV as a multiple of one frame's bit budget (0 = auto policy).
+    # Optional VBV size as a multiple of one frame's bit budget.
+    cs.video_vbv_multiplier = 0.0     # CBR: 0 = auto policy. CRF: 0 = uncapped, a positive value caps software x264.
     # Allow pixelflux to adjust its capture width and height. Overrides provided width and height when enabled.
     cs.auto_adjust_screen_capture_size = True
 

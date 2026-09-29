@@ -294,7 +294,8 @@ impl H264EncoderWrapper {
     ///    - **CRF** (default): constant-quality with `f_rf_constant = crf`. A positive
     ///      `vbv_kbit` caps it with a VBV of that buffer at a peak of `bitrate_kbps` (x264's
     ///      capped CRF): the rate factor still picks the quantizer and the VBV bounds the size
-    ///      of a frame, a key frame above all. `vbv_kbit == 0` leaves it uncapped.
+    ///      of a frame, a key frame above all, under CBR's ceiling of 51, so content the cap
+    ///      starves overshoots it rather than freezes. `vbv_kbit == 0` leaves it uncapped.
     /// 4. **Color**: I444 at full range or I420 at limited range, a VUI declaring that range
     ///    with the BT.709 primaries, transfer, and matrix the sRGB source and the conversion
     ///    carry, and the matching `high444` / `baseline` profile.
@@ -410,6 +411,7 @@ impl H264EncoderWrapper {
                 if vbv_kbit > 0 {
                     param.rc.i_vbv_max_bitrate = bitrate_kbps.saturating_abs();
                     param.rc.i_vbv_buffer_size = vbv_kbit;
+                    param.rc.i_qp_max = 51;
                 }
             }
             param.i_csp = if is_i444 {
@@ -496,20 +498,22 @@ impl H264EncoderWrapper {
     /// does not apply `i_fps_*`, and the CBR/VBV per-frame budget is `bitrate / fps`, so a session
     /// left at its old rate ships roughly half the configured bitrate once fps halves. The reopen
     /// carries the new bitrate/VBV too, and a fresh session emits an IDR on its first frame; a failed
-    /// reopen keeps the working session instead of nulling the handle. A bitrate/VBV-only change
-    /// stays a live `x264_encoder_reconfig`, and the tracked mirror advances only on success so
-    /// it cannot drift from the encoder's real state.
+    /// reopen keeps the working session instead of nulling the handle. Capping a CRF session or
+    /// lifting its cap reopens it too, since x264 retunes a VBV in place only while one is on. A
+    /// bitrate/VBV-only change otherwise stays a live `x264_encoder_reconfig`, and the tracked
+    /// mirror advances only on success so it cannot drift from the encoder's real state.
     pub fn reconfigure_rate(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
         let bk = bitrate_kbps.saturating_abs();
         let new_fps = x264_frame_rate(fps);
         let vbv_applies = self.is_cbr || vbv_kbit > 0;
         let rate_changed =
             vbv_applies && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
-        let fps_changed = self.current_fps != new_fps;
-        if !rate_changed && !fps_changed {
+        let reopen = self.current_fps != new_fps
+            || (!self.is_cbr && (self.current_vbv > 0) != (vbv_kbit > 0));
+        if !rate_changed && !reopen {
             return;
         }
-        if fps_changed {
+        if reopen {
             if let Some(fresh) = H264EncoderWrapper::new(
                 self.width,
                 self.height,
@@ -1802,7 +1806,10 @@ mod tests {
         assert_eq!(super::stripe_rate_control(&crf(0.0), 1.0, 4), (8000, 0));
         assert_eq!(super::stripe_rate_control(&crf(12.0), 1.0, 4), (8000, 3200));
         assert_eq!(super::stripe_rate_control(&crf(12.0), 4.0, 4), (2000, 800));
-        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf(0.0) };
+        let cbr = RustCaptureSettings {
+            video_cbr_mode: true,
+            ..crf(0.0)
+        };
         assert!(super::stripe_rate_control(&cbr, 1.0, 4).1 > 0);
     }
 
@@ -2703,18 +2710,109 @@ mod qp_bound_sweep {
     #[cfg(feature = "gpl")]
     #[test]
     fn x264_crf_bounds_a_key_frame_by_its_vbv() {
-        const VBV_KBIT: i32 = 200;
+        const VBV_KBIT: i32 = 1500;
         let key = |vbv_kbit: i32| {
-            let mut enc = H264EncoderWrapper::new(W as i32, H as i32, 12, false, 60.0, 4, false, 8000, vbv_kbit, 0, 0)
-                .expect("x264 init");
+            let mut enc = H264EncoderWrapper::new(
+                W as i32, H as i32, 12, false, 60.0, 4, false, 8000, vbv_kbit, 0, 0,
+            )
+            .expect("x264 init");
             let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
             let mut out = Vec::new();
-            assert!(enc.encode_with_headers(&text_luma(0), &u, &v, W as i32, (W / 2) as i32, (W / 2) as i32, 0, 0, true, true, &mut out));
+            assert!(enc.encode_with_headers(
+                &text_luma(0),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                0,
+                0,
+                true,
+                true,
+                &mut out
+            ));
             out.len() * 8
         };
         let (uncapped, capped) = (key(0), key(VBV_KBIT));
-        assert!(capped <= VBV_KBIT as usize * 1000, "a {capped}-bit key frame overflows the {VBV_KBIT} kbit buffer");
-        assert!(uncapped > 2 * capped, "the uncapped key frame ({uncapped} bits) is not the rate factor's own");
+        assert!(
+            capped <= VBV_KBIT as usize * 1000,
+            "a {capped}-bit key frame overflows the {VBV_KBIT} kbit buffer"
+        );
+        assert!(
+            uncapped > 2 * capped,
+            "the uncapped key frame ({uncapped} bits) is not the rate factor's own"
+        );
+    }
+
+    /// A capped CRF session its content starves overshoots the buffer rather than code past
+    /// quantizer 51, where x264 forces skips that leave rows frozen on old content.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_capped_crf_codes_no_quantizer_past_51() {
+        let mut enc =
+            H264EncoderWrapper::new(W as i32, H as i32, 23, false, 60.0, 4, false, 300, 10, 0, 0)
+                .expect("x264 init");
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut worst = 0;
+        for i in 0..FRAMES {
+            let mut out = Vec::new();
+            enc.encode_with_headers(
+                &text_luma(i),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                i as u16,
+                0,
+                i == 0,
+                true,
+                &mut out,
+            );
+            worst = worst.max(enc.last_qp().unwrap_or(0));
+        }
+        assert!(worst <= 51, "a starved capped CRF coded quantizer {worst}");
+    }
+
+    /// A CRF session capped or uncapped live codes its next key frame by the new setting.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_crf_takes_a_cap_set_or_lifted_live() {
+        const VBV_KBIT: i32 = 1500;
+        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let mut enc =
+            H264EncoderWrapper::new(W as i32, H as i32, 12, false, 60.0, 4, false, 8000, 0, 0, 0)
+                .expect("x264 init");
+        let key = |enc: &mut H264EncoderWrapper| {
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(
+                &text_luma(0),
+                &u,
+                &v,
+                W as i32,
+                (W / 2) as i32,
+                (W / 2) as i32,
+                0,
+                0,
+                true,
+                true,
+                &mut out
+            ));
+            out.len() * 8
+        };
+        let uncapped = key(&mut enc);
+        enc.reconfigure_rate(8000, VBV_KBIT, 60.0);
+        let capped = key(&mut enc);
+        enc.reconfigure_rate(8000, 0, 60.0);
+        let lifted = key(&mut enc);
+        assert!(
+            capped <= VBV_KBIT as usize * 1000,
+            "a {capped}-bit key frame after capping overflows the {VBV_KBIT} kbit buffer ({uncapped} bits before)"
+        );
+        assert!(
+            lifted > 2 * capped,
+            "the key frame after lifting the cap ({lifted} bits) is still capped"
+        );
     }
 
     /// A frame a client lost is left out of the predictions: the next frame predicts from the
