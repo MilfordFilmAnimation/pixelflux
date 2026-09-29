@@ -7388,6 +7388,8 @@ struct CaptureSettings {
     video_paintover_burst_frames: i32,
     #[pyo3(get, set)]
     video_fullcolor: bool,
+    /// H.264 only: encode whole frames instead of stripes. Other video codecs are always
+    /// full-frame, and so is a hardware H.264 session.
     #[pyo3(get, set)]
     video_fullframe: bool,
     #[pyo3(get, set)]
@@ -7418,6 +7420,8 @@ struct CaptureSettings {
     video_max_qp: i32,
     #[pyo3(get, set)]
     auto_adjust_screen_capture_size: bool,
+    /// Emit the bare encoded payload without the wire header; with H.264 and `video_fullframe`
+    /// each frame is one Annex-B access unit and its metadata is on the `StripeFrame` attributes.
     #[pyo3(get, set)]
     omit_stripe_headers: bool,
     #[pyo3(get, set)]

@@ -284,6 +284,27 @@ settings.cursor_size_cap = 128                     # Cap out-of-band hardware-cu
 settings.watermark_location_enum = 4 
 ```
 
+### Raw H.264 Annex-B Output (WebCodecs)
+
+Two settings together make an H.264 capture emit bare Annex-B access units, the form a WebCodecs `VideoDecoder` takes:
+
+```python
+settings.codec = "h264"
+settings.video_fullframe = True
+settings.omit_stripe_headers = True
+```
+
+- **`omit_stripe_headers`** drops the 12-byte header (`VIDEO_HEADER_LEN`) that otherwise precedes each payload: the tag, the codec and frame kind, the frame id, the stripe's top row, its width and height, and the id of the frame it predicts from. The payload is the encoder's bitstream and nothing else, and the metadata is carried only on the `StripeFrame` attributes (`frame_id`, `stripe_y_start`, `stripe_height`, `data_type`, `reference_frame_id`). Every encoder reads it, software, NVENC, VA-API, V4L2, and Tegra alike, and it applies to JPEG stripes as well, which then arrive as bare JFIF.
+- **`video_fullframe`** makes an H.264 capture encode whole frames instead of horizontal stripes. Without it a software H.264 session cuts the picture into stripes, and each stripe is an independent stream that only covers its own rows. The other video codecs are always full-frame, and a hardware H.264 encoder is always full-frame whatever this is set to.
+- **Together** each callback delivers one complete access unit of one picture, start-code prefixed (`b_annexb` in libx264), with `stripe_y_start` 0 and the full capture size.
+
+Points to code against:
+
+- The frame kind is not in the bytes. A key frame is recognizable by `reference_frame_id == -1` or by its IDR NAL unit (type 5), and the sequence and picture parameter sets are repeated on every key frame, so a decoder configured from any key frame can start there.
+- The GOP is infinite unless `keyframe_interval_s` is positive, so a key frame comes only when asked: at the start, from `capture.request_idr_frame()`, or from the cleanup and recovery policies. A client that joins late, reconnects, or resets its decoder must call `request_idr_frame()`, and a decoder must not be fed delta frames before the key frame that follows.
+- A software encoder that does not honor the request still labels the frame by what it produced, so decide on the frame that arrives rather than on the request.
+- NVENC is configured without access unit delimiters, so a unit begins at its first parameter-set or slice NAL unit.
+
 ### Input Injection (Wayland Only)
 
 In Wayland mode, `pixelflux` acts as the compositor. You cannot use external tools like `xdotool`. Instead, use the input injection methods provided by the `ScreenCapture` instance:
