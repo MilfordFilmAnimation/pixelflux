@@ -327,9 +327,11 @@ pub struct RustCaptureSettings {
     pub omit_stripe_headers: bool,
     pub video_cbr_mode: bool,
     pub video_bitrate_kbps: i32,
-    /// CBR VBV/HRD size as a multiple of one frame's bit budget (bitrate/framerate), so it
-    /// rescales with live bitrate/fps changes. `<= 0` selects the policy default: 1.5 on an
-    /// infinite GOP, 3 when scheduled keyframes are enabled.
+    /// VBV size as a multiple of one frame's bit budget (bitrate/framerate), so it rescales with
+    /// live bitrate/fps changes. Under CBR, `<= 0` selects the policy default: 1.5 on an
+    /// infinite GOP, 3 when scheduled keyframes are enabled. Under CRF, a positive value caps
+    /// the software x264 session at a peak of `video_bitrate_kbps` with this buffer, and `<= 0`
+    /// leaves it uncapped.
     pub video_vbv_multiplier: f64,
     /// Seconds between scheduled recovery keyframes; `<= 0` keeps the GOP infinite
     /// (IDRs only on demand: client join / reset, recorder connect).

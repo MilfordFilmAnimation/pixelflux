@@ -291,7 +291,10 @@ impl H264EncoderWrapper {
     ///      own default admits out-of-spec quantizers above it that exist only to force skips
     ///      when the VBV underflows, which leaves rows of the picture frozen on old content. A
     ///      budget the content cannot meet overshoots instead, as NVENC and libvpx do.
-    ///    - **CRF** (default): constant-quality with `f_rf_constant = crf`.
+    ///    - **CRF** (default): constant-quality with `f_rf_constant = crf`. A positive
+    ///      `vbv_kbit` caps it with a VBV of that buffer at a peak of `bitrate_kbps` (x264's
+    ///      capped CRF): the rate factor still picks the quantizer and the VBV bounds the size
+    ///      of a frame, a key frame above all. `vbv_kbit == 0` leaves it uncapped.
     /// 4. **Color**: I444 at full range or I420 at limited range, a VUI declaring that range
     ///    with the BT.709 primaries, transfer, and matrix the sRGB source and the conversion
     ///    carry, and the matching `high444` / `baseline` profile.
@@ -404,6 +407,10 @@ impl H264EncoderWrapper {
             } else {
                 param.rc.i_rc_method = x264_sys::X264_RC_CRF as i32;
                 param.rc.f_rf_constant = crf as f32;
+                if vbv_kbit > 0 {
+                    param.rc.i_vbv_max_bitrate = bitrate_kbps.saturating_abs();
+                    param.rc.i_vbv_buffer_size = vbv_kbit;
+                }
             }
             param.i_csp = if is_i444 {
                 x264_sys::X264_CSP_I444
@@ -477,11 +484,12 @@ impl H264EncoderWrapper {
         }
     }
 
-    /// Retune bitrate/VBV (CBR only) and/or frame rate to match the live settings, structured to
-    /// be called unconditionally every frame so the caller need not track what changed itself.
+    /// Retune bitrate/VBV (CBR, or a capped CRF) and/or frame rate to match the live settings,
+    /// structured to be called unconditionally every frame so the caller need not track what
+    /// changed itself.
     ///
     /// Because `encode_cpu` fires it on every frame, it first computes the would-be values and bails
-    /// before touching the encoder when neither the CBR bitrate/VBV nor the frame rate differs from
+    /// before touching the encoder when neither the bitrate/VBV nor the frame rate differs from
     /// what is live — that self-gating keeps a per-frame call nearly free.
     ///
     /// A frame-rate change reopens the encoder rather than reconfiguring it: `x264_encoder_reconfig`
@@ -489,13 +497,14 @@ impl H264EncoderWrapper {
     /// left at its old rate ships roughly half the configured bitrate once fps halves. The reopen
     /// carries the new bitrate/VBV too, and a fresh session emits an IDR on its first frame; a failed
     /// reopen keeps the working session instead of nulling the handle. A bitrate/VBV-only change
-    /// (CBR) stays a live `x264_encoder_reconfig`, and the tracked mirror advances only on success so
+    /// stays a live `x264_encoder_reconfig`, and the tracked mirror advances only on success so
     /// it cannot drift from the encoder's real state.
     pub fn reconfigure_rate(&mut self, bitrate_kbps: i32, vbv_kbit: i32, fps: f64) {
         let bk = bitrate_kbps.saturating_abs();
         let new_fps = x264_frame_rate(fps);
+        let vbv_applies = self.is_cbr || vbv_kbit > 0;
         let rate_changed =
-            self.is_cbr && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
+            vbv_applies && (self.current_bitrate != bk || self.current_vbv != vbv_kbit);
         let fps_changed = self.current_fps != new_fps;
         if !rate_changed && !fps_changed {
             return;
@@ -522,8 +531,10 @@ impl H264EncoderWrapper {
             let mut param: x264_sys::x264_param_t = std::mem::zeroed();
             x264_sys::x264_encoder_parameters(self.encoder, &mut param);
             param.rc.i_bitrate = bk;
-            param.rc.i_vbv_max_bitrate = bk;
-            param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
+            if vbv_applies {
+                param.rc.i_vbv_max_bitrate = bk;
+                param.rc.i_vbv_buffer_size = vbv_kbit.max(1);
+            }
             if x264_sys::x264_encoder_reconfig(self.encoder, &mut param) == 0 {
                 self.current_bitrate = bk;
                 self.current_vbv = vbv_kbit;
@@ -1633,8 +1644,9 @@ pub fn stripe_count(height: i32, codec: Codec, fullframe: bool) -> usize {
         .max(1)
 }
 
-/// Split the configured CBR budget across the stripes carrying it, returning the
-/// `(bitrate_kbps, vbv_kbit)` each stripe's encoder is programmed with.
+/// Split the configured rate budget across the stripes carrying it, returning the
+/// `(bitrate_kbps, vbv_kbit)` each stripe's encoder is programmed with: the CBR target, or the
+/// peak of a CRF a positive `video_vbv_multiplier` caps. An uncapped CRF gets a buffer of 0.
 ///
 /// Every stripe runs its own encoder and rate control is per instance, metered against the
 /// declared frame rate rather than against the frames that stripe was actually sent. So the
@@ -1650,6 +1662,9 @@ fn stripe_rate_control(
 ) -> (i32, i32) {
     let divisor = (carrying.round().max(1.0) as usize).min(n_stripes.max(1)) as i32;
     let bitrate = (settings.video_bitrate_kbps / divisor).max(1);
+    if !settings.video_cbr_mode && settings.video_vbv_multiplier <= 0.0 {
+        return (bitrate, 0);
+    }
     let vbv = (crate::encoders::vbv_bits(
         (bitrate as u32).saturating_mul(1000),
         settings.target_fps,
@@ -1771,6 +1786,24 @@ mod tests {
                 "each stripe's buffer is its share of the whole-screen one: {share}x8 vs {whole}"
             );
         }
+    }
+
+    /// A CRF stripe is capped only where a VBV multiplier asks for it, with the whole-screen
+    /// buffer that multiplier names at the configured rate as its peak; CBR always has one.
+    #[test]
+    fn crf_stripes_take_a_vbv_only_where_a_multiplier_asks() {
+        use crate::RustCaptureSettings;
+        let crf = |mult| RustCaptureSettings {
+            video_bitrate_kbps: 8000,
+            video_vbv_multiplier: mult,
+            target_fps: 30.0,
+            ..Default::default()
+        };
+        assert_eq!(super::stripe_rate_control(&crf(0.0), 1.0, 4), (8000, 0));
+        assert_eq!(super::stripe_rate_control(&crf(12.0), 1.0, 4), (8000, 3200));
+        assert_eq!(super::stripe_rate_control(&crf(12.0), 4.0, 4), (2000, 800));
+        let cbr = RustCaptureSettings { video_cbr_mode: true, ..crf(0.0) };
+        assert!(super::stripe_rate_control(&cbr, 1.0, 4).1 > 0);
     }
 
     /// The divisor follows the screen rather than the configuration: full-screen motion moves
@@ -2663,6 +2696,25 @@ mod qp_bound_sweep {
             ));
             assert_no_reorder(&out, &format!("x264 fullcolor {fullcolor} cbr {cbr}"));
         }
+    }
+
+    /// A CRF session given a VBV codes its key frame within the buffer, where the same session
+    /// without one codes it at whatever size the rate factor asks.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn x264_crf_bounds_a_key_frame_by_its_vbv() {
+        const VBV_KBIT: i32 = 200;
+        let key = |vbv_kbit: i32| {
+            let mut enc = H264EncoderWrapper::new(W as i32, H as i32, 12, false, 60.0, 4, false, 8000, vbv_kbit, 0, 0)
+                .expect("x264 init");
+            let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+            let mut out = Vec::new();
+            assert!(enc.encode_with_headers(&text_luma(0), &u, &v, W as i32, (W / 2) as i32, (W / 2) as i32, 0, 0, true, true, &mut out));
+            out.len() * 8
+        };
+        let (uncapped, capped) = (key(0), key(VBV_KBIT));
+        assert!(capped <= VBV_KBIT as usize * 1000, "a {capped}-bit key frame overflows the {VBV_KBIT} kbit buffer");
+        assert!(uncapped > 2 * capped, "the uncapped key frame ({uncapped} bits) is not the rate factor's own");
     }
 
     /// A frame a client lost is left out of the predictions: the next frame predicts from the

@@ -246,7 +246,7 @@ settings.video_streaming_mode = False              # Bypass all VNC logic and wo
 settings.keyframe_interval_s = 0.0                   # Periodic keyframe interval in seconds (0 = keyframes only on demand/paint-over)
 settings.video_cbr_mode = False                    # Switches to CBR mode and ignores CRF value. Used in conjunction with video_bitrate_kbps.
 settings.video_bitrate_kbps = 4000                 # Target bitrate for CBR mode. Required when video_cbr_mode is enabled.
-settings.video_vbv_multiplier = 1.5                # Optional CBR VBV size as a multiple of one frame's bit budget (0 = auto: 1.5, or 3 with periodic keyframes).
+settings.video_vbv_multiplier = 1.5                # Optional VBV size as a multiple of one frame's bit budget. CBR: 0 = auto (1.5, or 3 with periodic keyframes). CRF: a positive value caps software x264 at a peak of video_bitrate_kbps (capped CRF); 0 = uncapped.
 settings.auto_adjust_screen_capture_size = True   # Allow pixelflux to adjust its capture width and height.
 
 # --- Hardware Acceleration ---
