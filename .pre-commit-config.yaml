@@ -9,6 +9,20 @@
 # clippy`); rustfmt reads rustfmt.toml, and clippy builds the crate, so it needs
 # the native libraries a test build does.
 repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      # Rule selection lives in pyproject.toml
+      - id: ruff-check
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      # Skip list and dictionary exceptions live in .codespellrc, and they only
+      # apply to paths codespell walks itself
+      - id: codespell
+        pass_filenames: false
+
   - repo: local
     hooks:
       - id: rustfmt

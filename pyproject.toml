@@ -239,3 +239,11 @@ repair-wheel-command = """
     --exclude libxcb-shm.so.0 \
     --exclude libxcb-render.so.0
 """
+
+# Ruff runs as a bug-finder, not a style enforcer: only rule families that flag
+# defects (pyflakes, bugbear, pycodestyle errors, pylint errors) are enabled.
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "B", "PLE"]

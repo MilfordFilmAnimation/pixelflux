@@ -15,7 +15,7 @@ where a name belongs to something upstream, such as a Wayland `Cancelled` event 
 
 Empirical testing is possible for everything here, including implementation, auditing, validation, and verification,
 and every change is validated before it is reported. `cargo test --lib` in both feature configurations and
-`pre-commit run --all-files` (rustfmt and clippy) are the floor;
+`pre-commit run --all-files` (rustfmt, clippy, ruff, and codespell) are the floor;
 the `#[ignore]`d `gpu_` tests need an NVIDIA GPU (`cargo test gpu_ -- --ignored --nocapture --test-threads=1`,
 serially, since concurrent session builds fault in the driver), the `gpu_dmabuf_` ones a render node as well, and the
 `gpu_bench_` ones print measurements to quote rather than assert. The VA-API surface probe (`vpp_sw_formats`)
