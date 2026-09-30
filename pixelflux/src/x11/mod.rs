@@ -40,9 +40,9 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::damage::{ConnectionExt as DamageExt, Damage, ReportLevel};
 use x11rb::protocol::shm::ConnectionExt as ShmExt;
-use x11rb::protocol::xfixes::ConnectionExt as XfixesExt;
+use x11rb::protocol::xfixes::{ConnectionExt as XfixesExt, Region};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as XprotoExt, ImageFormat, PropMode, Window,
+    Atom, AtomEnum, ConnectionExt as XprotoExt, ImageFormat, PropMode, Rectangle, Window,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperExt;
@@ -375,6 +375,9 @@ fn try_rebuild_channel(
 /// is subtracted, which is what [`Self::clear`] does to re-arm the next report.
 struct RootDamage {
     id: Damage,
+    /// The XFixes region [`Self::take`] moves a report's damage into, to read where the root
+    /// changed; None where the server's XFixes has no regions.
+    parts: Option<Region>,
     /// A report read off the connection and not yet acted on. Latched here because reading the
     /// connection is what notices one, and that happens well before the frame it wakes.
     reported: Cell<bool>,
@@ -388,8 +391,24 @@ impl RootDamage {
             .ok()?
             .check()
             .ok()?;
+        let parts = (|| {
+            if conn
+                .xfixes_query_version(2, 0)
+                .ok()?
+                .reply()
+                .ok()?
+                .major_version
+                < 2
+            {
+                return None;
+            }
+            let parts = conn.generate_id().ok()?;
+            conn.xfixes_create_region(parts, &[]).ok()?.check().ok()?;
+            Some(parts)
+        })();
         Some(Self {
             id,
+            parts,
             reported: Cell::new(false),
         })
     }
@@ -417,6 +436,48 @@ impl RootDamage {
         let _ = conn.damage_subtract(self.id, x11rb::NONE, x11rb::NONE);
         let _ = conn.flush();
     }
+
+    /// [`Self::clear`], saying where the root changed: the damaged rectangles, empty where
+    /// nothing was reported, None where the server cannot say.
+    fn take(&self, conn: &RustConnection) -> Option<Vec<Rectangle>> {
+        let Some(parts) = self.parts else {
+            self.clear(conn);
+            return None;
+        };
+        if !self.reported(conn) {
+            return Some(Vec::new());
+        }
+        self.reported.set(false);
+        conn.damage_subtract(self.id, x11rb::NONE, parts).ok()?;
+        Some(
+            conn.xfixes_fetch_region(parts)
+                .ok()?
+                .reply()
+                .ok()?
+                .rectangles,
+        )
+    }
+}
+
+/// The share of the captured area at (`x`, `y`), `width` x `height`, that the root's damaged
+/// `rects` cover.
+fn captured_damage(
+    rects: &[Rectangle],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> crate::pipeline::Damage {
+    let local: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> = rects
+        .iter()
+        .map(|r| {
+            smithay::utils::Rectangle::new(
+                (i32::from(r.x) - x, i32::from(r.y) - y).into(),
+                (i32::from(r.width), i32::from(r.height)).into(),
+            )
+        })
+        .collect();
+    crate::pipeline::Damage::of_rects(&local, width, height)
 }
 
 /// Wait for the connection to carry something, for at most `timeout`.
@@ -1791,15 +1852,20 @@ mod cursor_tests {
 
 #[cfg(test)]
 mod damage_tests {
-    //! Needs an X server of its own, quiet enough that nothing else repaints it:
-    //! `DISPLAY=:N cargo test x11_damage -- --ignored --nocapture`.
+    //! The `x11_damage` tests need an X server of their own, quiet enough that nothing else
+    //! repaints it: `DISPLAY=:N cargo test x11_damage -- --ignored --nocapture`.
 
     use super::*;
-    use x11rb::protocol::xproto::{CreateGCAux, Rectangle};
+    use crate::pipeline::Damage as Changed;
+    use x11rb::protocol::xproto::CreateGCAux;
 
     const PERIOD: Duration = Duration::from_millis(400);
 
     fn repaint(color: u32) {
+        fill(color, 0, 0, 64, 64);
+    }
+
+    fn fill(color: u32, x: i16, y: i16, width: u16, height: u16) {
         let (conn, screen) = x11rb::connect(None).expect("connect");
         let root = conn.setup().roots[screen].root;
         let gc = conn.generate_id().expect("id");
@@ -1809,14 +1875,86 @@ mod damage_tests {
             root,
             gc,
             &[Rectangle {
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
+                x,
+                y,
+                width,
+                height,
             }],
         )
         .expect("fill");
         conn.flush().expect("flush");
+    }
+
+    /// The root's damaged rectangles read in the captured area's own coordinates, clipped to it.
+    #[test]
+    fn the_root_damage_reads_as_the_captured_share() {
+        let caret = [Rectangle {
+            x: 110,
+            y: 60,
+            width: 2,
+            height: 20,
+        }];
+        assert_eq!(
+            captured_damage(&caret, 100, 50, 200, 100),
+            Changed::Area(0.002)
+        );
+        assert_eq!(
+            captured_damage(&caret, 120, 50, 200, 100),
+            Changed::None,
+            "left of the captured area"
+        );
+        let wide = [Rectangle {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        }];
+        assert_eq!(
+            captured_damage(&wide, 100, 50, 200, 100),
+            Changed::Area(1.0)
+        );
+        assert_eq!(captured_damage(&[], 0, 0, 200, 100), Changed::None);
+    }
+
+    /// A caret-sized repaint reads as that small a share of the screen, and one outside the
+    /// captured area as none of it.
+    #[test]
+    #[ignore]
+    fn x11_damage_says_where_the_root_changed() {
+        let (conn, screen) = x11rb::connect(None).expect("connect");
+        let root = conn.setup().roots[screen].root;
+        let (w, h) = (
+            i32::from(conn.setup().roots[screen].width_in_pixels),
+            i32::from(conn.setup().roots[screen].height_in_pixels),
+        );
+        let damage = RootDamage::create(&conn, root).expect("the server carries DAMAGE");
+        damage.clear(&conn);
+        assert!(
+            damage.take(&conn).is_some_and(|rects| rects.is_empty()),
+            "nothing reported yet"
+        );
+        let mut pace = FramePace::default();
+        pace.ticked(TickTrigger::Timer, PERIOD, Instant::now(), false);
+        fill(0x00ff_ffff, 300, 200, 2, 20);
+        assert_eq!(
+            wait_for_frame(&conn, Some(&damage), &pace, PERIOD),
+            TickTrigger::Damage
+        );
+        let asked = Instant::now();
+        let rects = damage.take(&conn).expect("the server says where");
+        let took = asked.elapsed();
+        let caret = captured_damage(&rects, 0, 0, w, h);
+        assert_eq!(
+            caret,
+            Changed::Area((40.0 / (w * h) as f64) as f32),
+            "{rects:?}"
+        );
+        assert_eq!(
+            captured_damage(&rects, 400, 0, w - 400, h),
+            Changed::None,
+            "right of the caret"
+        );
+        println!("a 2x20 caret on a {w}x{h} root reads as {caret:?}, read in {took:?}");
     }
 
     /// A screen that changes mid-period publishes the change then, while a screen that does not

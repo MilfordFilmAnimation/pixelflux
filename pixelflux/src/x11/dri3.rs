@@ -23,10 +23,11 @@
 //! Nothing here reads pixels, so what stands in for the XShm path's per-stripe content hashing is
 //! the Damage extension on the root window: the server's report is both what says a frame is worth
 //! encoding and what ends the wait for one, within the pacing [`crate::pace`] keeps, so a change is
-//! published as it lands rather than on the next tick. The XFixes cursor is composited by the
-//! server through Render, on the GPU, so the `capture_cursor` overlay costs no readback either; the
-//! server keeps its own software cursor out of a copy from the screen, so the cursor is never drawn
-//! twice.
+//! published as it lands rather than on the next tick. Its region says how much changed, so a
+//! blinking caret stays a small change and a still screen is cleaned up around it. The XFixes
+//! cursor is composited by the server through Render, on the GPU, so the `capture_cursor` overlay
+//! costs no readback either; the server keeps its own software cursor out of a copy from the
+//! screen, so the cursor is never drawn twice.
 //!
 //! Everything that can be checked is checked before a frame is delivered, and the path is
 //! declined otherwise: a codec no hardware engine serves, software encoding, a server without
@@ -54,8 +55,8 @@ use x11rb::protocol::xproto::{self, ConnectionExt as XprotoExt, ImageFormat, Ima
 use x11rb::rust_connection::RustConnection;
 
 use super::{
-    Controls, RootDamage, clamp_offset, cursor_image_origin, require_32bpp, resolve_dims,
-    wait_for_frame,
+    Controls, RootDamage, captured_damage, clamp_offset, cursor_image_origin, require_32bpp,
+    resolve_dims, wait_for_frame,
 };
 use crate::RustCaptureSettings;
 use crate::encoders::software::{EncodedStripe, FrameTiming, StripeState};
@@ -964,7 +965,12 @@ where
         // The report is spent where it is read, so a change racing this frame wakes the next one
         // rather than being cleared along with what the blit captured.
         let is_dirty = trigger == TickTrigger::Damage || first_frame;
-        gpu.x.damage.clear(&gpu.x.conn);
+        // Where the root changed, None where the server cannot say or the frame is the first.
+        let changed = gpu
+            .x
+            .damage
+            .take(&gpu.x.conn)
+            .filter(|rects| !first_frame && !rects.is_empty());
         first_frame = false;
         damaged_frames += is_dirty as u64;
         if controls.stop.load(Ordering::Relaxed) {
@@ -1062,10 +1068,16 @@ where
             &mut state,
             &gpu.settings,
             frame_counter,
-            if is_dirty {
-                Damage::Unknown
-            } else {
-                Damage::None
+            match changed {
+                _ if !is_dirty => Damage::None,
+                Some(rects) => captured_damage(
+                    &rects,
+                    gpu.cap_x.into(),
+                    gpu.cap_y.into(),
+                    gpu.settings.width,
+                    gpu.settings.height,
+                ),
+                None => Damage::Unknown,
             },
             false,
             pending_force_idr,
