@@ -1409,7 +1409,9 @@ impl Drop for NvencEncoder {
 /// take that level whatever the picture. The driver holds every codec's level to its bitrate
 /// ceiling as well, refusing a CBR target past it as an invalid level, so a declared rate
 /// raises the level to the first that admits it; `hevc_high_tier` names the HEVC tier the
-/// session declares, whose ceiling is the one that applies.
+/// session declares, whose ceiling is the one that applies. An HEVC picture is counted in
+/// whole 32-pixel coding tree blocks, NVENC's, as the driver counts it: 1280x720 at 144 fps
+/// is inside 4.1 by its own samples, and the driver refuses it as 4.1.
 fn nvenc_level(
     codec: Codec,
     width: u32,
@@ -1426,7 +1428,13 @@ fn nvenc_level(
             fps,
             bitrate_bps,
         ),
-        Codec::H265 => h265_level(width, height, fps, bitrate_bps, hevc_high_tier),
+        Codec::H265 => h265_level(
+            width.next_multiple_of(32),
+            height.next_multiple_of(32),
+            fps,
+            bitrate_bps,
+            hevc_high_tier,
+        ),
         _ => h264_level(width, height, fps, bitrate_bps),
     }
 }
@@ -7258,6 +7266,9 @@ mod decision_tests {
         // The current level rises with the picture, back to the headroom level at 4K.
         assert_eq!(nvenc_level(Codec::H264, 3840, 2160, 60, 0, true), 52);
         assert_eq!(nvenc_level(Codec::H265, 3840, 2160, 60, 0, true), 153);
+        // A picture counts in whole coding tree blocks: 720p at 144 fps is 4.1 by its samples.
+        assert_eq!(h265_level(1280, 720, 144, 0, true), 123);
+        assert_eq!(nvenc_level(Codec::H265, 1280, 720, 144, 0, true), 150);
         // The current level admits the current picture on every codec.
         for (w, h) in [(1280u32, 720u32), (1920, 1080), (3840, 2160)] {
             let macroblocks = (w as u64 / 16) * (h as u64 / 16);
