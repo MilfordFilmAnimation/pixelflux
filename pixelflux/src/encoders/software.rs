@@ -2923,7 +2923,7 @@ mod qp_bound_sweep {
 
     /// A loss covering the frame carrying `frame_num` 0 is answered with a key frame: predicted
     /// past, the frames after it reach FFmpeg's decoder as a gap across the counter's wrap, and
-    /// it withholds every picture from then on.
+    /// it drops about a range of pictures after it.
     #[test]
     #[cfg(feature = "gpl")]
     fn x264_answers_a_loss_at_the_frame_num_wrap_with_a_key_frame() {
