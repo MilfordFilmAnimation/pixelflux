@@ -457,7 +457,7 @@ fn wait_for_frame(
     };
     // Nothing may be published before the budget allows it, so the report of a change that
     // lands earlier is left queued until then rather than read and cleared.
-    sleep_until(pace.pull_at(period, now).min(due));
+    sleep_until(pace.pull_at(TickTrigger::Damage, period, now).min(due));
     loop {
         if damage.reported(conn) {
             return TickTrigger::Damage;

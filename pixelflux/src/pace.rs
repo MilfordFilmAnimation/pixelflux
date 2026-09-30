@@ -3,10 +3,11 @@
 //!
 //! A capture renders on its frame timer, and something that actually happened -- input the
 //! compositor processed, a frame a host delivered, a region the X server reports damaged --
-//! may render one ahead of that timer. The pull spends from a budget that refills slowly, so a
-//! screen changing faster than the cadence raises the output rate by no more than the refill
-//! while a change arriving on its own schedule is published as it lands rather than up to a
-//! period later.
+//! may render one ahead of that timer. Input's pull spends from a budget that refills slowly,
+//! so input faster than the cadence raises the output rate by no more than the refill; a
+//! change the screen or a host reports spends only what its own late frames paid back, so it
+//! moves the cadence onto the frames it reports without raising the rate. Either way a change
+//! arriving on its own schedule is published as it lands rather than up to a period later.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,14 @@ impl TickTrigger {
     fn pulls_forward(self) -> bool {
         !matches!(self, TickTrigger::Timer)
     }
+
+    /// Whether the time this trigger may pull a frame forward by refills with wall time: fresh
+    /// input's, whose latency the pull is for. A screen that changes faster than the cadence, a
+    /// video or an application rendering unsynced, would otherwise raise the output rate by the
+    /// refill for as long as it runs.
+    fn refills(self) -> bool {
+        matches!(self, TickTrigger::Input)
+    }
 }
 
 /// The share of a frame period the timer's tick may run early by, absorbing its wakeup jitter.
@@ -33,9 +42,9 @@ const TIMER_TICK_MIN_FRACTION: f64 = 0.9;
 /// The share of a frame period that has to pass before input or a host frame may pull the
 /// next frame forward.
 const INPUT_TICK_MIN_FRACTION: f64 = 0.5;
-/// The share of wall time that accrues as time a pull may bring frames forward by. A frame
-/// pulled forward by some time is one the cadence earns that much later, so the sustained
-/// rate can rise above the configured one by at most this share.
+/// The share of wall time that accrues as time an input pull may bring frames forward by. A
+/// frame pulled forward by some time is one the cadence earns that much later, so the
+/// sustained rate can rise above the configured one by at most this share.
 const INPUT_BORROW_REFILL: f64 = 1.0 / 32.0;
 /// The share of a frame period the timer waits beyond a whole one after an input frame while
 /// the input paces itself at the cadence, so input arriving a little slower than the timer
@@ -53,13 +62,15 @@ const PACED_INPUT_MAX_FRACTION: f64 = 1.25;
 ///
 /// The shared frame timer fires for the earliest due capture; each capture renders on it once
 /// its own period has (nearly) passed. Fresh input may also render a frame, and so may a frame
-/// the host compositor delivers under host capture: a whole period after the last one the pull
-/// renders at once, and from half a period on it brings the frame forward, spending the time it
-/// comes early by from a budget that refills at `INPUT_BORROW_REFILL`, is paid back by a pull
-/// that arrives late, and holds half a period at most. A pointer moving at the client's refresh
-/// rate is thus captured as it lands rather than up to a period later, and a host's frames are
-/// published as they arrive rather than on the next timer tick, while either at a rate the
-/// cadence cannot follow raises the output rate by no more than the refill.
+/// the host compositor delivers under host capture or a region the X server reports damaged:
+/// a whole period after the last one the pull renders at once, and from half a period on it
+/// brings the frame forward, spending the time it comes early by from a budget that is paid
+/// back by a pull that arrives late and holds half a period at most. Input's budget also
+/// refills at `INPUT_BORROW_REFILL`; the others' does not (`TickTrigger::refills`). A pointer
+/// moving at the client's refresh rate is thus captured as it lands rather than up to a period
+/// later, and a host's or an application's frames are published as they arrive rather than on
+/// the next timer tick, while input at a rate the cadence cannot follow raises the output rate
+/// by no more than the refill, and frames reported faster than the cadence not at all.
 ///
 /// After an input frame, while the input's own spacing sits at the cadence
 /// (`PACED_INPUT_MIN_FRACTION` to `PACED_INPUT_MAX_FRACTION` of a period), the timer stands
@@ -82,8 +93,12 @@ pub struct FramePace {
     /// Whether that frame was input's, with the input pacing itself at the cadence, so the
     /// timer stands back for the next move.
     last_paced: bool,
-    /// The budget left when it was last spent, and when that was; a fresh capture holds the cap.
+    /// Input's budget left when it was last spent, and when that was; a fresh capture holds the
+    /// cap.
     borrow_budget: Option<(Duration, Instant)>,
+    /// The budget host frames and damage pull from, which refills only from their own late
+    /// frames; a fresh capture holds the cap.
+    phase_budget: Option<Duration>,
     /// Where the timer was held off to by a tick that rendered nothing (host capture with no
     /// fresh frame), so it neither spins nor counts against the next frame.
     deferred_until: Option<Instant>,
@@ -104,7 +119,7 @@ impl FramePace {
         }
         elapsed >= period
             || (elapsed >= period.mul_f64(INPUT_TICK_MIN_FRACTION)
-                && self.budget(period, now) >= period - elapsed)
+                && self.budget(trigger, period, now) >= period - elapsed)
     }
 
     /// Whether input spaced `interval` apart paces itself at the cadence of `period`.
@@ -116,9 +131,12 @@ impl FramePace {
     }
 
     /// Record the frame rendered at `now`. A pull ahead of the period spends the budget by
-    /// what it came early; one behind the period pays back what it came late. `input_paced`
-    /// says whether the input driving the capture paces itself at the cadence
-    /// (`Self::input_paced`), which is what lets the timer stand back after an input frame.
+    /// what it came early; one behind the period pays back what it came late. A timer tick
+    /// within half a period of when it was due counts as on time, so a timer that wakes a
+    /// little late, as one does under load, keeps the rate instead of losing what it was late
+    /// by every frame. `input_paced` says whether the input driving the capture paces itself
+    /// at the cadence (`Self::input_paced`), which is what lets the timer stand back after an
+    /// input frame.
     pub fn ticked(
         &mut self,
         trigger: TickTrigger,
@@ -130,17 +148,33 @@ impl FramePace {
             && let Some(last) = self.last_tick
         {
             let elapsed = now.saturating_duration_since(last);
-            let budget = self.budget(period, now);
+            let budget = self.budget(trigger, period, now);
             let left = if elapsed < period {
                 budget.saturating_sub(period - elapsed)
             } else {
                 (budget + (elapsed - period)).min(period.mul_f64(INPUT_TICK_MIN_FRACTION))
             };
-            self.borrow_budget = Some((left, now));
+            if trigger.refills() {
+                self.borrow_budget = Some((left, now));
+            } else {
+                self.phase_budget = Some(left);
+            }
+        }
+        let mut at = now;
+        if trigger == TickTrigger::Timer && self.last_tick.is_some() {
+            let scheduled = self.next_due(period, now);
+            let off = if now > scheduled {
+                now - scheduled
+            } else {
+                scheduled - now
+            };
+            if off < period / 2 {
+                at = scheduled;
+            }
         }
         let damage_paced = trigger == TickTrigger::Damage && self.damage_paced(period, now);
         self.last_paced = (trigger == TickTrigger::Input && input_paced) || damage_paced;
-        self.last_tick = Some(now);
+        self.last_tick = Some(at);
         self.deferred_until = None;
     }
 
@@ -180,9 +214,12 @@ impl FramePace {
             .map(|last| now.saturating_duration_since(last))
     }
 
-    /// How far a pull may bring the next frame forward at `now`.
-    fn budget(&self, period: Duration, now: Instant) -> Duration {
+    /// How far a pull by `trigger` may bring the next frame forward at `now`.
+    fn budget(&self, trigger: TickTrigger, period: Duration, now: Instant) -> Duration {
         let cap = period.mul_f64(INPUT_TICK_MIN_FRACTION);
+        if !trigger.refills() {
+            return self.phase_budget.unwrap_or(cap);
+        }
         match self.borrow_budget {
             None => cap,
             Some((left, at)) => (left
@@ -193,12 +230,12 @@ impl FramePace {
         }
     }
 
-    /// The earliest a trigger that pulls forward may render: a whole period after the last
-    /// frame, less what the budget still allows it to borrow. A caller that waits until then
-    /// need not test `due` again, since the budget only grows with time.
-    pub fn pull_at(&self, period: Duration, now: Instant) -> Instant {
+    /// The earliest `trigger`, one that pulls forward, may render: a whole period after the
+    /// last frame, less what its budget still allows it to borrow. A caller that waits until
+    /// then need not test `due` again, since a budget only grows with time.
+    pub fn pull_at(&self, trigger: TickTrigger, period: Duration, now: Instant) -> Instant {
         self.last_tick.map_or(now, |last| {
-            last + period.saturating_sub(self.budget(period, now))
+            last + period.saturating_sub(self.budget(trigger, period, now))
         })
     }
 
@@ -234,12 +271,12 @@ mod pacing_tests {
         let base = Instant::now();
         let mut pace = FramePace::default();
         assert_eq!(
-            pace.pull_at(PERIOD, base),
+            pace.pull_at(TickTrigger::Damage, PERIOD, base),
             base,
             "a fresh capture waits for nothing"
         );
         pace.ticked(TickTrigger::Timer, PERIOD, base, false);
-        let earliest = pace.pull_at(PERIOD, base);
+        let earliest = pace.pull_at(TickTrigger::Damage, PERIOD, base);
         assert_eq!(earliest, at(base, 10), "a whole budget buys half a period");
         assert!(pace.due(TickTrigger::Damage, PERIOD, earliest));
         assert!(!pace.due(
@@ -249,7 +286,7 @@ mod pacing_tests {
         ));
         pace.ticked(TickTrigger::Damage, PERIOD, earliest, false);
         assert_eq!(
-            pace.pull_at(PERIOD, earliest),
+            pace.pull_at(TickTrigger::Damage, PERIOD, earliest),
             at(base, 30),
             "a spent budget waits the period out"
         );
@@ -495,6 +532,64 @@ mod pacing_tests {
             pace.next_due(PERIOD, at(base, 21)),
             at(base, 41),
             "a rendered frame lifts the hold"
+        );
+    }
+
+    #[test]
+    fn a_timer_that_wakes_late_keeps_its_rate() {
+        let base = Instant::now();
+        let mut pace = FramePace::default();
+        let end = base + Duration::from_secs(2);
+        let (mut frames, mut t) = (0, base);
+        loop {
+            t = pace.next_due(PERIOD, t) + Duration::from_micros(700);
+            if t >= end {
+                break;
+            }
+            assert!(pace.due(TickTrigger::Timer, PERIOD, t));
+            pace.ticked(TickTrigger::Timer, PERIOD, t, false);
+            frames += 1;
+        }
+        assert!(
+            (99..=100).contains(&frames),
+            "{frames} frames in two seconds at 50 fps"
+        );
+    }
+
+    #[test]
+    fn a_stalled_timer_starts_its_cadence_again_rather_than_catch_up() {
+        let base = Instant::now();
+        let mut pace = FramePace::default();
+        pace.ticked(TickTrigger::Timer, PERIOD, base, false);
+        pace.ticked(TickTrigger::Timer, PERIOD, at(base, 75), false);
+        assert_eq!(
+            pace.next_due(PERIOD, at(base, 75)),
+            at(base, 95),
+            "a tick a period and more late counts from when it ran"
+        );
+    }
+
+    /// The X11 capture's wait: the earliest a damage pull may render, else the timer, with a
+    /// change always waiting to be read, as a screen redrawn faster than the cadence has.
+    #[test]
+    fn damage_faster_than_the_period_holds_the_rate() {
+        let base = Instant::now();
+        let mut pace = FramePace::default();
+        let end = base + Duration::from_secs(2);
+        let (mut frames, mut t) = (0, base);
+        loop {
+            let due = pace.next_due(PERIOD, t);
+            t = pace.pull_at(TickTrigger::Damage, PERIOD, t).min(due).max(t);
+            if t >= end {
+                break;
+            }
+            pace.ticked(TickTrigger::Damage, PERIOD, t, false);
+            frames += 1;
+            t += Duration::from_micros(100);
+        }
+        assert!(
+            (100..=101).contains(&frames),
+            "{frames} frames in two seconds at 50 fps"
         );
     }
 
