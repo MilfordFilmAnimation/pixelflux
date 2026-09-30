@@ -8,7 +8,8 @@
 //! text is typed here as a client of whichever compositor the apps live under —
 //! by Computer-Use actions and by selkies over the `type_text_wayland` ABI —
 //! reusing the seat's [`KeymapPolicy`] over a US base: base-reachable characters
-//! press their ordinary keycodes, everything else is overlay-bound. The client
+//! press their ordinary keycodes, everything else is overlay-bound onto the main
+//! block's character keys ([`OVERLAY_KEYCODES`]). The client
 //! is PERSISTENT per socket: the connection, virtual-keyboard device, and its
 //! uploaded keymap live across calls, so a flush re-uploads (and settles) only
 //! when the accumulated keymap actually changed, and key events ride the
@@ -35,11 +36,18 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 use crate::wayland::keymap::{KeymapPolicy, compile_rmlvo};
 use crate::wayland::wlclient::{SyncState, bounded_roundtrip, impl_sync_callback, memfd_with};
 
-/// Overlay keycodes stay under the X11 255 ceiling so XWayland apps under the app
-/// compositor can still receive them (the seat's own overlay sits above 255).
-const OVERLAY_FIRST_XKB: u32 = 150;
-const OVERLAY_LAST_XKB: u32 = 255;
-const OVERLAY_SLOTS: usize = (OVERLAY_LAST_XKB - OVERLAY_FIRST_XKB + 1) as usize;
+/// Overlay keycodes: the main block's character keys, `1` to `/`. A client may take a
+/// keycode for the physical key it names before, or instead of, the keysym the keymap
+/// gives it: Chromium drops a key whose code names no key it knows, and runs its
+/// browser, media, and launcher keys as commands, so a character bound to a spare
+/// vendor keycode is lost, or navigates the page. The character keys are the ones every
+/// layout remaps, and this keymap is the virtual keyboard's own, so rebinding them
+/// leaves the user's keyboard be. Under the X11 255 ceiling for XWayland apps.
+const OVERLAY_KEYCODES: [u32; 47] = [
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+    38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+];
+const OVERLAY_SLOTS: usize = OVERLAY_KEYCODES.len();
 /// wl_keyboard / zwp_virtual_keyboard key events carry evdev codes (xkb - 8).
 const EVDEV_OFFSET: u32 = 8;
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
@@ -106,7 +114,7 @@ fn shared_policy() -> Option<&'static Mutex<KeymapPolicy>> {
     static POLICY: OnceLock<Option<Mutex<KeymapPolicy>>> = OnceLock::new();
     POLICY
         .get_or_init(|| {
-            let mut policy = KeymapPolicy::with_overlay_range(OVERLAY_FIRST_XKB, OVERLAY_LAST_XKB);
+            let mut policy = KeymapPolicy::with_overlay_codes(OVERLAY_KEYCODES.to_vec());
             policy
                 .rebuild_base(us_base_text()?.to_string())
                 .then(|| Mutex::new(policy))

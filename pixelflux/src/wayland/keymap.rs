@@ -41,10 +41,9 @@ pub struct KeymapPolicy {
     by_sym: HashMap<u32, usize>,
     /// Slot recycle order, oldest bind first.
     lru: VecDeque<usize>,
-    /// First overlay keycode (xkb numbering); slot i lives at `overlay_first + i`.
-    overlay_first: u32,
-    /// Overlay slot count.
-    overlay_capacity: usize,
+    /// Overlay keycodes (xkb numbering) in the order free slots take them; slot i lives
+    /// at `overlay_codes[i]`.
+    overlay_codes: Vec<u32>,
     /// Externally-owned overlay binds (keycode -> keysym): selkies resolves its own
     /// keysyms and hands the compositor explicit assignments. Held here so every keymap
     /// the policy emits carries them, and a policy rebuild (computer-use bind, base-layout
@@ -117,22 +116,21 @@ pub fn level0_syms(keymap: &xkb::Keymap) -> HashMap<u32, u32> {
 impl KeymapPolicy {
     /// Placeholder policy before the seat keymap is known; `rebuild_base` fills it in.
     pub fn empty() -> Self {
-        Self::with_overlay_range(OVERLAY_FIRST_KEYCODE, OVERLAY_LAST_KEYCODE)
+        Self::with_overlay_codes((OVERLAY_FIRST_KEYCODE..=OVERLAY_LAST_KEYCODE).collect())
     }
 
-    /// Policy with a custom overlay keycode range (inclusive, xkb numbering). The seat
-    /// uses `empty()`'s above-255 range (pure-Wayland clients resolve it fine); the
-    /// virtual-keyboard client typing into a nested compositor uses a sub-256 range so
-    /// XWayland apps under that compositor stay reachable.
-    pub fn with_overlay_range(first: u32, last: u32) -> Self {
+    /// Policy with its own overlay keycodes (xkb numbering), taken in order. The seat
+    /// uses `empty()`'s above-255 range; the virtual-keyboard client typing into a
+    /// nested compositor uses the main block's character keys, which a base character
+    /// the batch types takes back (`unshadow`).
+    pub fn with_overlay_codes(overlay_codes: Vec<u32>) -> Self {
         Self {
             base_text: String::new(),
             base_map: HashMap::new(),
             slots: Vec::new(),
             by_sym: HashMap::new(),
             lru: VecDeque::new(),
-            overlay_first: first,
-            overlay_capacity: (last - first + 1) as usize,
+            overlay_codes,
             manual_overlay: BTreeMap::new(),
         }
     }
@@ -178,12 +176,48 @@ impl KeymapPolicy {
 
     /// Resolve `keysym` without binding: base first, then an existing overlay slot.
     pub fn resolve(&self, keysym: u32) -> Option<(u32, u32)> {
-        if let Some(&hit) = self.base_map.get(&keysym) {
+        if let Some(&hit) = self.base_map.get(&keysym)
+            && self.slot_at(hit.0).is_none()
+        {
             return Some(hit);
         }
         self.by_sym
             .get(&keysym)
-            .map(|&slot| (self.overlay_first + slot as u32, 0))
+            .map(|&slot| (self.overlay_codes[slot], 0))
+    }
+
+    /// The occupied overlay slot on `keycode`, whose keysym shadows the base's there.
+    fn slot_at(&self, keycode: u32) -> Option<usize> {
+        let slot = self.overlay_codes.iter().position(|&kc| kc == keycode)?;
+        self.slots.get(slot)?.map(|_| slot)
+    }
+
+    /// Unbind every overlay slot shadowing a base keycode the batch presses, unless it
+    /// is held, and return those keycodes so the batch's own binds skip them.
+    fn unshadow(
+        &mut self,
+        keysyms: &[u32],
+        pressed: &HashSet<u32>,
+        plain_only: bool,
+        changed: &mut bool,
+    ) -> HashSet<u32> {
+        let mut reserved = HashSet::new();
+        for sym in keysyms {
+            let Some(&(kc, level)) = self.base_map.get(sym) else {
+                continue;
+            };
+            if (plain_only && level != 0) || !reserved.insert(kc) || pressed.contains(&kc) {
+                continue;
+            }
+            if let Some(slot) = self.slot_at(kc)
+                && let Some(old) = self.slots[slot].take()
+            {
+                self.by_sym.remove(&old);
+                self.lru.retain(|&s| s != slot);
+                *changed = true;
+            }
+        }
+        reserved
     }
 
     /// True when `keysym` resolves at level 0 (base or overlay) — i.e. typable without
@@ -203,8 +237,9 @@ impl KeymapPolicy {
     ) -> (Vec<(u32, u32)>, bool) {
         let mut out = Vec::with_capacity(keysyms.len());
         let mut changed = false;
+        let reserved = self.unshadow(keysyms, pressed, false, &mut changed);
         for &sym in keysyms {
-            out.push(self.bind_one(sym, pressed, false, &mut changed));
+            out.push(self.bind_one(sym, pressed, &reserved, false, &mut changed));
         }
         (out, changed)
     }
@@ -215,8 +250,9 @@ impl KeymapPolicy {
     pub fn bind_many_plain(&mut self, keysyms: &[u32], pressed: &HashSet<u32>) -> (Vec<u32>, bool) {
         let mut out = Vec::with_capacity(keysyms.len());
         let mut changed = false;
+        let reserved = self.unshadow(keysyms, pressed, true, &mut changed);
         for &sym in keysyms {
-            out.push(self.bind_one(sym, pressed, true, &mut changed).0);
+            out.push(self.bind_one(sym, pressed, &reserved, true, &mut changed).0);
         }
         (out, changed)
     }
@@ -225,6 +261,7 @@ impl KeymapPolicy {
         &mut self,
         sym: u32,
         pressed: &HashSet<u32>,
+        reserved: &HashSet<u32>,
         plain_only: bool,
         changed: &mut bool,
     ) -> (u32, u32) {
@@ -233,6 +270,7 @@ impl KeymapPolicy {
         }
         if let Some(&(kc, level)) = self.base_map.get(&sym)
             && (!plain_only || level == 0)
+            && self.slot_at(kc).is_none()
         {
             return (kc, level);
         }
@@ -241,16 +279,23 @@ impl KeymapPolicy {
                 self.lru.remove(at);
             }
             self.lru.push_back(slot);
-            return (self.overlay_first + slot as u32, 0);
+            return (self.overlay_codes[slot], 0);
         }
-        let slot = if self.slots.len() < self.overlay_capacity {
-            self.slots.push(None);
-            self.slots.len() - 1
-        } else {
-            match self.recycle_slot(pressed) {
+        let free = (0..self.overlay_codes.len()).find(|&i| {
+            self.slots.get(i).is_none_or(Option::is_none)
+                && !reserved.contains(&self.overlay_codes[i])
+        });
+        let slot = match free {
+            Some(i) => {
+                if i >= self.slots.len() {
+                    self.slots.resize(i + 1, None);
+                }
+                i
+            }
+            None => match self.recycle_slot(pressed, reserved) {
                 Some(s) => s,
                 None => return (0, 0),
-            }
+            },
         };
         if let Some(old) = self.slots[slot].replace(sym) {
             self.by_sym.remove(&old);
@@ -258,16 +303,17 @@ impl KeymapPolicy {
         self.by_sym.insert(sym, slot);
         self.lru.push_back(slot);
         *changed = true;
-        (self.overlay_first + slot as u32, 0)
+        (self.overlay_codes[slot], 0)
     }
 
-    /// Oldest slot whose keycode is not currently held down; a held keycode must keep its
-    /// meaning until its release has been delivered.
-    fn recycle_slot(&mut self, pressed: &HashSet<u32>) -> Option<usize> {
-        let at = self
-            .lru
-            .iter()
-            .position(|&slot| !pressed.contains(&(self.overlay_first + slot as u32)))?;
+    /// Oldest slot whose keycode is neither held down nor pressed for its base keysym by
+    /// this batch; a held keycode must keep its meaning until its release has been
+    /// delivered.
+    fn recycle_slot(&mut self, pressed: &HashSet<u32>, reserved: &HashSet<u32>) -> Option<usize> {
+        let at = self.lru.iter().position(|&slot| {
+            let kc = self.overlay_codes[slot];
+            !pressed.contains(&kc) && !reserved.contains(&kc)
+        })?;
         self.lru.remove(at)
     }
 
@@ -302,7 +348,11 @@ impl KeymapPolicy {
             return self.base_text.clone();
         };
         let old_max: u32 = base[num_at..num_at + num_len].trim().parse().unwrap_or(255);
-        let slot_max = self.overlay_first + occupied.last().map(|&(i, _)| i as u32).unwrap_or(0);
+        let slot_max = occupied
+            .iter()
+            .map(|&(i, _)| self.overlay_codes[i])
+            .max()
+            .unwrap_or(0);
         let manual_max = self.manual_overlay.keys().copied().max().unwrap_or(0);
         let need_max = slot_max.max(manual_max);
         let mut text =
@@ -316,7 +366,7 @@ impl KeymapPolicy {
         };
         text.push_str(&rest[..kc_end]);
         for &(i, _) in &occupied {
-            let _ = writeln!(text, "\t<P{:03}> = {};", i, self.overlay_first + i as u32);
+            let _ = writeln!(text, "\t<P{:03}> = {};", i, self.overlay_codes[i]);
         }
         for &kc in self.manual_overlay.keys() {
             let _ = writeln!(text, "\t<X{kc:03}> = {kc};");
@@ -427,22 +477,36 @@ mod tests {
     }
 
     #[test]
-    fn sub256_overlay_range_overrides_base_keycode_names() {
-        // The virtual-keyboard client's range collides with keycodes the base
-        // already names (<I150>…); the spliced definitions must win so overlay
-        // keysyms resolve at their assigned keycodes.
-        let mut p = KeymapPolicy::with_overlay_range(150, 255);
+    fn character_key_overlay_wins_its_keys_and_gives_them_back() {
+        // The virtual-keyboard client overlays the main block's character keys, which the
+        // base already names (<AE01>...): the spliced definitions must win so overlay
+        // keysyms resolve at their assigned keycodes, and a base character a batch types
+        // takes its own key back.
+        fn syms_at(km: &xkb::Keymap, kc: u32) -> Vec<u32> {
+            km.key_get_syms_by_level(xkb::Keycode::new(kc), 0, 0)
+                .iter()
+                .map(|s| s.raw())
+                .collect()
+        }
+        let mut p = KeymapPolicy::with_overlay_codes(vec![10, 11, 38]);
         p.rebuild_base(us_base());
         let (out, changed) = p.bind_many_plain(&[0x1004E2D, 0x61], &HashSet::new());
         assert!(changed);
-        assert_eq!(out[0], 150);
-        let km = compile_keymap(&p.keymap_text()).expect("sub-256 overlay keymap compiles");
-        let got = km.key_get_syms_by_level(xkb::Keycode::new(out[0]), 0, 0);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].raw(), 0x1004E2D);
-        // 'a' resolves plain in the base without consuming a slot.
-        assert!(out[1] < 150);
-        assert_eq!(out[1], p.resolve(0x61).unwrap().0);
+        assert_eq!(out, vec![10, 38], "the overlay skips the key 'a' types on");
+        let km = compile_keymap(&p.keymap_text()).expect("overlay keymap compiles");
+        assert_eq!(syms_at(&km, 10), vec![0x1004E2D]);
+        assert_eq!(syms_at(&km, 38), vec![0x61]);
+        let (out, changed) = p.bind_many_plain(&[0x31, 0x1004E2D], &HashSet::new());
+        assert!(changed);
+        assert_eq!(
+            out,
+            vec![10, 11],
+            "'1' takes its key back and the overlay moves on"
+        );
+        let km = compile_keymap(&p.keymap_text()).expect("given-back keymap compiles");
+        assert_eq!(syms_at(&km, 10), vec![0x31]);
+        assert_eq!(syms_at(&km, 11), vec![0x1004E2D]);
+        assert_eq!(p.resolve(0x31), Some((10, 0)));
     }
 
     #[test]
