@@ -16,7 +16,8 @@
 use super::codec::{Codec, push_jpeg_header};
 #[cfg(feature = "gpl")]
 use super::codec::{
-    FRAME_DELTA, FRAME_INTRA, FRAME_KEY, h264_dpb_frames, h264_level, push_video_header,
+    FRAME_DELTA, FRAME_INTRA, FRAME_KEY, h264_dpb_frames, h264_level, h264_reference_level,
+    push_video_header,
 };
 #[cfg(feature = "gpl")]
 use super::frame_rate::FrameRate;
@@ -303,10 +304,11 @@ impl H264EncoderWrapper {
     ///    baseline profile — CAVLC entropy coding with no 8x8 DCT — for minimal encode cost.
     /// 6. **Output**: repeated headers (SPS/PPS before each keyframe) and Annex-B framing, with
     ///    x264's own logging silenced.
-    /// 7. **References**: a decoded picture buffer of as many frames as the level admits
-    ///    (`i_dpb_size`, up to `REFERENCE_FRAMES`), so `invalidate_reference` can leave a frame a
-    ///    client lost out of the predictions with earlier frames still there to predict from.
-    ///    Motion search keeps its single reference.
+    /// 7. **References**: a decoded picture buffer of `REFERENCE_FRAMES` (`i_dpb_size`), declaring
+    ///    the lowest level up to 5.2 that holds them (`h264_reference_level`: 5.0 at 1080p, where
+    ///    4.2 holds four), so `invalidate_reference` can leave a frame a client lost out of the
+    ///    predictions with earlier frames still there to predict from, for a report up to eight
+    ///    frames late (133 ms at 60 fps). Motion search keeps its single reference.
     ///
     /// The `x264_encoder_open` call is serialized under `X264_OPEN_CLOSE_LOCK` because it mutates
     /// libx264 global state.
@@ -381,7 +383,11 @@ impl H264EncoderWrapper {
                 0
             };
             let dpb = h264_dpb_frames(
-                h264_level(width as u32, height as u32, frame_rate.ceil(), bitrate_bps),
+                h264_reference_level(
+                    h264_level(width as u32, height as u32, frame_rate.ceil(), bitrate_bps),
+                    width as u32,
+                    height as u32,
+                ),
                 width as u32,
                 height as u32,
             );

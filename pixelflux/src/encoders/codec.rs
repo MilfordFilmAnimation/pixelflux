@@ -432,6 +432,21 @@ pub fn h264_dpb_frames(level: u32, width: u32, height: u32) -> u32 {
     ((max_dpb_mbs / mbs.max(1)) as u32).clamp(1, REFERENCE_FRAMES)
 }
 
+/// The level an x264 session declares so its decoded picture buffer holds `REFERENCE_FRAMES`:
+/// the lowest from `level` up to 5.2 whose buffer admits them at `width` x `height`, else 5.2,
+/// or `level` itself above 5.2.
+#[cfg(any(feature = "gpl", test))]
+pub fn h264_reference_level(level: u32, width: u32, height: u32) -> u32 {
+    if level > 52 {
+        return level;
+    }
+    [41, 42, 50, 51, 52]
+        .into_iter()
+        .filter(|&l| l >= level)
+        .find(|&l| h264_dpb_frames(l, width, height) == REFERENCE_FRAMES)
+        .unwrap_or(52)
+}
+
 /// Lowest H.265 level whose Annex-A Tables A.8 and A.9 limits admit a `width` x `height`
 /// stream at `fps` carrying up to `bitrate_bps` (0 where no rate is declared) at the High
 /// tier or the Main one, as general_level_idc (123 = 4.1, 156 = 5.2, 186 = 6.2).
@@ -866,6 +881,17 @@ mod tests {
 
     /// The decoded picture buffer follows the level and the picture: the reference frames a
     /// session asks for where the level admits them, fewer where it does not.
+    #[test]
+    fn the_reference_level_holds_every_reference_up_to_5_2() {
+        assert_eq!(h264_reference_level(41, 1280, 720), 41);
+        assert_eq!(h264_reference_level(42, 1920, 1080), 50);
+        assert_eq!(h264_dpb_frames(50, 1920, 1080), REFERENCE_FRAMES);
+        assert_eq!(h264_reference_level(51, 2560, 1440), 51);
+        assert_eq!(h264_reference_level(52, 3840, 2160), 52);
+        assert_eq!(h264_dpb_frames(52, 3840, 2160), 5);
+        assert_eq!(h264_reference_level(60, 7680, 4320), 60);
+    }
+
     #[test]
     fn dpb_follows_the_level() {
         assert_eq!(h264_dpb_frames(41, 1280, 720), REFERENCE_FRAMES);
