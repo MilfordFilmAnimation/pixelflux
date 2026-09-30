@@ -92,7 +92,7 @@ H.265 two), so a loss older than every recent frame, or than a buffer a resize l
 buffer in place but never raises it), is still predicted past. A session that does not
 (x265, kvazaar, SVT-AV1 at a constant quantizer or before 4.2, Tegra's H.264 and AV1, a stateful V4L2 device)
 refuses, and the caller forces an IDR instead; an H.264 session answers a loss covering the frame at its `frame_num` wrap with a key frame itself,
-since FFmpeg's decoder, which Chromium, Firefox, and WebKit decode with on Linux, derives the picture order past that gap a wrap short and drops about a `frame_num` range of pictures after it. Every full-frame session is chosen by one ladder,
+since FFmpeg's decoder, which Chromium, Firefox, and WebKit decode with on Linux, derives the picture order past that gap a wrap short and drops about a `frame_num` range of pictures after it; libx264's sixteen values go out a byte wider (`encoders::sps::WideFrameNum`), so that frame comes once in 4096. Every full-frame session is chosen by one ladder,
 `encoders::select_frame_encoder` (Tegra's vendor encoder where its library answers, then NVENC on the NVIDIA
 driver, VA-API otherwise, then a stateful V4L2 memory-to-memory device, then the codec's software encoder, then
 a demotion to H.264), shared by X11, Wayland zero-copy, and Wayland readback.

@@ -695,7 +695,8 @@ so no frame is converted on a CPU core.
     4.2, Tegra's H.264 and AV1, a stateful V4L2 device) reports `-2` and answers this with a
     keyframe instead, as does an H.264 session for a loss covering the frame at its `frame_num`
     wrap, past which FFmpeg's decoder (Chromium's, Firefox's, and WebKit's on Linux) drops about
-    a `frame_num` range of pictures.
+    a `frame_num` range of pictures. libx264 counts sixteen values, which the stream carries a
+    byte wider, 4096, so that frame comes once in 68 s at 60 fps.
 
 ### Color conversion
 

@@ -69,7 +69,7 @@ pub enum Invalidation {
 /// (`set_frame_num_range`). A decoder that never receives the frame carrying `frame_num` 0 sees
 /// a gap across that wrap, and FFmpeg's H.264 decoder, which the browsers decode with on Linux,
 /// derives the picture order past such a gap a wrap short and drops the pictures after it until
-/// that order passes the last one shown (13 of x264's range of 16 after two frames lost), so a
+/// that order passes the last one shown (13 of a range of 16 after two frames lost), so a
 /// loss covering that frame is answered with a key frame rather than a prediction past it.
 ///
 /// A window `with_anchors` also keeps long-term frames out of the buffer: the key frame is the

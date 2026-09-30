@@ -25,7 +25,7 @@ use super::reference::Reference;
 #[cfg(feature = "gpl")]
 use super::reference::{Invalidation, ReferenceWindow};
 #[cfg(feature = "gpl")]
-use super::sps::h264_frame_num_range;
+use super::sps::{WideFrameNum, h264_frame_num_range};
 use crate::RustCaptureSettings;
 use crate::pipeline::{Cleanup, Damage};
 use rayon::prelude::*;
@@ -245,6 +245,8 @@ pub struct H264EncoderWrapper {
     /// each frame can name what it predicts from.
     references: ReferenceWindow,
     last_reference: Reference,
+    /// The stream's `frame_num`, widened from x264's sixteen values to 4096.
+    frame_num: WideFrameNum,
     /// The quantizer the next frame is held at whatever the rate control (`hold_quantizer`).
     held_qp: Option<i32>,
     /// The quantizer the rate control last coded a frame at, held frames aside.
@@ -309,6 +311,9 @@ impl H264EncoderWrapper {
     ///    4.2 holds four), so `invalidate_reference` can leave a frame a client lost out of the
     ///    predictions with earlier frames still there to predict from, for a report up to eight
     ///    frames late (133 ms at 60 fps). Motion search keeps its single reference.
+    /// 8. **`frame_num`**: x264 counts it in sixteen values for that buffer, and a loss covering
+    ///    the frame where it wraps costs a key frame (`ReferenceWindow`), so the stream carries it
+    ///    a byte wider (`WideFrameNum`): 4096 values, one such frame in 68 s at 60 fps.
     ///
     /// The `x264_encoder_open` call is serialized under `X264_OPEN_CLOSE_LOCK` because it mutates
     /// libx264 global state.
@@ -462,6 +467,7 @@ impl H264EncoderWrapper {
                     max_qp,
                     references: ReferenceWindow::new(dpb),
                     last_reference: Reference::Untracked,
+                    frame_num: WideFrameNum::default(),
                     held_qp: None,
                     last_qp: None,
                 })
@@ -649,7 +655,8 @@ impl H264EncoderWrapper {
     ///    client keys its decode-recovery on the kind it truly received. With `omit_headers` the
     ///    output is bare Annex-B.
     /// 4. **Payload**: every NAL payload is appended to `output_buf` after the optional header,
-    ///    so the bytes past the wire header are always a contiguous Annex-B access unit.
+    ///    its `frame_num` widened (`WideFrameNum`), so the bytes past the wire header are always a
+    ///    contiguous Annex-B access unit.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_with_headers(
         &mut self,
@@ -767,9 +774,15 @@ impl H264EncoderWrapper {
                 }
 
                 let nal_slice = std::slice::from_raw_parts(nals, i_nals as usize);
+                let mut widened = true;
                 for nal in nal_slice {
                     let payload = std::slice::from_raw_parts(nal.p_payload, nal.i_payload as usize);
-                    output_buf.extend_from_slice(payload);
+                    widened &= self.frame_num.push(payload, output_buf);
+                }
+                if !widened {
+                    // Its slices no longer match the set they went out under, so the next frame
+                    // is a key frame.
+                    self.references.reset();
                 }
                 if frame_type == FRAME_KEY {
                     let stream = &output_buf[if omit_headers {
@@ -2927,30 +2940,34 @@ mod qp_bound_sweep {
         assert_eq!(h264_frame_type(&out), FRAME_KEY);
     }
 
-    /// A loss covering the frame carrying `frame_num` 0 is answered with a key frame: predicted
-    /// past, the frames after it reach FFmpeg's decoder as a gap across the counter's wrap, and
-    /// it drops about a range of pictures after it.
+    /// x264 counts `frame_num` in sixteen values and the stream in 4096 (`WideFrameNum`): a loss
+    /// covering frame 16, where x264's own count wraps, is predicted past, and one covering frame
+    /// 4096 is answered with a key frame, since past a gap across the stream's wrap FFmpeg's
+    /// decoder drops about a range of pictures.
     #[test]
     #[cfg(feature = "gpl")]
     fn x264_answers_a_loss_at_the_frame_num_wrap_with_a_key_frame() {
-        use crate::encoders::codec::{FRAME_KEY, h264_frame_type};
+        use crate::encoders::codec::{FRAME_DELTA, FRAME_KEY, h264_frame_type};
         use crate::encoders::reference::Reference;
         use crate::encoders::sps::h264_frame_num_range;
         use crate::webcam::decode::{Decoder as _, VideoDecoder};
-        let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+        let (w, h) = (160usize, 96usize);
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
         let mut enc =
-            H264EncoderWrapper::new(W as i32, H as i32, 20, false, 60.0, 4, false, 0, 0, 0, 0)
+            H264EncoderWrapper::new(w as i32, h as i32, 20, false, 60.0, 1, false, 0, 0, 0, 0)
                 .expect("x264 init");
         let encode = |enc: &mut H264EncoderWrapper, i: usize| {
-            let y = text_luma(i);
+            let y: Vec<u8> = (0..w * h)
+                .map(|p| ((p % w + p / w + 3 * i) * 5 % 256) as u8)
+                .collect();
             let mut out = Vec::new();
             assert!(enc.encode_with_headers(
                 &y,
                 &u,
                 &v,
-                W as i32,
-                (W / 2) as i32,
-                (W / 2) as i32,
+                w as i32,
+                (w / 2) as i32,
+                (w / 2) as i32,
                 i as u16,
                 0,
                 i == 0,
@@ -2959,27 +2976,45 @@ mod qp_bound_sweep {
             ));
             (out, enc.last_reference())
         };
+        let (mut whole, mut lossy) = (
+            VideoDecoder::new(Codec::H264).unwrap(),
+            VideoDecoder::new(Codec::H264).unwrap(),
+        );
         let (first, _) = encode(&mut enc, 0);
         let range = h264_frame_num_range(&first).expect("the key frame carries the SPS") as usize;
-        assert_eq!(
-            range, 16,
-            "x264 sizes frame_num for its decoded picture buffer"
+        assert_eq!(range, 4096, "x264's sixteen values, a byte wider");
+        assert!(whole.decode(&first).expect("decode") && lossy.decode(&first).expect("decode"));
+        for i in 1..=18 {
+            let (out, _) = encode(&mut enc, i);
+            assert!(whole.decode(&out).expect("decode"), "frame {i}");
+            if i < 16 {
+                assert!(lossy.decode(&out).expect("decode"), "frame {i}");
+            }
+        }
+        assert!(enc.invalidate_reference(16), "x264's wrap frame is lost");
+        let (out, reference) = encode(&mut enc, 19);
+        assert_eq!(reference, Reference::Frame(15));
+        assert_eq!(h264_frame_type(&out), FRAME_DELTA);
+        assert!(whole.decode(&out).expect("decode"));
+        assert!(lossy.decode(&out).expect("decode past x264's wrap"));
+        let apart = luma_distance(&whole.frame().unwrap(), &lossy.frame().unwrap());
+        assert!(
+            apart < 0.5,
+            "the decoder that lost frames 16-18 shows frame 19 {apart:.2} off the one that saw them"
         );
-        let mut frames = vec![first];
-        for i in 1..=range {
-            frames.push(encode(&mut enc, i).0);
+        for i in 20..=range {
+            let (out, _) = encode(&mut enc, i);
+            if i < range {
+                assert!(lossy.decode(&out).expect("decode"), "frame {i}");
+            }
         }
         assert!(
             enc.invalidate_reference(range as u16),
-            "the wrap frame is reported lost"
+            "the stream's wrap frame is reported lost"
         );
         let (out, reference) = encode(&mut enc, range + 1);
         assert_eq!(reference, Reference::None);
         assert_eq!(h264_frame_type(&out), FRAME_KEY);
-        let mut lossy = VideoDecoder::new(Codec::H264).unwrap();
-        for f in &frames[..range] {
-            assert!(lossy.decode(f).expect("decode"));
-        }
         assert!(
             lossy.decode(&out).expect("decode past the wrap"),
             "the decoder that never saw the wrap frame shows the next one"

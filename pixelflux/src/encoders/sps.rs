@@ -22,6 +22,9 @@
 //! bound of zero. That write reads through the timing and HRD parameters to reach the restriction,
 //! still copying them as they came, and the read has to land on the stop bit, so a field it
 //! stepped over wrongly refuses the write instead of corrupting the set.
+//!
+//! x264's `frame_num` is widened here too (`WideFrameNum`), the one write that reaches past the
+//! set into every slice header.
 
 /// What a stream says about the color it carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +179,10 @@ struct Located {
     declared: Option<ColorSignal>,
     pic_order_cnt_type: u32,
     max_num_ref_frames: u32,
+    /// `log2_max_frame_num_minus4` as coded.
+    frame_num: Coded,
+    /// `separate_colour_plane_flag`, which puts a field ahead of `frame_num` in every slice.
+    separate_planes: bool,
 }
 
 fn unescape(nal: &[u8]) -> Vec<u8> {
@@ -205,6 +212,11 @@ fn escape(rbsp: &[u8]) -> Vec<u8> {
         out.push(byte);
         zeros = if byte == 0 { zeros + 1 } else { 0 };
     }
+    // A unit ending in zeros (a slice's cabac_zero_words) ends escaped, so the next start code
+    // cannot be read into it.
+    if rbsp.last() == Some(&0) {
+        out.push(3);
+    }
     out
 }
 
@@ -225,13 +237,14 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
     r.bits(8)?;
     r.bits(8)?;
     r.ue()?;
+    let mut separate_planes = false;
     if matches!(
         profile,
         100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
     ) {
         let chroma = r.ue()?;
         if chroma == 3 {
-            r.bit()?;
+            separate_planes = r.bit()? == 1;
         }
         r.ue()?;
         r.ue()?;
@@ -242,7 +255,8 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
             return Err("the SPS carries scaling lists".into());
         }
     }
-    r.ue()?;
+    let frame_num_at = r.pos;
+    let frame_num = (r.ue()?, frame_num_at, r.pos);
     let poc_type = r.ue()?;
     if poc_type == 0 {
         r.ue()?;
@@ -279,6 +293,8 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
             declared: None,
             pic_order_cnt_type: poc_type,
             max_num_ref_frames,
+            frame_num,
+            separate_planes,
         });
     }
     if r.bit()? == 1 && r.bits(8)? == 255 {
@@ -315,6 +331,8 @@ fn locate(rbsp: &[u8]) -> Result<Located, String> {
         declared,
         pic_order_cnt_type: poc_type,
         max_num_ref_frames,
+        frame_num,
+        separate_planes,
     })
 }
 
@@ -611,6 +629,127 @@ impl NoReorder {
         out.extend_from_slice(&unit[copied..]);
         Some(out)
     }
+}
+
+/// The bits `WideFrameNum` adds to `frame_num`: a whole byte, so everything after the field in a
+/// slice moves by one byte and keeps the alignment its entropy coding and trailing bits rest on.
+const WIDER_FRAME_NUM: u32 = 8;
+
+/// An x264 stream with `frame_num` widened by a byte, in its sequence parameter sets and every
+/// slice header.
+///
+/// x264 sizes the counter to its decoded picture buffer, sixteen values for eight references, and
+/// a loss covering the frame where it wraps costs a key frame (`ReferenceWindow`): past a gap
+/// across the wrap, FFmpeg's decoder drops about a range of pictures. Widened, the wrap comes once
+/// in 4096 frames. The field's low bits stay x264's, and the byte ahead of them counts x264's wraps
+/// since the key frame.
+#[derive(Default)]
+pub struct WideFrameNum {
+    /// `log2_max_frame_num` as x264 wrote the last set, None where that set went out as it came.
+    narrow: Option<u32>,
+    /// The widened `frame_num` of the last slice.
+    frame_num: u32,
+    /// A slice could not be widened, and every set since goes out as it came.
+    failed: bool,
+}
+
+impl WideFrameNum {
+    /// Append `payload`, one Annex B NAL unit with its start code, to `out`: a sequence
+    /// parameter set widened, and a slice under a widened one. False where a slice could not be,
+    /// which leaves its picture unreadable; the caller then codes a key frame, whose set goes out
+    /// as it came.
+    pub fn push(&mut self, payload: &[u8], out: &mut Vec<u8>) -> bool {
+        let code = payload
+            .iter()
+            .position(|&b| b != 0)
+            .map_or(payload.len(), |one| one + 1);
+        let nal = &payload[code..];
+        let widened = match nal.first().map(|h| h & 0x1f) {
+            Some(7) => {
+                let wide = if self.failed { None } else { widen_sps(nal) };
+                self.narrow = wide.as_ref().map(|w| w.0);
+                wide.map(|w| w.1)
+            }
+            Some(kind @ (1 | 5)) => match self.narrow {
+                Some(narrow) => match widen_slice(nal, narrow, kind == 5, self.frame_num) {
+                    Some((frame_num, slice)) => {
+                        self.frame_num = frame_num;
+                        Some(slice)
+                    }
+                    None => {
+                        self.failed = true;
+                        self.narrow = None;
+                        out.extend_from_slice(payload);
+                        return false;
+                    }
+                },
+                None => None,
+            },
+            _ => None,
+        };
+        match widened {
+            Some(nal) => {
+                out.extend_from_slice(&payload[..code]);
+                out.extend_from_slice(&nal);
+            }
+            None => out.extend_from_slice(payload),
+        }
+        true
+    }
+}
+
+/// The set with `frame_num` `WIDER_FRAME_NUM` bits wider, and the `log2_max_frame_num` it had;
+/// None where the wider field would pass sixteen bits or the set cannot be read.
+fn widen_sps(nal: &[u8]) -> Option<(u32, Vec<u8>)> {
+    let rbsp = unescape(nal.get(1..)?);
+    let at = locate(&rbsp).ok()?;
+    let (minus4, from, to) = at.frame_num;
+    if minus4 + 4 + WIDER_FRAME_NUM > 16 || at.separate_planes {
+        return None;
+    }
+    let last = stop_bit(&rbsp).ok()?;
+    let mut w = Writer::new();
+    w.copy_from(&rbsp, 0, from);
+    w.ue(minus4 + WIDER_FRAME_NUM);
+    w.copy_from(&rbsp, to, last);
+    w.trailing_bits();
+    let mut out = Vec::with_capacity(w.bytes.len() + 8);
+    out.push(nal[0]);
+    out.extend_from_slice(&escape(&w.bytes));
+    Some((minus4 + 4, out))
+}
+
+/// A slice under a widened set, and its widened `frame_num`: x264's `narrow` bits numbered on from
+/// `last`, the widened value of the slice before it, with the byte above them inserted ahead.
+fn widen_slice(nal: &[u8], narrow: u32, idr: bool, last: u32) -> Option<(u32, Vec<u8>)> {
+    let mut rbsp = unescape(nal.get(1..)?);
+    let mut r = Reader::new(&rbsp);
+    // first_mb_in_slice, slice_type, pic_parameter_set_id
+    for _ in 0..3 {
+        r.ue().ok()?;
+    }
+    let at = r.pos;
+    let low = r.bits(narrow as usize).ok()?;
+    let range = 1 << narrow;
+    let frame_num = if idr {
+        low
+    } else {
+        (last + (low + range - last % range) % range) % (range << WIDER_FRAME_NUM)
+    };
+    let high = (frame_num >> narrow) as u8;
+    let (byte, bit) = (at / 8, at % 8);
+    let kept = rbsp[byte];
+    rbsp.splice(
+        byte..=byte,
+        [
+            (kept & !(0xff >> bit)) | (high >> bit),
+            (((high as u16) << (8 - bit)) as u8) | (kept & (0xff >> bit)),
+        ],
+    );
+    let mut out = Vec::with_capacity(nal.len() + 4);
+    out.push(nal[0]);
+    out.extend_from_slice(&escape(&rbsp));
+    Some((frame_num, out))
 }
 
 /// The sequence parameter set read an H.264 session makes of its own key frames, and the
@@ -1201,5 +1340,218 @@ mod tests {
                 "the bounded stream decodes to other pictures"
             );
         }
+    }
+
+    /// A slice NAL unit with its start code: `first_mb_in_slice`, `slice_type`, picture
+    /// parameter set 0, `frame_num` `low` in `narrow` bits, then `tail` and the stop bit.
+    fn slice(first_mb: u32, slice_type: u32, narrow: u32, low: u32, tail: &[u8]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.ue(first_mb);
+        w.ue(slice_type);
+        w.ue(0);
+        w.bits(low, narrow as usize);
+        for &byte in tail {
+            w.bits(byte as u32, 8);
+        }
+        w.trailing_bits();
+        let idr = slice_type == 7;
+        [
+            &[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }][..],
+            &escape(&w.bytes),
+        ]
+        .concat()
+    }
+
+    /// A baseline set as x264 writes one for eight references: `frame_num` in `log2` bits,
+    /// picture order count type 2, 1280x720, and a VUI with a bitstream restriction alone.
+    fn x264_like_sps(log2: u32) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bits(66, 8);
+        w.bits(0xc0, 8);
+        w.bits(31, 8);
+        w.ue(0);
+        w.ue(log2 - 4);
+        w.ue(2);
+        w.ue(8);
+        w.bit(0);
+        w.ue(79);
+        w.ue(44);
+        w.bit(1);
+        w.bit(1);
+        w.bit(0);
+        w.bit(1);
+        for _ in 0..8 {
+            w.bit(0);
+        }
+        w.bit(1);
+        w.bit(1);
+        for v in [2, 1, 16, 16, 0, 8] {
+            w.ue(v);
+        }
+        w.trailing_bits();
+        [&[0x67][..], &escape(&w.bytes)].concat()
+    }
+
+    /// The slice's fields as a decoder reads them under a set of `log2` bits of `frame_num`, and
+    /// the bytes after them up to the stop bit.
+    fn read_slice(nal: &[u8], log2: u32) -> (u32, u32, u32, u32, Vec<u8>) {
+        let code = nal.iter().position(|&b| b != 0).unwrap() + 1;
+        let rbsp = unescape(&nal[code + 1..]);
+        let mut r = Reader::new(&rbsp);
+        let fields = (
+            r.ue().unwrap(),
+            r.ue().unwrap(),
+            r.ue().unwrap(),
+            r.bits(log2 as usize).unwrap(),
+        );
+        let stop = stop_bit(&rbsp).unwrap();
+        assert_eq!((stop - r.pos) % 8, 0, "the tail is not whole bytes");
+        let tail = (0..(stop - r.pos) / 8)
+            .map(|_| r.bits(8).unwrap() as u8)
+            .collect();
+        assert!(
+            rbsp.len() * 8 - stop <= 8,
+            "the stop bit is not in the last byte"
+        );
+        (fields.0, fields.1, fields.2, fields.3, tail)
+    }
+
+    /// Whether an escaped payload carries no start code or reserved sequence.
+    fn escaped(nal: &[u8]) -> bool {
+        let code = nal.iter().position(|&b| b != 0).unwrap() + 1;
+        !nal[code..]
+            .windows(3)
+            .any(|w| w[0] == 0 && w[1] == 0 && w[2] <= 2)
+            && nal.last() != Some(&0)
+    }
+
+    /// The widened set declares eight bits more of `frame_num` and every other field as it came:
+    /// the reference count, the color, the timing, and the bound on reordering after it.
+    #[test]
+    fn a_widened_set_changes_its_frame_num_alone() {
+        for sps in [PI4_SPS.to_vec(), VCE_SPS.to_vec(), x264_like_sps(4)] {
+            let (narrow, wide) = widen_sps(&sps).expect("the set widens");
+            let rbsp = unescape(&sps[1..]);
+            let at = locate(&rbsp).unwrap();
+            assert_eq!(narrow, at.frame_num.0 + 4);
+            let stream = |nal: &[u8]| [&[0, 0, 0, 1][..], nal].concat();
+            assert_eq!(
+                h264_frame_num_range(&stream(&wide)),
+                h264_frame_num_range(&stream(&sps)).map(|range| range << 8)
+            );
+            assert_eq!(
+                h264_max_num_ref_frames(&stream(&wide)),
+                h264_max_num_ref_frames(&stream(&sps))
+            );
+            assert_eq!(read_color(&wide), read_color(&sps));
+            assert_eq!(h264_timing(&stream(&wide)), h264_timing(&stream(&sps)));
+            assert_eq!(reorder_of(&wide), reorder_of(&sps));
+            let wide_rbsp = unescape(&wide[1..]);
+            let wide_at = locate(&wide_rbsp).unwrap();
+            let bit = |data: &[u8], at: usize| (data[at >> 3] >> (7 - (at & 7))) & 1;
+            let tail = stop_bit(&rbsp).unwrap() - at.frame_num.2;
+            assert_eq!(tail, stop_bit(&wide_rbsp).unwrap() - wide_at.frame_num.2);
+            assert!(
+                (0..tail)
+                    .all(|i| bit(&rbsp, at.frame_num.2 + i)
+                        == bit(&wide_rbsp, wide_at.frame_num.2 + i)),
+                "a bit after the field changed"
+            );
+        }
+        assert!(
+            widen_sps(&x264_like_sps(9)).is_none(),
+            "a field past sixteen bits"
+        );
+    }
+
+    /// Wherever `frame_num` falls in its byte, the widened slice reads back with the same fields,
+    /// the wider count, and every byte after it, escaped where the inserted byte made zeros.
+    #[test]
+    fn a_widened_slice_keeps_every_bit_after_its_frame_num() {
+        let mut offsets = [false; 8];
+        for first_mb in [0, 1, 2, 3, 6, 7, 14, 15, 300, 8159] {
+            for slice_type in [0, 5, 2, 7] {
+                let mut r = Writer::new();
+                r.ue(first_mb);
+                r.ue(slice_type);
+                r.ue(0);
+                offsets[r.pos % 8] = true;
+                // Widened counts with a high byte of 5, and of 0 ahead of zeros that then need
+                // escaping.
+                for (tail, wide) in [
+                    (&[0xde, 0xad, 0xbe, 0xef][..], 0x59u32),
+                    (&[0x00, 0x00, 0x01, 0x80][..], 9),
+                    (&[0x00, 0x00][..], 0),
+                ] {
+                    let nal = slice(first_mb, slice_type, 4, wide & 15, tail);
+                    let last = (wide + 4095) % 4096;
+                    let (frame_num, widened) =
+                        widen_slice(&nal[4..], 4, slice_type == 7, last).expect("widens");
+                    let widened = [&nal[..4], &widened].concat();
+                    let expected = if slice_type == 7 { wide & 15 } else { wide };
+                    assert_eq!(frame_num, expected);
+                    assert_eq!(
+                        read_slice(&widened, 12),
+                        (first_mb, slice_type, 0, expected, tail.to_vec()),
+                        "first_mb {first_mb}, slice_type {slice_type}"
+                    );
+                    assert!(escaped(&widened), "{widened:02x?}");
+                }
+            }
+        }
+        // Three exp-Golomb codes are odd lengths, so the field starts at an odd bit, each of them.
+        assert_eq!(
+            offsets,
+            [false, true, false, true, false, true, false, true]
+        );
+    }
+
+    /// The count runs on across x264's wraps, stays with a picture's every slice, restarts at a
+    /// key frame, and wraps at 4096; a set that cannot widen leaves its slices as they came.
+    #[test]
+    fn the_widened_count_runs_on_across_x264s_wrap() {
+        let mut wide = WideFrameNum::default();
+        let mut out = Vec::new();
+        assert!(wide.push(&[&[0, 0, 0, 1][..], &x264_like_sps(4)].concat(), &mut out));
+        assert_eq!(h264_frame_num_range(&out), Some(4096));
+        let mut seen = Vec::new();
+        for frame in 0..4100u32 {
+            for first_mb in [0, 1800] {
+                let nal = slice(
+                    first_mb,
+                    if frame == 0 { 7 } else { 5 },
+                    4,
+                    frame % 16,
+                    &[0x5a],
+                );
+                out.clear();
+                assert!(wide.push(&nal, &mut out));
+                let (_, _, _, frame_num, _) = read_slice(&out, 12);
+                seen.push(frame_num);
+            }
+        }
+        let expected: Vec<u32> = (0..4100u32).flat_map(|f| [f % 4096; 2]).collect();
+        assert_eq!(seen, expected);
+        out.clear();
+        assert!(wide.push(&slice(0, 7, 4, 0, &[0x5a]), &mut out));
+        assert_eq!(read_slice(&out, 12).3, 0, "a key frame restarts the count");
+
+        let mut narrow = WideFrameNum::default();
+        let sps = [&[0, 0, 0, 1][..], &x264_like_sps(9)].concat();
+        let p = slice(0, 5, 9, 300, &[0x5a]);
+        out.clear();
+        assert!(narrow.push(&sps, &mut out));
+        assert!(narrow.push(&p, &mut out));
+        assert_eq!(
+            out,
+            [&sps[..], &p[..]].concat(),
+            "they went out as they came"
+        );
+    }
+
+    #[test]
+    fn a_unit_ending_in_zeros_ends_escaped() {
+        assert_eq!(escape(&[1, 0, 0]), [1, 0, 0, 3]);
+        assert_eq!(unescape(&escape(&[1, 0, 0])), [1, 0, 0]);
     }
 }
