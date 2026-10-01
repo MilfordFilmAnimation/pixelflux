@@ -4557,253 +4557,49 @@ mod gpu_tests {
         }
     }
 
-    /// An AV1-capable SDK 13 device must retain the advertised old anchor, not merely tag
-    /// the output as depending on it. Use 4K at 30 fps and delayed feedback past the recent
-    /// DPB. The H.264 control uses the same existing single-anchor schedule. This explicit
-    /// device test fails, rather than skips, when its required backend is unavailable.
-    #[test]
-    #[ignore]
-    fn gpu_av1_anchor_recovers_4k_after_delayed_loss() {
-        use crate::webcam::convert::I420View;
-        use crate::webcam::decode::{Decoder as _, VideoDecoder};
-        fn pixels(v: I420View<'_>) -> Vec<u8> {
-            let mut out = Vec::with_capacity(v.width * v.height * 3 / 2);
-            for (plane, stride, width, height) in [
-                (v.y, v.y_stride, v.width, v.height),
-                (v.u, v.uv_stride, v.chroma_width(), v.chroma_height()),
-                (v.v, v.uv_stride, v.chroma_width(), v.chroma_height()),
-            ] {
-                for row in plane.chunks(stride).take(height) {
-                    out.extend_from_slice(&row[..width]);
-                }
-            }
-            out
-        }
-        let (w, h) = (3840usize, 2160usize);
-        for codec in [Codec::Av1, Codec::H264] {
-            let mut s = settings(w as i32, h as i32, 30.0);
-            s.codec = codec;
-            s.video_crf = 24;
-            s.omit_stripe_headers = true;
-            let mut enc = host_session(&s).expect("required NVENC device");
-            assert!(nvenc_cur_ver().0 >= 13, "this test requires SDK 13");
-            let mut frames = Vec::new();
-            for i in 0..80 {
-                frames.push(
-                    enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 24, i == 0)
-                        .expect("encode before loss"),
-                );
-            }
-            assert!(enc.invalidate_reference(64), "invalidation refused");
-            for i in 80..88 {
-                frames.push(
-                    enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 24, false)
-                        .expect("encode after loss"),
-                );
-                if i == 80 {
-                    println!(
-                        "anchor recovery {codec:?}: frame=80 reference={:?} bytes={}",
-                        enc.last_reference(),
-                        frames[80].len()
-                    );
-                    assert_eq!(enc.last_reference(), Reference::Frame(48));
-                }
-            }
-            let mut whole = VideoDecoder::new(codec).expect("full decoder");
-            let mut loss = VideoDecoder::new(codec).expect("loss decoder");
-            let mut anchor = VideoDecoder::new(codec).expect("anchor decoder");
-            let mut missing = VideoDecoder::new(codec).expect("missing anchor decoder");
-            for (i, f) in frames.iter().enumerate() {
-                assert!(whole.decode(f).expect("full decode"));
-                let expected = pixels(whole.frame().expect("full picture"));
-                if !(64..80).contains(&i) {
-                    assert!(loss.decode(f).expect("decode past loss"));
-                    assert!(
-                        pixels(loss.frame().expect("loss picture")) == expected,
-                        "{codec:?}: lost frames 64..79 changed picture {i}"
-                    );
-                }
-                if i <= 48 || i == 80 {
-                    assert!(anchor.decode(f).expect("decode from retained anchor"));
-                    if i == 80 {
-                        assert!(
-                            pixels(anchor.frame().expect("anchor picture")) == expected,
-                            "{codec:?}: frame 48 is not sufficient"
-                        );
-                    }
-                }
-                if i < 48 {
-                    assert!(missing.decode(f).expect("decode prefix before anchor"));
-                } else if i == 80 {
-                    let got = missing
-                        .decode(f)
-                        .unwrap_or(false)
-                        .then(|| missing.frame().map(pixels))
-                        .flatten();
-                    assert!(
-                        got.is_none_or(|got| got != expected),
-                        "{codec:?}: the advertised anchor 48 was not necessary"
-                    );
-                }
-            }
-            assert!(enc.invalidate_reference(40), "loss before anchor refused");
-            let key = enc
-                .encode_cpu_argb(&moving_frame(w, h, 88), w * 4, 88, 24, false)
-                .expect("encode without a surviving anchor");
-            assert_eq!(
-                enc.last_reference(),
-                Reference::None,
-                "{codec:?}: a loss before the retained anchor needs a key frame"
-            );
-            let mut fresh = VideoDecoder::new(codec).expect("fresh decoder");
-            assert!(fresh.decode(&key).expect("independent recovery decode"));
-            assert_eq!(fresh.frame().unwrap().width, w);
-            assert_eq!(fresh.frame().unwrap().height, h);
-            println!(
-                "anchor recovery {codec:?}: exact_postloss_pictures=8 anchor_necessary=true anchor_sufficient=true independent_recovery=true"
-            );
-        }
-    }
-
-    /// A live CBR decrease must retain AV1's old anchor and decode a delayed loss exactly.
-    /// Uses the same 4K loss boundary as the CONSTQP witness and H.264 as the unchanged control.
-    #[test]
-    #[ignore]
-    fn gpu_av1_cbr_anchor_survives_a_rate_decrease() {
-        use crate::webcam::convert::I420View;
-        use crate::webcam::decode::{Decoder as _, VideoDecoder};
-        fn pixels(v: I420View<'_>) -> Vec<u8> {
-            let mut out = Vec::with_capacity(v.width * v.height * 3 / 2);
-            for (plane, stride, width, height) in [
-                (v.y, v.y_stride, v.width, v.height),
-                (v.u, v.uv_stride, v.chroma_width(), v.chroma_height()),
-                (v.v, v.uv_stride, v.chroma_width(), v.chroma_height()),
-            ] {
-                for row in plane.chunks(stride).take(height) {
-                    out.extend_from_slice(&row[..width]);
-                }
-            }
-            out
-        }
-        let (w, h) = (3840usize, 2160usize);
-        for codec in [Codec::Av1, Codec::H264] {
-            let mut s = settings(w as i32, h as i32, 30.0);
-            s.codec = codec;
-            s.video_crf = 24;
-            s.video_cbr_mode = true;
-            s.video_bitrate_kbps = 20_000;
-            s.omit_stripe_headers = true;
-            let mut enc = host_session(&s).expect("required NVENC device");
-            assert!(nvenc_cur_ver().0 >= 13, "this test requires SDK 13");
-            let mut frames = Vec::new();
-            for i in 0..80 {
-                if i == 64 {
-                    s.video_bitrate_kbps = 8000;
-                    assert!(enc.reconfigure_rate(&s), "{codec:?}: CBR decrease refused");
-                }
-                frames.push(
-                    enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 24, i == 0)
-                        .expect("encode before loss"),
-                );
-                if i == 64 {
-                    assert_eq!(
-                        enc.last_reference(),
-                        Reference::Frame(63),
-                        "{codec:?}: CBR decrease unexpectedly forced a key frame"
-                    );
-                    println!(
-                        "CBR recovery {codec:?}: bitrate_kbps=20000->8000 frame64_reference=63"
-                    );
-                }
-            }
-            assert!(enc.invalidate_reference(64), "invalidation refused");
-            for i in 80..88 {
-                frames.push(
-                    enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 24, false)
-                        .expect("encode after loss"),
-                );
-                if i == 80 {
-                    println!(
-                        "CBR recovery {codec:?}: frame=80 reference={:?} bytes={}",
-                        enc.last_reference(),
-                        frames[80].len()
-                    );
-                    assert_eq!(enc.last_reference(), Reference::Frame(48));
-                }
-            }
-            let mut whole = VideoDecoder::new(codec).expect("full decoder");
-            let mut loss = VideoDecoder::new(codec).expect("loss decoder");
-            let mut anchor = VideoDecoder::new(codec).expect("anchor decoder");
-            for (i, f) in frames.iter().enumerate() {
-                assert!(whole.decode(f).expect("full decode"));
-                let expected = pixels(whole.frame().expect("full picture"));
-                if !(64..80).contains(&i) {
-                    assert!(loss.decode(f).expect("decode past loss"));
-                    assert!(
-                        pixels(loss.frame().expect("loss picture")) == expected,
-                        "{codec:?}: lost frames 64..79 changed picture {i}"
-                    );
-                }
-                if i <= 48 || i == 80 {
-                    assert!(anchor.decode(f).expect("decode from retained anchor"));
-                    if i == 80 {
-                        assert!(
-                            pixels(anchor.frame().expect("anchor picture")) == expected,
-                            "{codec:?}: frame 48 is not sufficient"
-                        );
-                    }
-                }
-            }
-            assert!(enc.invalidate_reference(40), "loss before anchor refused");
-            let key = enc
-                .encode_cpu_argb(&moving_frame(w, h, 88), w * 4, 88, 24, false)
-                .expect("encode without a surviving anchor");
-            assert_eq!(
-                enc.last_reference(),
-                Reference::None,
-                "{codec:?}: a loss before the retained anchor needs a key frame"
-            );
-            let mut fresh = VideoDecoder::new(codec).expect("fresh decoder");
-            assert!(fresh.decode(&key).expect("independent recovery decode"));
-            assert_eq!(fresh.frame().unwrap().width, w);
-            assert_eq!(fresh.frame().unwrap().height, h);
-            println!(
-                "CBR recovery {codec:?}: exact_postloss_pictures=8 anchor_sufficient=true independent_recovery=true"
-            );
-        }
-    }
-
     /// A loss deeper than the recent frames is predicted past from the newest anchor before it,
     /// the one the device predicts from, and decodes as the complete stream does; one before every
-    /// anchor costs a key frame. An H.264 session keeps one anchor, a frame every forty-eight, an
-    /// H.265 one two, a frame every twelve by turns, and reaches one recent frame past its buffer.
-    /// Ignored by default.
+    /// anchor costs a key frame. An H.264 session, and an AV1 one on an API with AV1 long-term
+    /// references, keeps one anchor, a frame every forty-eight, an H.265 one two, a frame every
+    /// twelve by turns, and reaches one recent frame past its buffer. A CBR rate lowered between
+    /// the anchor and the loss keeps the anchor. Ignored by default.
     #[test]
     #[ignore]
     fn gpu_predicts_past_a_loss_deeper_than_the_recent_frames() {
         use crate::encoders::reference::Reference;
         let (w, h) = (1920usize, 1080usize);
         // (codec, frames sent after the key frame, first frame lost, the anchor predicted from, an
-        // older anchor the device must not have taken)
+        // older anchor the device must not have taken, CBR lowered from 20 to 8 Mbit/s as the lost
+        // frame is encoded)
         let cases = [
-            (Codec::H264, 60u16, 50u16, Some(48u16), Some(0u16)),
-            (Codec::H264, 60, 57, Some(48), Some(0)),
-            (Codec::H264, 80, 64, Some(48), Some(0)),
-            (Codec::H264, 80, 51, Some(48), Some(0)),
-            (Codec::H264, 60, 40, None, None),
-            (Codec::H265, 30, 28, Some(27), Some(26)),
-            (Codec::H265, 30, 27, Some(24), Some(12)),
-            (Codec::H265, 40, 37, Some(36), Some(24)),
-            (Codec::H265, 40, 30, Some(24), Some(12)),
-            (Codec::H265, 58, 40, Some(36), Some(24)),
-            (Codec::H265, 58, 37, Some(36), Some(24)),
-            (Codec::H265, 40, 20, None, None),
+            (Codec::H264, 60u16, 50u16, Some(48u16), Some(0u16), false),
+            (Codec::H264, 60, 57, Some(48), Some(0), false),
+            (Codec::H264, 80, 64, Some(48), Some(0), false),
+            (Codec::H264, 80, 51, Some(48), Some(0), false),
+            (Codec::H264, 80, 64, Some(48), Some(0), true),
+            (Codec::H264, 60, 40, None, None, false),
+            (Codec::Av1, 60, 50, Some(48), Some(0), false),
+            (Codec::Av1, 60, 57, Some(48), Some(0), false),
+            (Codec::Av1, 80, 64, Some(48), Some(0), false),
+            (Codec::Av1, 80, 64, Some(48), Some(0), true),
+            (Codec::Av1, 60, 40, None, None, false),
+            (Codec::H265, 30, 28, Some(27), Some(26), false),
+            (Codec::H265, 30, 27, Some(24), Some(12), false),
+            (Codec::H265, 40, 37, Some(36), Some(24), false),
+            (Codec::H265, 40, 30, Some(24), Some(12), false),
+            (Codec::H265, 58, 40, Some(36), Some(24), false),
+            (Codec::H265, 58, 37, Some(36), Some(24), false),
+            (Codec::H265, 40, 20, None, None, false),
         ];
         let fmt = |v: Option<f64>| v.map_or("no picture".to_string(), |x| format!("{x:.3}"));
-        for (codec, sent, lost, from, older) in cases {
+        for (codec, sent, lost, from, older, retarget) in cases {
             let mut s = settings(w as i32, h as i32, 60.0);
             s.codec = codec;
             s.omit_stripe_headers = true;
+            if retarget {
+                s.video_cbr_mode = true;
+                s.video_bitrate_kbps = 20_000;
+            }
             let mut enc = match host_session(&s) {
                 Ok(enc) => enc,
                 Err(e) => {
@@ -4811,8 +4607,24 @@ mod gpu_tests {
                     continue;
                 }
             };
+            if codec == Codec::Av1
+                && !enc
+                    .references
+                    .as_ref()
+                    .is_some_and(ReferenceWindow::anchored)
+            {
+                println!("{codec:?}: this device or API keeps no long-term reference");
+                continue;
+            }
             let mut frames = Vec::new();
             for i in 0..=sent as usize {
+                if retarget && i == lost as usize {
+                    s.video_bitrate_kbps = 8000;
+                    assert!(
+                        enc.reconfigure_rate(&s),
+                        "{codec:?}: the rate change was refused"
+                    );
+                }
                 frames.push(
                     enc.encode_cpu_argb(&moving_frame(w, h, i), w * 4, i as u64, 25, i == 0)
                         .expect("encode"),
