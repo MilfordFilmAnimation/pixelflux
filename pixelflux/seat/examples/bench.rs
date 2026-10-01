@@ -6,6 +6,7 @@
 
 //! Time on the seat for one monitor: grab start to encoded frame, at a fixed frame rate.
 //! Usage: bench <display> <xauthority> <monitor> <h264|hevc> <seconds> [always] [out.h264]
+//! BENCH_PRESET=1..7 (default 3) and BENCH_TWOPASS=0|1 (default 1) pick the NVENC settings.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -33,7 +34,10 @@ fn main() {
     println!("monitors: {mons:?}");
     let m = &mons[mi];
     let mut cap = Capture::new(&d, m.x, m.y, m.w, m.h).unwrap();
-    let mut enc = Encoder::new(EncoderConfig { codec, width: m.w, height: m.h, fps: 60, bitrate_kbps: 25000, ..Default::default() }).unwrap();
+    let preset: u8 = std::env::var("BENCH_PRESET").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let two_pass = std::env::var("BENCH_TWOPASS").map(|v| v != "0").unwrap_or(true);
+    let mut enc = Encoder::new(EncoderConfig { codec, width: m.w, height: m.h, fps: 60, bitrate_kbps: 25000, preset, two_pass, ..Default::default() }).unwrap();
+    println!("preset P{preset}, two-pass {two_pass}");
     println!("encoder on {}", Encoder::device_name().unwrap());
     enc.pin_host(cap.data(), cap.len()).unwrap();
     let period = Duration::from_nanos(1_000_000_000 / 60);

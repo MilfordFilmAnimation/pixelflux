@@ -152,7 +152,7 @@ pub struct Encoder {
     dev_pitch: usize,
     registered: NV_ENC_REGISTERED_PTR,
     bitstream: NV_ENC_OUTPUT_PTR,
-    pinned: Option<(*mut c_void, usize)>,
+    pinned: Vec<(*mut c_void, usize)>,
     frame_idx: u32,
 }
 
@@ -194,7 +194,7 @@ impl Encoder {
             dev_pitch: 0,
             registered: ptr::null_mut(),
             bitstream: ptr::null_mut(),
-            pinned: None,
+            pinned: Vec::new(),
             frame_idx: 0,
         };
         unsafe { enc.open()? };
@@ -371,21 +371,20 @@ impl Encoder {
         &self.cfg
     }
 
-    /// Pin the capture buffer so each upload is a DMA, not a staged copy. Optional: an unpinned
-    /// buffer works, slower. Call again for a new buffer; the old one is unpinned.
+    /// Pin a capture buffer so each upload from it is a DMA, not a staged copy. Optional: an
+    /// unpinned buffer works, slower. Each call pins one more buffer; all are unpinned on drop.
     pub fn pin_host(&mut self, p: *mut u8, len: usize) -> Result<(), String> {
         let _cur = Current::push(self.cu, self.ctx)?;
-        self.unpin();
         let r = unsafe { (self.cu.cuMemHostRegister_v2)(p as *mut c_void, len, 0) };
         if !ok(r) {
             return Err(format!("cuMemHostRegister: {}", self.cu.err(r)));
         }
-        self.pinned = Some((p as *mut c_void, len));
+        self.pinned.push((p as *mut c_void, len));
         Ok(())
     }
 
     fn unpin(&mut self) {
-        if let Some((p, _)) = self.pinned.take() {
+        for (p, _) in self.pinned.drain(..) {
             unsafe { (self.cu.cuMemHostUnregister)(p) };
         }
     }

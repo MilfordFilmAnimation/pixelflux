@@ -168,8 +168,9 @@ pub struct Capture {
     pub y: i16,
     pub w: u16,
     pub h: u16,
-    seg: u32,
-    map: *mut u8,
+    /// Shared segments: (server id, local mapping). More than one lets a caller grab the next
+    /// picture while the previous one is still being encoded.
+    bufs: Vec<(u32, *mut u8)>,
     size: usize,
     damage: u32,
     pending: bool,
@@ -188,6 +189,11 @@ fn xe<E: std::fmt::Display>(what: &'static str) -> impl Fn(E) -> String {
 
 impl Capture {
     pub fn new(d: &XDisplay, x: i32, y: i32, w: u32, h: u32) -> Result<Capture, String> {
+        Self::with_buffers(d, x, y, w, h, 1)
+    }
+
+    /// Like `new`, with `n` capture buffers (`grab_into(i)`, `data_of(i)`).
+    pub fn with_buffers(d: &XDisplay, x: i32, y: i32, w: u32, h: u32, n: usize) -> Result<Capture, String> {
         let (conn, screen) = connect(d)?;
         let setup_root = &conn.setup().roots[screen];
         let root = setup_root.root;
@@ -207,27 +213,40 @@ impl Capture {
         conn.xfixes_query_version(5, 0).map_err(xe("XFIXES"))?.reply().map_err(xe("XFIXES"))?;
 
         let size = w as usize * h as usize * 4;
-        let (map, fd) = unsafe {
-            let fd = libc::memfd_create(c"mf-seat-capture".as_ptr(), libc::MFD_CLOEXEC);
-            if fd < 0 {
-                return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+        let mut bufs: Vec<(u32, *mut u8)> = Vec::new();
+        let unmap_all = |bufs: &Vec<(u32, *mut u8)>| {
+            for &(_, m) in bufs {
+                unsafe { libc::munmap(m as *mut libc::c_void, size) };
             }
-            let fd = OwnedFd::from_raw_fd(fd);
-            use std::os::fd::AsRawFd;
-            if libc::ftruncate(fd.as_raw_fd(), size as libc::off_t) != 0 {
-                return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
-            }
-            let p = libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd.as_raw_fd(), 0);
-            if p == libc::MAP_FAILED {
-                return Err(format!("mmap: {}", std::io::Error::last_os_error()));
-            }
-            (p as *mut u8, fd)
         };
-        let seg = conn.generate_id().map_err(xe("generate_id"))?;
-        let r = conn.shm_attach_fd(seg, fd, false).map_err(xe("ShmAttachFd")).and_then(|c| c.check().map_err(xe("ShmAttachFd")));
-        if let Err(e) = r {
-            unsafe { libc::munmap(map as *mut libc::c_void, size) };
-            return Err(e);
+        for _ in 0..n.max(1) {
+            let (map, fd) = unsafe {
+                let fd = libc::memfd_create(c"mf-seat-capture".as_ptr(), libc::MFD_CLOEXEC);
+                if fd < 0 {
+                    unmap_all(&bufs);
+                    return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+                }
+                let fd = OwnedFd::from_raw_fd(fd);
+                use std::os::fd::AsRawFd;
+                if libc::ftruncate(fd.as_raw_fd(), size as libc::off_t) != 0 {
+                    unmap_all(&bufs);
+                    return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
+                }
+                let p = libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd.as_raw_fd(), 0);
+                if p == libc::MAP_FAILED {
+                    unmap_all(&bufs);
+                    return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+                }
+                (p as *mut u8, fd)
+            };
+            let seg = conn.generate_id().map_err(xe("generate_id"))?;
+            let r = conn.shm_attach_fd(seg, fd, false).map_err(xe("ShmAttachFd")).and_then(|c| c.check().map_err(xe("ShmAttachFd")));
+            if let Err(e) = r {
+                unsafe { libc::munmap(map as *mut libc::c_void, size) };
+                unmap_all(&bufs);
+                return Err(e);
+            }
+            bufs.push((seg, map));
         }
         let damage = conn.generate_id().map_err(xe("generate_id"))?;
         conn.damage_create(damage, root, ReportLevel::RAW_RECTANGLES).map_err(xe("DamageCreate"))?;
@@ -240,8 +259,7 @@ impl Capture {
             y: y as i16,
             w: w as u16,
             h: h as u16,
-            seg,
-            map,
+            bufs,
             size,
             damage,
             pending: true,
@@ -254,7 +272,13 @@ impl Capture {
     }
 
     pub fn data(&self) -> *mut u8 {
-        self.map
+        self.bufs[0].1
+    }
+    pub fn data_of(&self, i: usize) -> *mut u8 {
+        self.bufs[i].1
+    }
+    pub fn buffers(&self) -> usize {
+        self.bufs.len()
     }
     pub fn stride(&self) -> usize {
         self.w as usize * 4
@@ -302,11 +326,17 @@ impl Capture {
         self.pending = true;
     }
 
-    /// Copy the monitor into the shared buffer and draw the cursor into it.
+    /// Copy the monitor into the (first) shared buffer and draw the cursor into it.
     pub fn grab(&mut self) -> Result<(), String> {
+        self.grab_into(0)
+    }
+
+    /// Copy the monitor into shared buffer `i` and draw the cursor into it.
+    pub fn grab_into(&mut self, i: usize) -> Result<(), String> {
         self.pending = false;
+        let (seg, map) = self.bufs[i];
         self.conn
-            .shm_get_image(self.root, self.x, self.y, self.w, self.h, !0, ImageFormat::Z_PIXMAP.into(), self.seg, 0)
+            .shm_get_image(self.root, self.x, self.y, self.w, self.h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0)
             .map_err(xe("ShmGetImage"))?
             .reply()
             .map_err(xe("ShmGetImage"))?;
@@ -334,7 +364,7 @@ impl Capture {
             let ox = self.ptr.0 as i32 - c.xhot as i32 - self.x as i32;
             let oy = self.ptr.1 as i32 - c.yhot as i32 - self.y as i32;
             let (w, h) = (self.w as i32, self.h as i32);
-            let buf = unsafe { std::slice::from_raw_parts_mut(self.map as *mut u32, self.size / 4) };
+            let buf = unsafe { std::slice::from_raw_parts_mut(map as *mut u32, self.size / 4) };
             for cy in 0..c.h as i32 {
                 let y = oy + cy;
                 if y < 0 || y >= h {
@@ -373,9 +403,13 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.conn.damage_destroy(self.damage);
-        let _ = self.conn.shm_detach(self.seg);
+        for &(seg, _) in &self.bufs {
+            let _ = self.conn.shm_detach(seg);
+        }
         let _ = self.conn.flush();
-        unsafe { libc::munmap(self.map as *mut libc::c_void, self.size) };
+        for &(_, map) in &self.bufs {
+            unsafe { libc::munmap(map as *mut libc::c_void, self.size) };
+        }
     }
 }
 
