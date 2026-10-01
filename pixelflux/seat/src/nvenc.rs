@@ -55,6 +55,9 @@ pub struct EncoderConfig {
     /// fraction of a millisecond.
     pub two_pass: bool,
     pub slices: u32,
+    /// Frames kept as references (0: the driver's choice). More than one lets the caller
+    /// invalidate recent frames after a loss and have the next frame predicted from an older one.
+    pub ref_frames: u32,
 }
 
 impl Default for EncoderConfig {
@@ -69,6 +72,7 @@ impl Default for EncoderConfig {
             preset: 3,
             two_pass: true,
             slices: 4,
+            ref_frames: 0,
         }
     }
 }
@@ -76,6 +80,8 @@ impl Default for EncoderConfig {
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
+    /// The encoder's number for this frame (its input timestamp), for `invalidate`.
+    pub idx: u64,
     /// Copy into the encoder's surface plus the encode itself.
     pub encode_ms: f64,
 }
@@ -154,6 +160,7 @@ pub struct Encoder {
     bitstream: NV_ENC_OUTPUT_PTR,
     pinned: Vec<(*mut c_void, usize)>,
     frame_idx: u32,
+    can_invalidate: bool,
 }
 
 unsafe impl Send for Encoder {}
@@ -196,6 +203,7 @@ impl Encoder {
             bitstream: ptr::null_mut(),
             pinned: Vec::new(),
             frame_idx: 0,
+            can_invalidate: false,
         };
         unsafe { enc.open()? };
         Ok(enc)
@@ -231,6 +239,14 @@ impl Encoder {
             Codec::H264 => NV_ENC_CODEC_H264_GUID,
             Codec::Hevc => NV_ENC_CODEC_HEVC_GUID,
         };
+        if cfg.ref_frames > 1 {
+            let mut cp: NV_ENC_CAPS_PARAM = std::mem::zeroed();
+            cp.version = NV_ENC_CAPS_PARAM_VER;
+            cp.capsToQuery = NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION;
+            let mut val: i32 = 0;
+            let st = (fl.nvEncGetEncodeCaps.unwrap())(self.session, codec_guid, &mut cp, &mut val);
+            self.can_invalidate = st == NVENCSTATUS::NV_ENC_SUCCESS && val != 0;
+        }
         let preset = preset_guid(cfg.preset);
         let mut pc: NV_ENC_PRESET_CONFIG = std::mem::zeroed();
         pc.version = NV_ENC_PRESET_CONFIG_VER;
@@ -297,6 +313,10 @@ impl Encoder {
                 };
                 h.h264VUIParameters.bitstreamRestrictionFlag = 1;
                 set_vui(&mut h.h264VUIParameters);
+                if cfg.ref_frames > 1 {
+                    h.maxNumRefFrames = cfg.ref_frames;
+                    h.numRefL0 = NV_ENC_NUM_REF_FRAMES::NV_ENC_NUM_REF_FRAMES_1;
+                }
             }
             Codec::Hevc => {
                 let h = &mut c.encodeCodecConfig.hevcConfig;
@@ -310,6 +330,10 @@ impl Encoder {
                 h.set_repeatSPSPPS(1);
                 h.set_outputAUD(0);
                 set_vui(&mut h.hevcVUIParameters);
+                if cfg.ref_frames > 1 {
+                    h.maxNumRefFramesInDPB = cfg.ref_frames;
+                    h.numRefL0 = NV_ENC_NUM_REF_FRAMES::NV_ENC_NUM_REF_FRAMES_1;
+                }
             }
         }
         *self.config = c;
@@ -369,6 +393,25 @@ impl Encoder {
 
     pub fn config(&self) -> &EncoderConfig {
         &self.cfg
+    }
+
+    /// Whether `invalidate` works on this session (driver capability and `ref_frames` > 1).
+    pub fn can_invalidate(&self) -> bool {
+        self.can_invalidate
+    }
+
+    /// Stop predicting from frame `idx` (an `EncodedFrame::idx`) and from every frame built on it.
+    /// The next frame is predicted from an older reference, or is an intra frame if none is left.
+    pub fn invalidate(&mut self, idx: u64) -> Result<(), String> {
+        if !self.can_invalidate {
+            return Err("reference invalidation not available".into());
+        }
+        let _cur = Current::push(self.cu, self.ctx)?;
+        let st = unsafe { (self.fl.nvEncInvalidateRefFrames.unwrap())(self.session, idx) };
+        if st != NVENCSTATUS::NV_ENC_SUCCESS {
+            return Err(format!("nvEncInvalidateRefFrames {idx}: {st:?} {}", self.last_error()));
+        }
+        Ok(())
     }
 
     /// Pin a capture buffer so each upload from it is a DMA, not a staged copy. Optional: an
@@ -482,8 +525,9 @@ impl Encoder {
             pp.outputBitstream = self.bitstream;
             pp.bufferFmt = mp.mappedBufferFmt;
             pp.pictureStruct = NV_ENC_PIC_STRUCT::NV_ENC_PIC_STRUCT_FRAME;
+            let this_idx = self.frame_idx as u64;
             pp.frameIdx = self.frame_idx;
-            pp.inputTimeStamp = self.frame_idx as u64;
+            pp.inputTimeStamp = this_idx;
             if force_idr || self.frame_idx == 0 {
                 pp.encodePicFlags =
                     NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32 | NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32;
@@ -509,7 +553,7 @@ impl Encoder {
                 || lb.pictureType == NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_I;
             (fl.nvEncUnlockBitstream.unwrap())(self.session, self.bitstream);
             (fl.nvEncUnmapInputResource.unwrap())(self.session, mp.mappedResource);
-            Ok(EncodedFrame { data, keyframe, encode_ms: t0.elapsed().as_secs_f64() * 1000.0 })
+            Ok(EncodedFrame { data, keyframe, idx: this_idx, encode_ms: t0.elapsed().as_secs_f64() * 1000.0 })
         }
     }
 }
