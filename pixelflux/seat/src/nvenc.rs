@@ -422,22 +422,47 @@ impl Encoder {
 
     /// Encode one picture of packed BGRA rows (`pitch` bytes apart, the configured size).
     pub fn encode(&mut self, src: *const u8, pitch: usize, force_idr: bool) -> Result<EncodedFrame, String> {
+        self.encode_rects(src, pitch, None, force_idr)
+    }
+
+    /// Like `encode`, uploading only `rects` of the picture (the encoder keeps the rest of the
+    /// previous one). `None` uploads everything; an empty list encodes the previous picture again.
+    pub fn encode_rects(
+        &mut self,
+        src: *const u8,
+        pitch: usize,
+        rects: Option<&[crate::x11::Rect]>,
+        force_idr: bool,
+    ) -> Result<EncodedFrame, String> {
         let t0 = Instant::now();
         let _cur = Current::push(self.cu, self.ctx)?;
         let fl = self.fl;
         unsafe {
-            let mut cp: CUDA_MEMCPY2D = std::mem::zeroed();
-            cp.srcMemoryType = CUmemorytype::CU_MEMORYTYPE_HOST;
-            cp.srcHost = src as *const c_void;
-            cp.srcPitch = pitch;
-            cp.dstMemoryType = CUmemorytype::CU_MEMORYTYPE_DEVICE;
-            cp.dstDevice = self.dev_ptr;
-            cp.dstPitch = self.dev_pitch;
-            cp.WidthInBytes = self.cfg.width as usize * 4;
-            cp.Height = self.cfg.height as usize;
-            let r = (self.cu.cuMemcpy2D_v2)(&cp);
-            if !ok(r) {
-                return Err(format!("cuMemcpy2D: {}", self.cu.err(r)));
+            let full = [crate::x11::Rect { x: 0, y: 0, w: self.cfg.width as u16, h: self.cfg.height as u16 }];
+            let rects = if self.frame_idx == 0 { &full[..] } else { rects.unwrap_or(&full) };
+            for r in rects {
+                let w = (r.w as u32).min(self.cfg.width.saturating_sub(r.x as u32));
+                let h = (r.h as u32).min(self.cfg.height.saturating_sub(r.y as u32));
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let mut cp: CUDA_MEMCPY2D = std::mem::zeroed();
+                cp.srcMemoryType = CUmemorytype::CU_MEMORYTYPE_HOST;
+                cp.srcHost = src as *const c_void;
+                cp.srcPitch = pitch;
+                cp.srcXInBytes = r.x as usize * 4;
+                cp.srcY = r.y as usize;
+                cp.dstMemoryType = CUmemorytype::CU_MEMORYTYPE_DEVICE;
+                cp.dstDevice = self.dev_ptr;
+                cp.dstPitch = self.dev_pitch;
+                cp.dstXInBytes = r.x as usize * 4;
+                cp.dstY = r.y as usize;
+                cp.WidthInBytes = w as usize * 4;
+                cp.Height = h as usize;
+                let res = (self.cu.cuMemcpy2D_v2)(&cp);
+                if !ok(res) {
+                    return Err(format!("cuMemcpy2D: {}", self.cu.err(res)));
+                }
             }
 
             let mut mp: NV_ENC_MAP_INPUT_RESOURCE = std::mem::zeroed();

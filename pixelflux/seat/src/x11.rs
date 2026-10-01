@@ -153,6 +153,44 @@ pub fn monitors(conn: &RustConnection, screen: usize) -> Result<Vec<Monitor>, St
     Ok(out)
 }
 
+/// A rectangle in monitor-local pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// What of a buffer (or of the encoder's copy) no longer matches the screen.
+#[derive(Clone, Debug)]
+enum Dirty {
+    All,
+    Rects(Vec<Rect>),
+}
+
+impl Dirty {
+    fn add(&mut self, r: Rect, mw: u16, mh: u16) {
+        let Dirty::Rects(v) = self else { return };
+        v.push(r);
+        if v.len() > 16 {
+            let (mut x0, mut y0, mut x1, mut y1) = (u16::MAX, u16::MAX, 0u16, 0u16);
+            for r in v.iter() {
+                x0 = x0.min(r.x);
+                y0 = y0.min(r.y);
+                x1 = x1.max(r.x + r.w);
+                y1 = y1.max(r.y + r.h);
+            }
+            v.clear();
+            v.push(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+        }
+        let area: u64 = v.iter().map(|r| r.w as u64 * r.h as u64).sum();
+        if area * 10 > mw as u64 * mh as u64 * 6 {
+            *self = Dirty::All;
+        }
+    }
+}
+
 struct CursorImg {
     w: u16,
     h: u16,
@@ -179,6 +217,16 @@ pub struct Capture {
     ptr: (i16, i16),
     drawn_ptr: Option<(i16, i16)>,
     pub draw_cursor: bool,
+    /// Per buffer: what must be grabbed again before it shows the screen.
+    dirty: Vec<Dirty>,
+    /// What changed since the last grab into any buffer: the encoder's copy must take this.
+    changed: Dirty,
+    /// Per buffer: where the cursor was drawn into it.
+    cursor_in: Vec<Option<Rect>>,
+    /// Where the cursor was in the last grabbed picture.
+    last_cursor: Option<Rect>,
+    /// Segment for partial grabs: (server id, local mapping).
+    staging: (u32, *mut u8),
 }
 
 unsafe impl Send for Capture {}
@@ -219,7 +267,7 @@ impl Capture {
                 unsafe { libc::munmap(m as *mut libc::c_void, size) };
             }
         };
-        for _ in 0..n.max(1) {
+        for _ in 0..n.max(1) + 1 {
             let (map, fd) = unsafe {
                 let fd = libc::memfd_create(c"mf-seat-capture".as_ptr(), libc::MFD_CLOEXEC);
                 if fd < 0 {
@@ -252,6 +300,8 @@ impl Capture {
         conn.damage_create(damage, root, ReportLevel::RAW_RECTANGLES).map_err(xe("DamageCreate"))?;
         conn.xfixes_select_cursor_input(root, CursorNotifyMask::DISPLAY_CURSOR).map_err(xe("XFixesSelectCursorInput"))?;
         conn.flush().map_err(xe("flush"))?;
+        let staging = bufs.pop().expect("staging segment");
+        let nbuf = bufs.len();
         Ok(Capture {
             conn,
             root,
@@ -268,6 +318,11 @@ impl Capture {
             ptr: (i16::MIN, i16::MIN),
             drawn_ptr: None,
             draw_cursor: true,
+            dirty: vec![Dirty::All; nbuf],
+            changed: Dirty::All,
+            cursor_in: vec![None; nbuf],
+            last_cursor: None,
+            staging,
         })
     }
 
@@ -302,8 +357,13 @@ impl Capture {
         while let Some(ev) = self.conn.poll_for_event().map_err(xe("X connection"))? {
             match ev {
                 Event::DamageNotify(d) => {
-                    if !self.pending && self.intersects(d.area.x, d.area.y, d.area.width, d.area.height) {
+                    if let Some(r) = self.local(d.area.x, d.area.y, d.area.width, d.area.height) {
                         self.pending = true;
+                        let (w, h) = (self.w, self.h);
+                        for b in self.dirty.iter_mut() {
+                            b.add(r, w, h);
+                        }
+                        self.changed.add(r, w, h);
                     }
                 }
                 Event::XfixesCursorNotify(_) => self.cursor_dirty = true,
@@ -321,9 +381,82 @@ impl Capture {
         Ok(self.pending)
     }
 
-    /// Ask for a new picture regardless of damage (key frame request).
+    /// Ask for a new picture regardless of damage (key frame request): the next grabs are whole.
     pub fn invalidate(&mut self) {
         self.pending = true;
+        for b in self.dirty.iter_mut() {
+            *b = Dirty::All;
+        }
+        self.changed = Dirty::All;
+    }
+
+    /// A rectangle in root coordinates, clipped to this monitor, in monitor-local pixels.
+    fn local(&self, x: i16, y: i16, w: u16, h: u16) -> Option<Rect> {
+        let (mx, my, mw, mh) = (self.x as i32, self.y as i32, self.w as i32, self.h as i32);
+        let x0 = (x as i32 - mx).max(0);
+        let y0 = (y as i32 - my).max(0);
+        let x1 = (x as i32 + w as i32 - mx).min(mw);
+        let y1 = (y as i32 + h as i32 - my).min(mh);
+        (x1 > x0 && y1 > y0).then(|| Rect { x: x0 as u16, y: y0 as u16, w: (x1 - x0) as u16, h: (y1 - y0) as u16 })
+    }
+
+    /// Grab only what changed into buffer `i` and draw the cursor. Returns what changed since the
+    /// previous grab into any buffer (what an encoder holding the previous picture must take), or
+    /// None when that is the whole monitor.
+    pub fn grab_changed(&mut self, i: usize) -> Result<Option<Vec<Rect>>, String> {
+        self.pending = false;
+        let mut need = std::mem::replace(&mut self.dirty[i], Dirty::Rects(Vec::new()));
+        if let Some(c) = self.cursor_in[i] {
+            need.add(c, self.w, self.h);
+        }
+        match need {
+            Dirty::All => self.grab_whole(i)?,
+            Dirty::Rects(v) => {
+                for r in v {
+                    self.grab_rect(i, r)?;
+                }
+            }
+        }
+        let cr = self.draw_cursor_into(i)?;
+        self.cursor_in[i] = cr;
+        let mut up = std::mem::replace(&mut self.changed, Dirty::Rects(Vec::new()));
+        for c in [self.last_cursor, cr].into_iter().flatten() {
+            up.add(c, self.w, self.h);
+        }
+        self.last_cursor = cr;
+        Ok(match up {
+            Dirty::All => None,
+            Dirty::Rects(v) => Some(v),
+        })
+    }
+
+    fn grab_whole(&mut self, i: usize) -> Result<(), String> {
+        let (seg, _) = self.bufs[i];
+        self.conn
+            .shm_get_image(self.root, self.x, self.y, self.w, self.h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0)
+            .map_err(xe("ShmGetImage"))?
+            .reply()
+            .map_err(xe("ShmGetImage"))?;
+        self.dirty[i] = Dirty::Rects(Vec::new());
+        Ok(())
+    }
+
+    fn grab_rect(&mut self, i: usize, r: Rect) -> Result<(), String> {
+        let (sseg, smap) = self.staging;
+        self.conn
+            .shm_get_image(self.root, self.x + r.x as i16, self.y + r.y as i16, r.w, r.h, !0, ImageFormat::Z_PIXMAP.into(), sseg, 0)
+            .map_err(xe("ShmGetImage"))?
+            .reply()
+            .map_err(xe("ShmGetImage"))?;
+        let stride = self.w as usize * 4;
+        let row = r.w as usize * 4;
+        let dst = self.bufs[i].1;
+        for y in 0..r.h as usize {
+            unsafe {
+                std::ptr::copy_nonoverlapping(smap.add(y * row), dst.add((r.y as usize + y) * stride + r.x as usize * 4), row);
+            }
+        }
+        Ok(())
     }
 
     /// Copy the monitor into the (first) shared buffer and draw the cursor into it.
@@ -331,17 +464,21 @@ impl Capture {
         self.grab_into(0)
     }
 
-    /// Copy the monitor into shared buffer `i` and draw the cursor into it.
+    /// Copy the whole monitor into shared buffer `i` and draw the cursor into it.
     pub fn grab_into(&mut self, i: usize) -> Result<(), String> {
         self.pending = false;
-        let (seg, map) = self.bufs[i];
-        self.conn
-            .shm_get_image(self.root, self.x, self.y, self.w, self.h, !0, ImageFormat::Z_PIXMAP.into(), seg, 0)
-            .map_err(xe("ShmGetImage"))?
-            .reply()
-            .map_err(xe("ShmGetImage"))?;
+        self.grab_whole(i)?;
+        let cr = self.draw_cursor_into(i)?;
+        self.cursor_in[i] = cr;
+        self.last_cursor = cr;
+        self.changed = Dirty::Rects(Vec::new());
+        Ok(())
+    }
+
+    /// Draw the cursor into buffer `i`; returns where (monitor-local), if it is on this monitor.
+    fn draw_cursor_into(&mut self, i: usize) -> Result<Option<Rect>, String> {
         if !self.draw_cursor {
-            return Ok(());
+            return Ok(None);
         }
         if self.cursor_dirty {
             self.cursor_dirty = false;
@@ -360,54 +497,58 @@ impl Capture {
             }
         }
         self.drawn_ptr = Some(self.ptr);
-        if let Some(c) = &self.cursor {
-            let ox = self.ptr.0 as i32 - c.xhot as i32 - self.x as i32;
-            let oy = self.ptr.1 as i32 - c.yhot as i32 - self.y as i32;
-            let (w, h) = (self.w as i32, self.h as i32);
-            let buf = unsafe { std::slice::from_raw_parts_mut(map as *mut u32, self.size / 4) };
-            for cy in 0..c.h as i32 {
-                let y = oy + cy;
-                if y < 0 || y >= h {
+        let Some(c) = &self.cursor else { return Ok(None) };
+        let ox = self.ptr.0 as i32 - c.xhot as i32 - self.x as i32;
+        let oy = self.ptr.1 as i32 - c.yhot as i32 - self.y as i32;
+        let (w, h) = (self.w as i32, self.h as i32);
+        let map = self.bufs[i].1;
+        let buf = unsafe { std::slice::from_raw_parts_mut(map as *mut u32, self.size / 4) };
+        for cy in 0..c.h as i32 {
+            let y = oy + cy;
+            if y < 0 || y >= h {
+                continue;
+            }
+            for cx in 0..c.w as i32 {
+                let x = ox + cx;
+                if x < 0 || x >= w {
                     continue;
                 }
-                for cx in 0..c.w as i32 {
-                    let x = ox + cx;
-                    if x < 0 || x >= w {
-                        continue;
-                    }
-                    let s = c.pixels[(cy * c.w as i32 + cx) as usize];
-                    let a = s >> 24;
-                    if a == 0 {
-                        continue;
-                    }
-                    let d = &mut buf[(y * w + x) as usize];
-                    if a == 255 {
-                        *d = s | 0xFF00_0000;
-                        continue;
-                    }
-                    // Premultiplied source over destination.
-                    let inv = 255 - a;
-                    let ch = |sh: u32| -> u32 {
-                        let sc = (s >> sh) & 0xFF;
-                        let dc = (*d >> sh) & 0xFF;
-                        ((sc + (dc * inv + 127) / 255).min(255)) << sh
-                    };
-                    *d = 0xFF00_0000 | ch(16) | ch(8) | ch(0);
+                let s = c.pixels[(cy * c.w as i32 + cx) as usize];
+                let a = s >> 24;
+                if a == 0 {
+                    continue;
                 }
+                let d = &mut buf[(y * w + x) as usize];
+                if a == 255 {
+                    *d = s | 0xFF00_0000;
+                    continue;
+                }
+                // Premultiplied source over destination.
+                let inv = 255 - a;
+                let ch = |sh: u32| -> u32 {
+                    let sc = (s >> sh) & 0xFF;
+                    let dc = (*d >> sh) & 0xFF;
+                    ((sc + (dc * inv + 127) / 255).min(255)) << sh
+                };
+                *d = 0xFF00_0000 | ch(16) | ch(8) | ch(0);
             }
         }
-        Ok(())
+        let x0 = ox.max(0);
+        let y0 = oy.max(0);
+        let x1 = (ox + c.w as i32).min(w);
+        let y1 = (oy + c.h as i32).min(h);
+        Ok((x1 > x0 && y1 > y0).then(|| Rect { x: x0 as u16, y: y0 as u16, w: (x1 - x0) as u16, h: (y1 - y0) as u16 }))
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.conn.damage_destroy(self.damage);
-        for &(seg, _) in &self.bufs {
+        for &(seg, _) in self.bufs.iter().chain(std::iter::once(&self.staging)) {
             let _ = self.conn.shm_detach(seg);
         }
         let _ = self.conn.flush();
-        for &(_, map) in &self.bufs {
+        for &(_, map) in self.bufs.iter().chain(std::iter::once(&self.staging)) {
             unsafe { libc::munmap(map as *mut libc::c_void, self.size) };
         }
     }

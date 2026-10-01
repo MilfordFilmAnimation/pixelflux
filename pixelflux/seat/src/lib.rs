@@ -23,4 +23,4 @@ pub mod nvenc;
 pub mod x11;
 
 pub use nvenc::{Codec, Encoder, EncoderConfig, EncodedFrame, H264Profile};
-pub use x11::{Capture, Monitor, XDisplay};
+pub use x11::{Capture, Monitor, Rect, XDisplay};
