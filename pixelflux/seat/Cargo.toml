@@ -1,0 +1,17 @@
+[package]
+name = "pixelflux-seat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MPL-2.0"
+description = "Milford's library target of pixelflux: X11 XShm capture of one monitor and the NVIDIA encoder (NVENC) with pixelflux's low-latency settings, as a plain Rust library: no Python, no Wayland, no software codecs."
+publish = false
+
+[lib]
+name = "pixelflux_seat"
+
+[dependencies]
+nvcodec-sys = { path = "../nvcodec-sys", features = ["cuda"] }
+x11rb = { version = "0.14", features = ["shm", "xfixes", "randr", "damage"] }
+libc = "0.2"
+libloading = "0.9"
